@@ -310,7 +310,7 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
     for i in order {
         let name = app.library_classes[i].name.0.as_str().to_string();
         let parent = parents.get(&name).filter(|p| mailers.contains(*p)).cloned();
-        let decided = (|| -> Result<Option<Vec<crate::dialect::MethodDef>>, String> {
+        let decided = (|| -> Result<Option<Generated>, String> {
             if parent.as_ref().is_some_and(|p| refused.contains(p)) {
                 return Err("its parent mailer's callbacks aren't lowered".into());
             }
@@ -324,14 +324,20 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
             if chain.is_empty() && actions(&app.library_classes[i]).is_empty() {
                 return Ok(None);
             }
-            let methods = generated_methods(app, i, &chain, &parsed, &parents, &mailers, &wrapped, &generated)?;
-            Ok(Some(methods))
+            let made = generated_methods(app, i, &chain, &parsed, &parents, &mailers, &wrapped, &generated)?;
+            Ok(Some(made))
         })();
         match decided {
             Ok(None) => {}
-            Ok(Some(methods)) => {
+            Ok(Some(Generated { methods, own: actions, unwrapped })) => {
+                for (span, action) in unwrapped {
+                    gaps.push((
+                        span,
+                        format!("mailer action `{action}`"),
+                        "an action with keyword, rest or block parameters gets no callback chain".into(),
+                    ));
+                }
                 let lc = &mut app.library_classes[i];
-                let actions: Vec<String> = actions(lc);
                 wrapped.insert(name.clone(), actions.iter().cloned().collect());
                 generated.extend(actions.iter().map(|a| format!("{ACTION_PREFIX}{a}")));
                 generated.extend(
@@ -464,6 +470,38 @@ fn defined(app: &App, i: usize, parents: &HashMap<String, String>, mailers: &BTr
     out
 }
 
+/// What [`generated_methods`] makes for a class: the methods, the class's
+/// own actions given a wrapper (whose bodies `expand` renames), and the
+/// actions it can't wrap, each reported.
+struct Generated {
+    methods: Vec<crate::dialect::MethodDef>,
+    own: Vec<String>,
+    unwrapped: Vec<(Span, String)>,
+}
+
+/// The parameter list of a wrapper for `m`, and the call that forwards
+/// to its body, or None for a keyword, rest, forwarding or block
+/// parameter. A default is the source's own text, evaluated by the
+/// wrapper as the action would.
+fn wrapper_params(app: &App, m: &crate::dialect::MethodDef) -> Option<(String, String)> {
+    if m.block_param.is_some() || m.params.iter().any(|p| p.keyword || p.forwarding || p.rest) {
+        return None;
+    }
+    let mut formals = Vec::new();
+    for p in &m.params {
+        match &p.default {
+            None => formals.push(p.name.as_str().to_string()),
+            Some(default) => {
+                let file = (default.span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i))?;
+                let text = file.text.get(default.span.start as usize..default.span.end as usize)?;
+                formals.push(format!("{} = {text}", p.name.as_str()));
+            }
+        }
+    }
+    let args = m.params.iter().map(|p| p.name.as_str().to_string()).collect::<Vec<_>>().join(", ");
+    Some((formals.join(", "), args))
+}
+
 fn generated_methods(
     app: &App,
     i: usize,
@@ -473,7 +511,7 @@ fn generated_methods(
     mailers: &BTreeSet<String>,
     wrapped: &HashMap<String, BTreeSet<String>>,
     generated: &BTreeSet<String>,
-) -> Result<Vec<crate::dialect::MethodDef>, String> {
+) -> Result<Generated, String> {
     let lc = &app.library_classes[i];
     let defined = defined(app, i, parents, mailers);
     // The ancestors' actions with a chain: their bodies now carry the
@@ -507,16 +545,56 @@ fn generated_methods(
         }
     };
     let mut text = format!("class {}\n", lc.name.0.as_str());
+    let mut own = Vec::new();
+    let mut unwrapped = Vec::new();
+    // The class's own actions, then those it inherits from a mailer
+    // ancestor and doesn't redefine: Rails runs the receiving class's
+    // chain for an inherited action, so it gets this class's wrapper,
+    // around the ancestor's body.
+    let own_methods: BTreeSet<String> =
+        lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()).collect();
+    let mut targets: Vec<(String, &crate::dialect::MethodDef, bool)> = Vec::new();
     for action in actions(lc) {
         let m = lc
             .methods
             .iter()
             .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == action)
             .expect("an action is a method");
-        if m.block_param.is_some() || m.params.iter().any(|p| p.keyword || p.forwarding || p.rest || p.default.is_some()) {
-            return Err(format!("the action `{action}` takes other than required positional parameters"));
+        targets.push((action, m, true));
+    }
+    for action in &ancestors_wrapped {
+        if own_methods.contains(action) {
+            continue;
         }
-        let args = m.params.iter().map(|p| p.name.as_str().to_string()).collect::<Vec<_>>().join(", ");
+        let body = format!("{ACTION_PREFIX}{action}");
+        let mut cur = parents.get(lc.name.0.as_str()).filter(|p| mailers.contains(*p)).cloned();
+        let mut found = None;
+        while let Some(p) = cur {
+            if let Some(m) = app
+                .library_classes
+                .iter()
+                .find(|c| c.name.0.as_str() == p)
+                .and_then(|c| c.methods.iter().find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == body))
+            {
+                found = Some(m);
+                break;
+            }
+            cur = parents.get(&p).filter(|q| mailers.contains(*q) && **q != p).cloned();
+        }
+        if let Some(m) = found {
+            targets.push((action.clone(), m, false));
+        }
+    }
+    for (action, m, is_own) in targets {
+        let Some((formals, args)) = wrapper_params(app, m) else {
+            // Its callbacks don't run, and it isn't wrapped: the rest of
+            // the class's actions still are.
+            unwrapped.push((m.name_span, action.clone()));
+            continue;
+        };
+        if is_own {
+            own.push(action.clone());
+        }
         let applies: Vec<&Callback> = chain.iter().filter(|c| c.applies_to(&action)).collect();
         let mut resolved = Vec::new();
         for c in applies {
@@ -536,7 +614,7 @@ fn generated_methods(
         // the next action on this mailer (two through one `with`) runs its
         // own chain on a fresh mail.
         text.push_str(&format!(
-            "  def {action}({args})\n    return {ACTION_PREFIX}{action}({args}) unless __start_action(\"{action}\")\n    begin\n{body}      message\n    ensure\n      __end_action\n    end\n  end\n\n"
+            "  def {action}({formals})\n    return {ACTION_PREFIX}{action}({args}) unless __start_action(\"{action}\")\n    begin\n{body}      message\n    ensure\n      __end_action\n    end\n  end\n\n"
         ));
     }
     // This class's own block callbacks and lambda conditions.
@@ -568,7 +646,7 @@ fn generated_methods(
         }
         m.enclosing_class = Some(lc.name.0.clone());
     }
-    Ok(methods)
+    Ok(Generated { methods, own, unwrapped })
 }
 
 /// The chain for one action, from `resolved[0]` inward to the action.

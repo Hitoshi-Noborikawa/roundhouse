@@ -278,3 +278,66 @@ puts "plain passed"
     run.assert_passes();
     assert!(run.stdout.contains("plain passed"), "{}", run.stdout);
 }
+
+// Review of #1383 / #1392 (oracle `test_app/review3_oracle.rb`): an action
+// with a default parameter gets its chain, so two actions through one
+// `with` build each mail fresh; and an action a subclass inherits runs
+// the subclass's chain.
+const DEFAULTS_MAILER: &str = "class DefaultsMailer < ApplicationMailer\n  def hello(name = \"you\")\n    headers(\"X-Hello\" => name)\n    mail(to: \"a@example.com\", subject: \"Hello \" + name, body: \"h\")\n  end\n\n  def bye\n    mail(to: \"a@example.com\", subject: \"Bye\", body: \"b\")\n  end\nend\n";
+const DEFAULTS_ENTRY: &str = "class DefaultsEntry\n  def self.with(params)\n    DefaultsMailer.with(params)\n  end\nend\n";
+const PARENT_ACTIONS_MAILER: &str = "class ParentActionsMailer < ApplicationMailer\n  def shared\n    CallbackLog.add(\"shared\")\n    mail(to: \"a@example.com\", subject: \"Shared\", body: \"s\")\n  end\nend\n";
+const CHILD_ACTIONS_MAILER: &str = "class ChildActionsMailer < ParentActionsMailer\n  before_action :child_before, only: :shared\n\n  private\n\n  def child_before\n    CallbackLog.add(\"child_before\")\n  end\nend\n";
+
+#[test]
+fn an_action_with_a_default_parameter_gets_its_chain_on_ruby() {
+    let run = app()
+        .write("app/mailers/defaults_mailer.rb", DEFAULTS_MAILER)
+        .write("app/models/defaults_entry.rb", DEFAULTS_ENTRY)
+        .run_ruby(r##"
+CallbackLog.clear
+m = DefaultsMailer.hello.deliver_now
+got = [m.subject, CallbackLog.entries]
+raise "a default parameter: #{got.inspect}" unless got == ["Hello you", ["base_before", "stamp"]]
+mailer = DefaultsEntry.with(k: 1)
+mailer.hello("x").deliver_now
+second = mailer.bye.deliver_now
+got = [second.subject, second["X-Hello"]]
+raise "two actions through one with: #{got.inspect}" unless got == ["Bye", nil]
+puts "defaults passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("defaults passed"), "{}", run.stdout);
+}
+
+#[test]
+fn an_inherited_action_runs_the_subclass_chain_on_ruby() {
+    let run = app()
+        .write("app/mailers/parent_actions_mailer.rb", PARENT_ACTIONS_MAILER)
+        .write("app/mailers/child_actions_mailer.rb", CHILD_ACTIONS_MAILER)
+        .run_ruby(r##"
+CallbackLog.clear
+ChildActionsMailer.shared.deliver_now
+child = CallbackLog.entries
+CallbackLog.clear
+ParentActionsMailer.shared.deliver_now
+parent = CallbackLog.entries
+got = [child, parent]
+raise "inherited action: #{got.inspect}" unless got == [["base_before", "child_before", "shared", "stamp"], ["base_before", "shared", "stamp"]]
+puts "inherited passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("inherited passed"), "{}", run.stdout);
+}
+
+// An action with a keyword parameter can't take a positional wrapper: it
+// alone is reported, and the mailer's other actions keep their chains.
+#[test]
+fn a_keyword_action_is_reported_alone() {
+    let mut files = app_files();
+    let kw = "class KeywordMailer < ApplicationMailer\n  def plain\n    mail(to: \"a@example.com\", subject: \"p\", body: \"p\")\n  end\n\n  def keyed(name:)\n    mail(to: \"a@example.com\", subject: name, body: \"k\")\n  end\nend\n";
+    files.push(("app/mailers/keyword_mailer.rb", kw));
+    let warnings = lowered_warnings(&files, BuildTarget::Ruby);
+    assert!(warnings.iter().any(|w| w.contains("mailer action `keyed`") && w.contains("gets no callback chain")), "{warnings:#?}");
+    assert!(!warnings.iter().any(|w| w.contains("`plain`")), "{warnings:#?}");
+    assert!(warnings.iter().all(|w| !w.contains("mailer before_action")), "{warnings:#?}");
+}
