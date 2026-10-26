@@ -209,3 +209,27 @@ fn a_string_message_is_kept_verbatim_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("verbatim rows passed"), "{}", run.stdout);
 }
+
+// A computed String message with a run-time attribute (`validate_each`'s
+// `errors.add(attribute, "saw " + value.inspect)`): evaluated once, and
+// kept as written (`cr_oracle_verbatim.rb`, "a computed String").
+const COMPUTED_CHECKER: &str = "class ComputedChecker\n  def self.saw(record, attribute, value)\n    record.errors.add(attribute, \"saw \" + value.to_s)\n  end\nend\n";
+
+const COMPUTED_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+a = Article.new(title: "t", body: "A body long enough to validate.")
+ComputedChecker.saw(a, :body, "%{count}")
+check("a computed String, verbatim", a.errors, ["Body saw %{count}"])
+puts "computed rows passed"
+"##;
+
+#[test]
+fn a_computed_string_message_with_a_runtime_attribute_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("app/models/computed_checker.rb", COMPUTED_CHECKER)
+        .run_ruby(COMPUTED_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("computed rows passed"), "{}", run.stdout);
+}

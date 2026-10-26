@@ -24,6 +24,7 @@ mod graphql_ruby;
 mod guarded_include;
 mod lock_versions;
 pub(crate) mod validates_with;
+pub(crate) mod each_validator;
 pub(crate) mod class_attribute;
 mod class_configuration;
 mod dry_initializer;

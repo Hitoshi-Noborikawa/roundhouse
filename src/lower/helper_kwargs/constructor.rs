@@ -682,9 +682,11 @@ fn has_keyword_arguments(args: &[Expr]) -> bool {
 /// The analyzer's constant resolution answered this receiver: the
 /// reference resolved, by Ruby's lexical lookup, to the class its type
 /// names (`analyze::body`, `RESOLVED_CLASS_REF`). A type that only fell
-/// back to the written name carries no such answer.
+/// back to the written name carries no such answer. A root-qualified
+/// `::Name` needs none: Ruby looks it up at the top level only.
 fn resolved_class_ref(recv: &Expr) -> bool {
     recv.decisions & crate::expr::RESOLVED_CLASS_REF != 0
+        || matches!(&*recv.node, ExprNode::Const { path } if path.len() > 1 && path[0].as_str().is_empty())
 }
 
 fn constructor_refusal_reason(

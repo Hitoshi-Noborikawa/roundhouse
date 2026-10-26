@@ -321,6 +321,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         return super::roda_app::ingest_roda_app_with_vfs(vfs, dir);
     }
     super::sources::reset();
+    super::each_validator::reset();
     let _source_root = super::sources::set_root(dir);
     let config = roundhouse_config(vfs, dir)?;
     let extensions = project_extensions(vfs, dir, &config)?;
@@ -2424,6 +2425,9 @@ end
     // (`refuse_numericality_allow_on_untyped`, `session::analyze_and_lower_for`).
     gap_acceptance_on_undeclared(&mut app);
     gap_uniqueness_on_polymorphic_attribute(&mut app);
+    // After every model and library class: a custom `validates` key is
+    // kept only when it names an app `EachValidator`.
+    super::each_validator::resolve(&mut app);
     app.const_resolver = const_resolver;
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
@@ -2749,7 +2753,7 @@ fn refuse_validates_calls(
 
 /// `report_validates_gaps` after ingest: the warnings go back to the
 /// caller, which reports them with its own diagnostics.
-fn validates_gap_diagnostics(
+pub(super) fn validates_gap_diagnostics(
     app: &App,
     target: &str,
     gaps: Vec<(crate::span::Span, String)>,
@@ -2766,7 +2770,7 @@ fn validates_gap_diagnostics(
         .collect()
 }
 
-fn report_validates_gaps(app: &App, gaps: Vec<(crate::span::Span, String)>, detail: &str) {
+pub(super) fn report_validates_gaps(app: &App, gaps: Vec<(crate::span::Span, String)>, detail: &str) {
     for (span, construct) in gaps {
         let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
         let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(span, None, construct, detail);
