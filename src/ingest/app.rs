@@ -9911,6 +9911,32 @@ fn config_path_of(node: &ruby_prism::Node<'_>, depth: usize) -> Option<Vec<Strin
     Some(segments)
 }
 
+/// A Symbol source as Rails' `ContentSecurityPolicy::MAPPINGS` writes it
+/// (actionpack 8.1.4).
+pub(crate) fn csp_source_mapping(symbol: &str) -> Option<&'static str> {
+    Some(match symbol {
+        "self" => "'self'",
+        "unsafe_eval" => "'unsafe-eval'",
+        "wasm_unsafe_eval" => "'wasm-unsafe-eval'",
+        "unsafe_hashes" => "'unsafe-hashes'",
+        "unsafe_inline" => "'unsafe-inline'",
+        "none" => "'none'",
+        "http" => "http:",
+        "https" => "https:",
+        "data" => "data:",
+        "mediastream" => "mediastream:",
+        "allow_duplicates" => "'allow-duplicates'",
+        "blob" => "blob:",
+        "filesystem" => "filesystem:",
+        "report_sample" => "'report-sample'",
+        "script" => "'script'",
+        "strict_dynamic" => "'strict-dynamic'",
+        "ws" => "ws:",
+        "wss" => "wss:",
+        _ => return None,
+    })
+}
+
 /// `config.content_security_policy do |policy| policy.script_src :self end`,
 /// including the `unless ENV["DISABLE_CONTENT_SECURITY_POLICY"]` guard
 /// when the file has one. `None` when the block names no literal source.
@@ -9939,17 +9965,12 @@ pub(super) fn content_security_policy_method(source: &str) -> Option<String> {
                 continue;
             }
             let quoted = if let Some(sym) = arg.strip_prefix(':') {
-                match sym {
-                    "self" => "'self'".to_string(),
-                    "none" => "'none'".to_string(),
-                    "unsafe_inline" => "'unsafe-inline'".to_string(),
-                    "unsafe_eval" => "'unsafe-eval'".to_string(),
-                    "https" => "https:".to_string(),
-                    "http" => "http:".to_string(),
+                match csp_source_mapping(sym) {
+                    Some(source) => source.to_string(),
                     // An unknown symbol is not a source we can quote.
                     // Dropping it keeps the directive honest; inventing
                     // the bare word would ship a policy the app did not write.
-                    _ => continue,
+                    None => continue,
                 }
             } else if arg.len() >= 2
                 && ((arg.starts_with('"') && arg.ends_with('"'))
@@ -11825,5 +11846,21 @@ mod filter_parameters_tests {
             extract_filter_parameters(src),
             vec![FilterParametersLine::Computed { replace: false }, FilterParametersLine::Computed { replace: false }]
         );
+    }
+}
+
+#[cfg(test)]
+mod csp_mapping_tests {
+    use super::content_security_policy_method;
+
+    #[test]
+    fn every_rails_source_symbol_is_mapped() {
+        let method = content_security_policy_method(
+            "Rails.application.configure do\n  config.content_security_policy do |policy|\n    policy.img_src :self, :data, :blob\n    policy.connect_src :self, :wss\n    policy.script_src :self, :strict_dynamic\n  end\nend\n",
+        )
+        .expect("a policy");
+        assert!(method.contains(r#"policy.set_directive("img-src", ["'self'", "data:", "blob:"])"#), "{method}");
+        assert!(method.contains(r#"policy.set_directive("connect-src", ["'self'", "wss:"])"#), "{method}");
+        assert!(method.contains(r#"policy.set_directive("script-src", ["'self'", "'strict-dynamic'"])"#), "{method}");
     }
 }
