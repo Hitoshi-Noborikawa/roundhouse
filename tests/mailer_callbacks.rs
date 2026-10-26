@@ -341,3 +341,33 @@ fn a_keyword_action_is_reported_alone() {
     assert!(!warnings.iter().any(|w| w.contains("`plain`")), "{warnings:#?}");
     assert!(warnings.iter().all(|w| !w.contains("mailer before_action")), "{warnings:#?}");
 }
+
+// Review of #1383/#1394 (oracle `test_app/review4_oracle.rb`): an action's
+// formals named like what the wrapper calls (`message`, a callback) don't
+// shadow it, and a callback naming an action that takes a keyword (which
+// gets no wrapper) calls it as written.
+const SHADOW_MAILER: &str = "class ShadowMailer < ApplicationMailer\n  before_action :audit\n\n  def notify(message, stamp)\n    mail(to: \"a@example.com\", subject: message + \" \" + stamp, body: \"n\")\n  end\n\n  def audit(level: 1)\n    CallbackLog.add(\"audit \" + level.to_s)\n  end\nend\n";
+
+#[test]
+fn formals_and_unwrapped_actions_dont_derail_the_chain_on_ruby() {
+    let run = app().write("app/mailers/shadow_mailer.rb", SHADOW_MAILER).run_ruby(r##"
+CallbackLog.clear
+m = ShadowMailer.notify("hi", "there").deliver_now
+got = [m.class.name, m.subject, m["X-Stamp"].value, CallbackLog.entries]
+raise "formals named message and stamp: #{got.inspect}" unless got == ["ActionMailer::Message", "hi there", "yes", ["base_before", "audit 1", "stamp"]]
+puts "shadow passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("shadow passed"), "{}", run.stdout);
+}
+
+// An action with a destructured formal can't take a positional wrapper:
+// it alone is reported.
+#[test]
+fn a_destructured_action_is_reported_alone() {
+    let mut files = app_files();
+    let d = "class DestructMailer < ApplicationMailer\n  def pair((a, b))\n    mail(to: \"a@example.com\", subject: a.to_s + b.to_s, body: \"p\")\n  end\nend\n";
+    files.push(("app/mailers/destruct_mailer.rb", d));
+    let warnings = lowered_warnings(&files, BuildTarget::Ruby);
+    assert!(warnings.iter().any(|w| w.contains("mailer action `pair`") && w.contains("gets no callback chain")), "{warnings:#?}");
+}

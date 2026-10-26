@@ -334,7 +334,7 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
                     gaps.push((
                         span,
                         format!("mailer action `{action}`"),
-                        "an action with keyword, rest or block parameters gets no callback chain".into(),
+                        "an action with keyword, rest, block or destructured parameters gets no callback chain".into(),
                     ));
                 }
                 let lc = &mut app.library_classes[i];
@@ -484,7 +484,12 @@ struct Generated {
 /// parameter. A default is the source's own text, evaluated by the
 /// wrapper as the action would.
 fn wrapper_params(app: &App, m: &crate::dialect::MethodDef) -> Option<(String, String)> {
-    if m.block_param.is_some() || m.params.iter().any(|p| p.keyword || p.forwarding || p.rest) {
+    // A destructured or other formal ingest can't hold (`unsupported_formals`)
+    // would be dropped from the wrapper's list.
+    if m.block_param.is_some()
+        || m.unsupported_formals.is_some()
+        || m.params.iter().any(|p| p.keyword || p.forwarding || p.rest)
+    {
         return None;
     }
     let mut formals = Vec::new();
@@ -524,7 +529,18 @@ fn generated_methods(
         }
         cur = parents.get(&p).filter(|q| mailers.contains(*q) && **q != p).cloned();
     }
-    let own_actions: BTreeSet<String> = actions(lc).into_iter().collect();
+    // The own actions that get a wrapper, and so a prefixed body: an
+    // action that can't (`wrapper_params`) keeps its name, and a callback
+    // naming it calls it as written.
+    let own_actions: BTreeSet<String> = actions(lc)
+        .into_iter()
+        .filter(|a| {
+            lc.methods
+                .iter()
+                .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == a)
+                .is_some_and(|m| wrapper_params(app, m).is_some())
+        })
+        .collect();
     // A name the generated methods take must not be the app's own (one an
     // ancestor's chain generated is ours).
     if let Some(taken) = defined.iter().find(|n| {
@@ -534,14 +550,16 @@ fn generated_methods(
         return Err(format!("the class defines `{taken}`, a name the generated chain would take"));
     }
     let mut generated_bodies: Vec<(String, Expr)> = Vec::new();
+    // Called on `self`: a bare name would read an action's formal of that
+    // name instead (`def notify(stamp)` beside `after_action :stamp`).
     let callable = |call: &Call| -> Result<String, String> {
         match call {
             Call::Method(name) if own_actions.contains(name) || ancestors_wrapped.contains(name) => {
-                Ok(format!("{ACTION_PREFIX}{name}"))
+                Ok(format!("self.{ACTION_PREFIX}{name}"))
             }
-            Call::Method(name) if defined.contains(name) => Ok(name.clone()),
+            Call::Method(name) if defined.contains(name) => Ok(format!("self.{name}")),
             Call::Method(name) => Err(format!("the callback `{name}` is not a method the mailer defines")),
-            Call::Body(name, _) => Ok(name.clone()),
+            Call::Body(name, _) => Ok(format!("self.{name}")),
         }
     };
     let mut text = format!("class {}\n", lc.name.0.as_str());
@@ -608,13 +626,13 @@ fn generated_methods(
             }
             resolved.push((c.kind, target, conds.join(" && ")));
         }
-        let body = nested(&resolved, &format!("{ACTION_PREFIX}{action}({args})"));
+        let body = nested(&resolved, &format!("self.{ACTION_PREFIX}{action}({args})"));
         // Called from inside a running action, the method is a plain call.
         // The chain's state is cleared when it ends, however it ends, so
         // the next action on this mailer (two through one `with`) runs its
         // own chain on a fresh mail.
         text.push_str(&format!(
-            "  def {action}({formals})\n    return {ACTION_PREFIX}{action}({args}) unless __start_action(\"{action}\")\n    begin\n{body}      message\n    ensure\n      __end_action\n    end\n  end\n\n"
+            "  def {action}({formals})\n    return self.{ACTION_PREFIX}{action}({args}) unless self.__start_action(\"{action}\")\n    begin\n{body}      self.message\n    ensure\n      self.__end_action\n    end\n  end\n\n"
         ));
     }
     // This class's own block callbacks and lambda conditions.
