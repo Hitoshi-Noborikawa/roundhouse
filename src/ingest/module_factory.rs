@@ -346,7 +346,11 @@ impl<V: Vfs + ?Sized> Vfs for FactoryVfs<'_, V> {
     }
 
     fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
-        self.read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        // Not a lossy decode of `read`: a failed decode is how ingest tells a binary asset apart.
+        if self.hidden.contains(path) || self.files.contains_key(path) {
+            return self.read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        }
+        self.inner.read_to_string(path)
     }
 
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
