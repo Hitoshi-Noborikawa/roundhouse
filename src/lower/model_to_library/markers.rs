@@ -1652,7 +1652,11 @@ pub(super) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
 /// Unknown items — into `def <hook>` overrides of the runtime Base's
 /// no-op hooks. One body walk so declaration order is preserved
 /// across both forms when they target the same hook.
-pub(super) fn push_callback_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+pub(super) fn push_callback_methods(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    stems: &crate::lower::view_to_library::PartialStems,
+) {
     // AHEAD of the declared callbacks: Rails registers the
     // `belongs_to … default:` callback when the association is
     // declared, and campfire declares its associations above its
@@ -1666,7 +1670,7 @@ pub(super) fn push_callback_methods(methods: &mut Vec<MethodDef>, model: &Model)
                 push_symbol_callback(methods, model, callback, item.span());
             }
             ModelBodyItem::Unknown { expr, .. } => {
-                push_block_callback(methods, model, expr);
+                push_block_callback(methods, model, expr, stems);
             }
             _ => {}
         }
@@ -2061,7 +2065,12 @@ fn rename_callback_locals(expr: &mut Expr, renames: &std::collections::HashMap<S
     }
 }
 
-fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr) {
+fn push_block_callback(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    expr: &Expr,
+    stems: &crate::lower::view_to_library::PartialStems,
+) {
     {
         let Some((callback, hook_name, on)) = block_callback_shape(expr) else {
             return;
@@ -2138,6 +2147,7 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
         let mut lambda_body = super::broadcasts::rewrite_rails_broadcast_calls(
             lambda_body.clone(),
             model,
+            stems,
         );
         // `self.<col> ||= v` on a string column → blank-guarded assign.
         // Rails' new-record attributes are nil, so `||=` means "set

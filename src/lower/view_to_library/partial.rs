@@ -37,9 +37,10 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
         RenderPartial::Record { name, .. } => {
             let singular = (*name).to_string();
             let plural_camel = camelize_path(&crate::naming::pluralize_snake(&singular));
+            let stem = ctx.partial_stems.stem(&plural_camel, &singular);
             let mut call_args = vec![var_ref(Symbol::from(crate::naming::safe_local(&singular)))];
-            call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
-            let method = ctx.render_method(ViewKind::Partial, &plural_camel, &singular);
+            call_args.extend(partial_extra_args(ctx, &plural_camel, &stem));
+            let method = ctx.render_method(ViewKind::Partial, &plural_camel, &stem);
             let call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -119,7 +120,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
         // value). Empty pool → None (leaves the original render unresolved).
         RenderPartial::Template { name } => {
             let (module_camel, method_sym) =
-                super::partial_name_to_key(name, &ctx.resource_dir);
+                super::template_name_to_key(name, &ctx.resource_dir);
             if module_camel.is_empty() {
                 return None;
             }
@@ -161,7 +162,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             for entry in &entries {
                 let pname = &entry.name;
                 let (module_camel, method_sym) =
-                    super::partial_name_to_key(pname, &ctx.resource_dir);
+                    super::partial_name_to_key(pname, &ctx.resource_dir, &ctx.partial_stems);
                 if module_camel.is_empty() {
                     continue;
                 }
@@ -341,7 +342,7 @@ fn named_collection_item_render(
         return None;
     }
     let module_camel = camelize_path(&snake_case(&module_dir));
-    let method_sym = base_name.trim_start_matches('_').to_string();
+    let method_sym = ctx.partial_stems.stem(&module_camel, &base_name);
     let var_name = Symbol::from(crate::naming::safe_local(
         &as_name
             .map(|s| s.to_string())
@@ -487,7 +488,8 @@ fn wrap_keyed_cached_collection(
     // variant the render resolves to names it, as the block's view
     // does (`fragment_template_path`): html and turbo_stream renders of
     // one collection would otherwise serve each other's markup.
-    let (module, stem) = super::partial_name_to_key(partial, &ctx.resource_dir);
+    let (module, stem) =
+        super::partial_name_to_key(partial, &ctx.resource_dir, &ctx.partial_stems);
     let format = ctx.render_format(ViewKind::Partial, &module, &stem);
     let template = crate::lower::view::fragment_template_path(
         &match partial.rsplit_once('/') {
@@ -711,7 +713,7 @@ fn wrap_cached_true_collection(
         return emit_named_collection_each(collection, partial, as_name, locals, ctx);
     }
     let module_camel = camelize_path(&snake_case(&module_dir));
-    let method_sym = base_name.trim_start_matches('_').to_string();
+    let method_sym = ctx.partial_stems.stem(&module_camel, &base_name);
     let mut named_inputs: Vec<(String, Expr)> = Vec::new();
     if let Some(entries) = locals {
         for (k, v) in entries {
@@ -849,11 +851,12 @@ const MAX_UNCACHED_COLLECTION_LENGTH: i64 = super::MAX_UNCACHED_COLLECTION_LENGT
 fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
     let singular = singularize(plural_name);
     let plural_camel = camelize_path(&snake_case(plural_name));
+    let stem = ctx.partial_stems.stem(&plural_camel, &singular);
     let var_name = Symbol::from(singular.chars().next().unwrap_or('x').to_string());
 
     let mut call_args = vec![var_ref(var_name.clone())];
-    call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
-    let method = ctx.render_method(ViewKind::Partial, &plural_camel, &singular);
+    call_args.extend(partial_extra_args(ctx, &plural_camel, &stem));
+    let method = ctx.render_method(ViewKind::Partial, &plural_camel, &stem);
     let render_call = send(
         Some(Expr::new(
             Span::synthetic(),
@@ -947,7 +950,7 @@ pub(super) fn named_partial_call_with_record(
                 return None;
             }
             let module_camel = camelize_path(&snake_case(&module_dir));
-            let method_sym = base_name.trim_start_matches('_').to_string();
+            let method_sym = ctx.partial_stems.stem(&module_camel, &base_name);
 
             // An explicit `locals:` hash binds by NAME: the entry matching
             // the partial's record-arg convention (singular of its dir)

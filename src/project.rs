@@ -4412,6 +4412,11 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     const BUILT_TAIL: &str = "    # <<< generated: attachable-by-content-type\n";
 
     let has_layout = files.iter().any(|(path, _)| path.ends_with(VIEW));
+    // The partials named here are called by the method they lowered to,
+    // which a template of the same name in their directory moves
+    // (`PartialStems`); the files keep their names.
+    let stems = crate::lower::view_to_library::PartialStems::of(&app.views);
+    let content = stems.method("layouts/action_text/contents", "content");
     // What the layout YIELDS is Action Text's own partial,
     // `action_text/contents/_content.html.erb`, rendered: `<%=
     // render_action_text_content(content) %>` and the newline that
@@ -4421,7 +4426,7 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     // emit wrote `…boxes.</div>` without it.
     let layout = format!(
         "{HEAD}    def rendered_html\n      \
-         Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")\n    end\n{TAIL}"
+         Views::Layouts::ActionText::Contents.{content}(render_action_text_content + \"\\n\")\n    end\n{TAIL}"
     );
 
     // Two kinds of arm, in the order campfire's own `from_node` reopen
@@ -4453,13 +4458,14 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
             continue;
         }
         let module = crate::lower::view_to_library::view_module_id(dir);
+        let method = stems.method(dir, stem);
         let name = binding.class.0.as_str();
         let local = &binding.local;
         if binding.content_type.is_some() {
             by_content_type.push_str(&format!(
                 "      {local} = ::{name}.from_node(attachment)\n      \
                  unless {local}.nil?\n        {local}.attachment = attachment\n        \
-                 return {module}.{stem}({local})\n      end\n",
+                 return {module}.{method}({local})\n      end\n",
                 module = module.0.as_str(),
             ));
             built_by_content_type.push_str(&format!(
@@ -4476,7 +4482,7 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
         } else {
             by_model.push_str(&format!(
                 "      when \"{name}\"\n        {local} = {name}.find_by({{ id: attachment.resolved_id }})\n        \
-                 {local}.nil? ? \"\" : {module}.{stem}({local})\n",
+                 {local}.nil? ? \"\" : {module}.{method}({local})\n",
                 module = module.0.as_str(),
             ));
             if binding.plain_text {
@@ -4493,10 +4499,11 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     // the app's copy of that partial. campfire overrides it to show an
     // embedded file by name rather than making a preview on view.
     if files.iter().any(|(path, _)| path.ends_with("app/views/active_storage/blobs/_blob.rb")) {
-        by_model.push_str(
+        let blob = stems.method("active_storage/blobs", "blob");
+        by_model.push_str(&format!(
             "      when \"ActiveStorage::Blob\"\n        \
-             attachment.blob.nil? ? \"\" : Views::ActiveStorage::Blobs.blob(attachment)\n",
-        );
+             attachment.blob.nil? ? \"\" : Views::ActiveStorage::Blobs.{blob}(attachment)\n",
+        ));
     }
     let built = if built_by_content_type.is_empty() {
         None

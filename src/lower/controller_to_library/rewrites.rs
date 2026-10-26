@@ -107,7 +107,7 @@ pub(super) fn partial_view_call_with_record(
         span,
         ExprNode::Send {
             recv: Some(const_path(&["Views", &module_dir], span)),
-            method: crate::lower::view::view_method_name(&stem),
+            method: contract.method.clone(),
             args: view_args,
             block: None,
             parenthesized: true,

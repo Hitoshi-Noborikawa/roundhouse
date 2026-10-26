@@ -284,9 +284,10 @@ func main() {\n\
         // (src/emit/rust.rs:402) — the previous `class_info_from_library_class`
         // shape only carried synthesized table methods and was lossy.
         let (model_lcs, model_registry) =
-            crate::lower::model_to_library::lower_models_with_registry_and_params(
+            crate::lower::model_to_library::lower_models_with_registry_params_and_views(
                 &app.models,
                 &app.schema,
+                &app.views,
                 vec![],
                 &params_specs,
             );
