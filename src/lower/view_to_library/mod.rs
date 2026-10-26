@@ -232,6 +232,8 @@ pub struct ViewLowerCtx<'a> {
     app: &'a App,
     known_models: Vec<String>,
     closures: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    /// See the ViewCtx field of the same name.
+    view_formats: std::rc::Rc<std::collections::HashSet<(ViewKey, ViewKind, String)>>,
     dyn_pools: std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
     /// Partials whose body renders a `file_field` — see
     /// `ViewCtx::multipart_partials`.
@@ -301,6 +303,7 @@ impl<'a> ViewLowerCtx<'a> {
                 .map(|m| m.name.0.as_str().to_string())
                 .collect(),
             closures: std::rc::Rc::new(view_ivar_closures(&app.views, &app.controllers)),
+            view_formats: std::rc::Rc::new(view_formats(&app.views)),
             dyn_pools: std::rc::Rc::new(dynamic_partial_pools(&app.controllers)),
             multipart_partials: std::rc::Rc::new(multipart_partials(&app.views)),
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
@@ -777,11 +780,16 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
         partial_ivars: closures.clone(),
+        formats: std::iter::once(view.format.as_str())
+            .chain((view.format.as_str() != "html").then_some("html"))
+            .map(str::to_string)
+            .collect(),
+        view_formats: lx.view_formats.clone(),
         dyn_pools: dyn_pools.clone(),
         multipart_partials: lx.multipart_partials.clone(),
         partial_extras: lx.partial_extras.clone(),
         strict_locals: lx.strict_locals.clone(),
-        view_name: view.name.as_str().to_string(),
+        view_name: crate::lower::view::fragment_template_path(view.name.as_str(), view.format.as_str()),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
         ivar_locals: std::rc::Rc::new(ivar_locals),
@@ -2913,6 +2921,32 @@ fn multipart_partials(views: &[View]) -> std::collections::HashSet<ViewKey> {
         .collect()
 }
 
+/// Which of a key's views a render looks up. `view_key_of` drops the
+/// partial's `_`, so `_show.html.erb` and `show.turbo_stream.erb` share
+/// `("Articles", "show")`; Rails resolves `render "show"` among partials
+/// only and `render template:` among templates only.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) enum ViewKind {
+    Partial,
+    Template,
+}
+
+/// Each lowered view's key with its kind and format. The key is
+/// format-blind — `_note.html.erb` and `_note.turbo_stream.erb` share one
+/// ivar closure, which both definitions take and every caller passes — so
+/// the variant a render calls is told apart here (`ViewCtx::render_format`).
+fn view_formats(views: &[View]) -> std::collections::HashSet<(ViewKey, ViewKind, String)> {
+    views
+        .iter()
+        .filter(|v| crate::lower::view::lowers_through_view_path(v))
+        .filter_map(|v| {
+            let (_dir, base) = split_view_name(v.name.as_str());
+            let kind = if base.starts_with('_') { ViewKind::Partial } else { ViewKind::Template };
+            Some((view_key_of(v)?, kind, v.format.as_str().to_string()))
+        })
+        .collect()
+}
+
 fn view_key_of(v: &View) -> Option<ViewKey> {
     let (dir, base) = split_view_name(v.name.as_str());
     if dir.is_empty() {
@@ -4426,6 +4460,16 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    /// The formats a render here looks a view up in, in order: this
+    /// view's own, as Rails prepends the rendering template's format to
+    /// the lookup, then html. `formats:` and the `turbo_stream` builder
+    /// replace the list.
+    pub(super) formats: Vec<String>,
+    /// Every lowered view's key, kind and format (`view_formats`), so a
+    /// render can tell which of `formats` its partial or template has a
+    /// variant in.
+    pub(super) view_formats:
+        std::rc::Rc<std::collections::HashSet<(ViewKey, ViewKind, String)>>,
     /// Partials whose body renders a `file_field` (`multipart_partials`).
     /// A `form_with` block that renders one of these is a multipart
     /// form exactly as if the field were in the block itself — Rails'
@@ -4467,7 +4511,9 @@ pub(super) struct ViewCtx {
     /// can key on the SAME record — campfire's `_message` and a
     /// `_message` in a turbo-stream refresh both cache `[message,
     /// "presentation-v2"]` — so the site has to be in the key or one
-    /// would serve the other's markup.
+    /// would serve the other's markup. A non-html variant carries its
+    /// format (`messages/_message.turbo_stream`,
+    /// `fragment_template_path`) for the same reason.
     pub(super) view_name: String,
     pub(super) ivar_models:
         std::rc::Rc<std::collections::HashMap<String, String>>,
@@ -4653,6 +4699,42 @@ impl ViewCtx {
             }
         }
         next
+    }
+
+    /// This scope with renders looking partials up in exactly `formats`.
+    pub(super) fn in_formats(&self, formats: &[&str]) -> Self {
+        Self { formats: formats.iter().map(|f| f.to_string()).collect(), ..self.clone() }
+    }
+
+    /// This scope for a `render` called with `args`: its `formats:`
+    /// option replaces the lookup for that render and all it renders, a
+    /// layout's block included (`ActionView::Base#in_rendering_context`).
+    pub(super) fn for_render(&self, args: &[Expr]) -> Self {
+        match crate::lower::view::render_formats_option(args) {
+            Some(formats) => self.in_formats(&formats),
+            None => self.clone(),
+        }
+    }
+
+    /// The format of the `(module, stem)` variant of `kind` a render here
+    /// reaches: the first of `formats` the view has one in. The html one
+    /// is the fallback a Turbo request leaves in Rails' lookup — its
+    /// `Accept` lists `text/html`, and the `turbo_stream` builder adds
+    /// `:html`. With none, html too: the name every call site had before
+    /// formats were told apart, for a view `view_formats` does not index.
+    pub(super) fn render_format(&self, kind: ViewKind, module: &str, stem: &str) -> &str {
+        let key = (module.to_string(), stem.to_string());
+        self.formats
+            .iter()
+            .find(|f| self.view_formats.contains(&(key.clone(), kind, (*f).clone())))
+            .map_or("html", String::as_str)
+    }
+
+    /// The method a render of the `(module, stem)` view of `kind` calls,
+    /// named as `build_library_class` names the variant `render_format`
+    /// picks.
+    pub(super) fn render_method(&self, kind: ViewKind, module: &str, stem: &str) -> Symbol {
+        crate::lower::view::view_method_name_for(stem, self.render_format(kind, module, stem))
     }
 }
 

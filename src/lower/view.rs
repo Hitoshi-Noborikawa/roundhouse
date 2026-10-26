@@ -333,6 +333,32 @@ pub fn classify_render_partial<'a>(
     }
 }
 
+/// The formats a `render partial: "x", formats: [:xml, :html]` names, in
+/// order. Rails looks the partial up in exactly those formats for that
+/// render (`ActionView::Base#in_rendering_context`): they replace the
+/// lookup's (`LookupContext#with_prepended_formats`), so neither the
+/// rendering template's own format nor html follows them. A list with a
+/// runtime element is not one a static lowering can read.
+pub fn render_formats_option(args: &[Expr]) -> Option<Vec<&str>> {
+    let [arg] = args else { return None };
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+    let (_, value) = entries.iter().find(|(k, _)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "formats")
+    })?;
+    let elements = match &*value.node {
+        ExprNode::Array { elements, .. } => elements.as_slice(),
+        _ => std::slice::from_ref(value),
+    };
+    let formats = elements
+        .iter()
+        .map(|e| match &*e.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!formats.is_empty()).then_some(formats)
+}
+
 /// `render layout: "<path>"[, locals: { … }] do … end` from its kwarg
 /// hash. A hash with no `layout:` key returns `None` — the block-form
 /// renders this lowering does not model stay unrecognized rather than
@@ -409,6 +435,9 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
                     as_name = Some(value.as_str());
                 }
             }
+            // Which formats the partial is looked up in, not a local
+            // (`render_formats_option`).
+            Some("formats") => {}
             Some("cached") => match &*v.node {
                 ExprNode::Lit { value: Literal::Bool { value: true } } => cached = true,
                 ExprNode::Lambda { params, .. } if params.len() == 1 => cached_key = Some(v),
@@ -755,6 +784,21 @@ pub fn view_output_stem(v: &crate::dialect::View) -> String {
         v.name.as_str().to_string()
     } else {
         format!("{}_{}", v.name.as_str(), v.format.as_str())
+    }
+}
+
+/// The template a fragment key names (`articles/_note`), format-qualified
+/// when it is not the html one: `_note.turbo_stream.erb` keys under
+/// `articles/_note.turbo_stream`. Rails names it by its digest path,
+/// `articles/_note:<digest>`, and the digest is the variant's own source,
+/// so the html and turbo_stream fragments of one record never meet.
+/// Without a digest (`walker::cache_key_parts`) the format is what keeps
+/// them apart. The html template keeps the bare path its keys always had.
+pub fn fragment_template_path(path: &str, format: &str) -> String {
+    if format == "html" {
+        path.to_string()
+    } else {
+        format!("{path}.{format}")
     }
 }
 

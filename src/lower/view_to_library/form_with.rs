@@ -1556,6 +1556,8 @@ mod tests {
             lexxy: false,
             lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
+            formats: vec!["html".to_string()],
+            view_formats: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),
             partial_extras: Default::default(),
