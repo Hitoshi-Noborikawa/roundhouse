@@ -1234,6 +1234,13 @@ pub enum LibraryClassOrigin {
         declaration_span: Span,
         fields: Vec<RepresentableField>,
     },
+    /// An `ActiveModel::Serializer` expanded by
+    /// `ingest::active_model_serializer`: its attributes, in declaration
+    /// order (each read by `ams_<name>`).
+    ActiveModelSerializer {
+        declaration_span: Span,
+        fields: Vec<Symbol>,
+    },
     /// Per-resource params holder synthesized from a controller's
     /// `permit([:f1, :f2, …])` declaration. `resource` is the singular
     /// model name (e.g. `:article`); `fields` is the permitted column

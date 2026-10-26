@@ -35,6 +35,7 @@ mod source_gems;
 mod dry_monads;
 mod dry_validation;
 mod representable;
+mod active_model_serializer;
 mod action_cable_config;
 mod session_config;
 pub(crate) mod database_yml;
