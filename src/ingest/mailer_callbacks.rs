@@ -920,10 +920,25 @@ fn method_arity(
         if guard > 64 {
             break;
         }
-        if let Some(lc) = app.library_classes.iter().find(|c| c.name.0.as_str() == class)
-            && let Some(m) = lc.methods.iter().find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == name)
-        {
-            return Some(m.params.len());
+        if let Some(lc) = app.library_classes.iter().find(|c| c.name.0.as_str() == class) {
+            if let Some(m) = lc.methods.iter().find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == name) {
+                return Some(m.params.len());
+            }
+            // A module it includes (a mailer concern), as `defined` reads
+            // it, and the modules that one includes.
+            let mut modules: Vec<String> = lc.includes.iter().map(|id| id.0.as_str().to_string()).collect();
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            while let Some(module) = modules.pop() {
+                if !seen.insert(module.clone()) {
+                    continue;
+                }
+                if let Some(m) = app.library_classes.iter().find(|c| c.is_module && c.name.0.as_str() == module) {
+                    if let Some(d) = m.methods.iter().find(|d| d.receiver == MethodReceiver::Instance && d.name.as_str() == name) {
+                        return Some(d.params.len());
+                    }
+                    modules.extend(m.includes.iter().map(|id| id.0.as_str().to_string()));
+                }
+            }
         }
         cur = parents.get(&class).filter(|p| mailers.contains(*p)).cloned();
     }

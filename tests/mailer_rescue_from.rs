@@ -110,3 +110,24 @@ fn the_ruby_family_reports_no_rescue_from() {
     let warnings = lowered_warnings(BuildTarget::Ruby);
     assert!(warnings.iter().all(|w| !w.contains("not lowered")), "{warnings:#?}");
 }
+
+// Review of #1392 (oracle `test_app/review_oracle.rb`): a `with:` handler
+// a mailer concern defines is found through the include.
+const CONCERN_RESCUE: &str = "module ConcernRescue\n  private\n\n  def handle_missing(e)\n    DeliverLog.add(\"concern handled \" + e.message)\n  end\nend\n";
+const CONCERN_RESCUE_MAILER: &str = "class ConcernRescueMailer < ApplicationMailer\n  include ConcernRescue\n  rescue_from RescueErrors::Missing, with: :handle_missing\n\n  def hello\n    raise RescueErrors::Missing, \"gone\"\n  end\nend\n";
+
+#[test]
+fn a_handler_from_an_included_module_takes_the_exception_on_ruby() {
+    let run = app()
+        .write("app/mailers/concerns/concern_rescue.rb", CONCERN_RESCUE)
+        .write("app/mailers/concern_rescue_mailer.rb", CONCERN_RESCUE_MAILER)
+        .run_ruby(r##"
+DeliverLog.clear
+ConcernRescueMailer.hello.deliver_now
+got = DeliverLog.entries
+raise "a handler from an included module: #{got.inspect}" unless got == ["concern handled gone", "base after_deliver"]
+puts "concern rescue passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("concern rescue passed"), "{}", run.stdout);
+}
