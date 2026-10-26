@@ -1009,6 +1009,9 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             emit_expr(expr),
             emit_expr(fallback)
         ),
+        ExprNode::Let { name, value, body, .. } => {
+            format!("run {{\n{}\n}}", indent(&format!("val {} = {}\n{}", camel(name.as_str()), emit_expr(value), emit_expr(body))))
+        }
         ExprNode::Next { .. } if LOOP_DEPTH.with(|l| l.get()) > 0 => "continue".to_string(),
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
             emit_begin_rescue(body, rescues, else_branch.as_ref(), ensure.as_ref())
