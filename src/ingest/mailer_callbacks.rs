@@ -318,7 +318,10 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
             let mut chain = parent.as_ref().and_then(|p| chains.get(p)).cloned().unwrap_or_default();
             chain.extend(parsed.callbacks.iter().cloned());
             chains.insert(name.clone(), chain.clone());
-            if chain.is_empty() {
+            // A mailer with no callbacks still gets its actions' wrappers:
+            // each action starts on a fresh mail, as Rails' fresh mailer
+            // does, which two actions through one `with(...)` can tell.
+            if chain.is_empty() && actions(&app.library_classes[i]).is_empty() {
                 return Ok(None);
             }
             let methods = generated_methods(app, i, &chain, &parsed, &parents, &mailers, &wrapped, &generated)?;

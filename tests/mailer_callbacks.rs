@@ -232,9 +232,7 @@ puts "reused passed"
 // without the block's options; and a mailer with no callbacks, reached
 // twice through one `with`, builds each mail fresh.
 const YIELDED_MAILER: &str = "class YieldedMailer < ApplicationMailer\n  with_options only: :hello do |o|\n    o.before_action :on_hello\n    before_action :on_every\n  end\n\n  def hello\n    mail(to: \"a@example.com\", subject: \"Hello\", body: \"h\")\n  end\n\n  def bye\n    mail(to: \"a@example.com\", subject: \"Bye\", body: \"b\")\n  end\n\n  private\n\n  def on_hello\n    CallbackLog.add(\"on_hello\")\n  end\n\n  def on_every\n    CallbackLog.add(\"on_every\")\n  end\nend\n";
-#[allow(dead_code)]
 const PLAIN_MAILER: &str = "class PlainMailer < ActionMailer::Base\n  default from: \"from@example.com\"\n\n  def hello\n    headers(\"X-Hello\" => \"1\")\n    mail(to: \"a@example.com\", subject: \"Hello\", body: \"h\")\n  end\n\n  def bye\n    mail(to: \"a@example.com\", subject: \"Bye\", body: \"b\")\n  end\nend\n";
-#[allow(dead_code)]
 const PLAINS: &str = "class Plains\n  def self.with(params)\n    PlainMailer.with(params)\n  end\nend\n";
 
 #[test]
@@ -248,4 +246,21 @@ puts "receiverless passed"
 "##);
     run.assert_passes();
     assert!(run.stdout.contains("receiverless passed"), "{}", run.stdout);
+}
+
+#[test]
+fn a_mailer_without_callbacks_builds_each_mail_fresh_on_ruby() {
+    let run = app()
+        .write("app/mailers/plain_mailer.rb", PLAIN_MAILER)
+        .write("app/models/plains.rb", PLAINS)
+        .run_ruby(r##"
+mailer = Plains.with(k: 1)
+mailer.hello.deliver_now
+second = mailer.bye.deliver_now
+got = [second.subject, second["X-Hello"]]
+raise "no callbacks, two actions through one with: #{got.inspect}" unless got == ["Bye", nil]
+puts "fresh passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("fresh passed"), "{}", run.stdout);
 }
