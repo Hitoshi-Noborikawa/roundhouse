@@ -118,10 +118,13 @@ fn is_callback_macro(method: &str) -> bool {
         )
 }
 
-/// The calls in a `with_options` block, or None when it isn't one. In the
-/// yielded form (`do |o| o.before_action :x end`) a call on the block's
-/// parameter is the class's own, as the option merger forwards it.
-fn with_options_calls(call: &Expr) -> Option<(&[(Expr, Expr)], Vec<Expr>)> {
+/// The calls in a `with_options` block, each with whether the block's
+/// options merge into it, or None when it isn't one. In the yielded form
+/// (`do |o| o.before_action :x end`) a call on the block's parameter is
+/// the class's own with the options merged, as the option merger forwards
+/// it; a receiverless call there is the class's own as written, without
+/// them. Without a parameter, every call takes the options.
+fn with_options_calls(call: &Expr) -> Option<(&[(Expr, Expr)], Vec<(Expr, bool)>)> {
     let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*call.node else { return None };
     if method.as_str() != "with_options" {
         return None;
@@ -142,12 +145,14 @@ fn with_options_calls(call: &Expr) -> Option<(&[(Expr, Expr)], Vec<Expr>)> {
         .into_iter()
         .map(|stmt| {
             let mut stmt = stmt.clone();
+            let mut merged = param.is_none();
             if let (Some(param), ExprNode::Send { recv, .. }) = (param, &mut *stmt.node)
                 && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Var { name, .. } if name == param))
             {
                 *recv = None;
+                merged = true;
             }
-            stmt
+            (stmt, merged)
         })
         .collect();
     Some((entries, stmts))
@@ -163,7 +168,7 @@ fn callback_method(call: &Expr) -> Option<&str> {
 /// Does this unknown call declare (or merge into) a callback?
 fn declares_callbacks(call: &Expr) -> bool {
     callback_method(call).is_some()
-        || with_options_calls(call).is_some_and(|(_, stmts)| stmts.iter().any(|s| callback_method(s).is_some()))
+        || with_options_calls(call).is_some_and(|(_, stmts)| stmts.iter().any(|(s, _)| callback_method(s).is_some()))
 }
 
 fn names(value: &Expr) -> Option<Vec<String>> {
@@ -248,14 +253,14 @@ fn parse_class(lc: &LibraryClass, counter: &mut usize) -> Result<Parsed, String>
             parsed.callbacks.extend(parse_call(call, &[], counter)?);
             parsed.consumed.push(i);
         } else if let Some((outer, stmts)) = with_options_calls(call) {
-            if !stmts.iter().any(|s| callback_method(s).is_some()) {
+            if !stmts.iter().any(|(s, _)| callback_method(s).is_some()) {
                 continue;
             }
-            if !stmts.iter().all(|s| callback_method(s).is_some()) {
+            if !stmts.iter().all(|(s, _)| callback_method(s).is_some()) {
                 return Err("a `with_options` block with callbacks and other calls".into());
             }
-            for stmt in &stmts {
-                parsed.callbacks.extend(parse_call(stmt, outer, counter)?);
+            for (stmt, merged) in &stmts {
+                parsed.callbacks.extend(parse_call(stmt, if *merged { outer } else { &[] }, counter)?);
             }
             parsed.consumed.push(i);
         }

@@ -226,3 +226,26 @@ puts "reused passed"
     run.assert_passes();
     assert!(run.stdout.contains("reused passed"), "{}", run.stdout);
 }
+
+// Review of #1383 (oracle `test_app/review2_oracle.rb`): in the yielded
+// `with_options` form a receiverless call is the class's own as written,
+// without the block's options; and a mailer with no callbacks, reached
+// twice through one `with`, builds each mail fresh.
+const YIELDED_MAILER: &str = "class YieldedMailer < ApplicationMailer\n  with_options only: :hello do |o|\n    o.before_action :on_hello\n    before_action :on_every\n  end\n\n  def hello\n    mail(to: \"a@example.com\", subject: \"Hello\", body: \"h\")\n  end\n\n  def bye\n    mail(to: \"a@example.com\", subject: \"Bye\", body: \"b\")\n  end\n\n  private\n\n  def on_hello\n    CallbackLog.add(\"on_hello\")\n  end\n\n  def on_every\n    CallbackLog.add(\"on_every\")\n  end\nend\n";
+#[allow(dead_code)]
+const PLAIN_MAILER: &str = "class PlainMailer < ActionMailer::Base\n  default from: \"from@example.com\"\n\n  def hello\n    headers(\"X-Hello\" => \"1\")\n    mail(to: \"a@example.com\", subject: \"Hello\", body: \"h\")\n  end\n\n  def bye\n    mail(to: \"a@example.com\", subject: \"Bye\", body: \"b\")\n  end\nend\n";
+#[allow(dead_code)]
+const PLAINS: &str = "class Plains\n  def self.with(params)\n    PlainMailer.with(params)\n  end\nend\n";
+
+#[test]
+fn a_receiverless_call_in_the_yielded_form_takes_no_options_on_ruby() {
+    let run = app().write("app/mailers/yielded_mailer.rb", YIELDED_MAILER).run_ruby(r##"
+CallbackLog.clear
+YieldedMailer.bye.deliver_now
+got = CallbackLog.entries
+raise "yielded with_options, bye: #{got.inspect}" unless got == ["base_before", "on_every", "stamp"]
+puts "receiverless passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("receiverless passed"), "{}", run.stdout);
+}
