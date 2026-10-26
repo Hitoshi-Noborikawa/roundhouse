@@ -1618,6 +1618,7 @@ module ActiveRecord
         fill_timestamps(true) if stamps_timestamps?
         self.id = _adapter_insert
         @persisted = true
+        _enlist_write(0)
         __track_saved_changes(was_new)
         after_create
       else
@@ -1627,12 +1628,24 @@ module ActiveRecord
         end
         fill_timestamps(false) if stamps_timestamps?
         _adapter_update
+        _enlist_write(1)
         __track_saved_changes(was_new)
         after_update
       end
       after_save
-      _save_committed(was_new)
+      _run_commit_callbacks(was_new ? 0 : 1) if Db._txn_depth == 0
       true
+    end
+
+    # The write is enlisted as soon as it's made, ahead of the after_*
+    # hooks, as Rails adds the record to the transaction before the
+    # save's callbacks: an exception one of them raises rolls the write
+    # back, and the record is put back too (`_rollback_enlisted`), a
+    # create a new record again. Its commit callbacks still wait for the
+    # COMMIT.
+    def _enlist_write(kind)
+      Db._txn_records << ActiveRecord::EnlistedRecord.new(self, kind) unless Db._txn_depth == 0
+      nil
     end
 
     # `destroy` in a transaction too, for the same reason: a dependent
