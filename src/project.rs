@@ -9055,8 +9055,11 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     };
     let mut eager_requires = Vec::new();
     for gem in needed {
-        if crate::gems::loads_by_gem_name(&gem.name) {
-            eager_requires.push(gem.name.clone());
+        // Not only a gem that loads by its name: the app's Gemfile can say what Bundler requires for it.
+        match lock.gemfile_requires.get(&gem.name) {
+            Some(features) => eager_requires.extend(features.iter().cloned()),
+            None if crate::gems::loads_by_gem_name(&gem.name) => eager_requires.push(gem.name.clone()),
+            None => {}
         }
         let version = gem.version.as_deref();
         let pinned = match version {

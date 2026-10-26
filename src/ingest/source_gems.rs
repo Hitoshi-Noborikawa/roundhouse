@@ -41,21 +41,38 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
         };
         // Not lexical first: a `..` after a linked app dir resolves through the link, as the OS reads it
         let installed = vfs.canonical(&installed).unwrap_or_else(|| normalize(&installed));
-        let files = required_files(vfs, &installed, name)?;
+        let files = required_files(vfs, &installed, name, lock.gemfile_requires.get(name))?;
         gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
     }
     Ok(gems)
 }
 
-fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BTreeSet<PathBuf>, String> {
+fn required_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    gem: &Path,
+    name: &str,
+    gemfile_requires: Option<&Vec<String>>,
+) -> Result<BTreeSet<PathBuf>, String> {
     let lib = gem.join("lib");
-    let entry = [name.to_string(), name.replace('-', "/")]
-        .into_iter()
-        .map(|feature| lib.join(format!("{feature}.rb")))
-        .find(|path| vfs.exists(path))
-        .ok_or_else(|| format!("source gem {name:?} has no lib/{name}.rb to require"))?;
+    // Not the gem's name when the app's Gemfile says what Bundler requires (svg-graph has no `svg-graph.rb`).
+    let entries: Vec<PathBuf> = match gemfile_requires.filter(|features| !features.is_empty()) {
+        Some(features) => features
+            .iter()
+            .map(|feature| lib.join(format!("{feature}.rb")))
+            .filter(|path| vfs.exists(path))
+            .collect(),
+        None => [name.to_string(), name.replace('-', "/")]
+            .into_iter()
+            .map(|feature| lib.join(format!("{feature}.rb")))
+            .find(|path| vfs.exists(path))
+            .into_iter()
+            .collect(),
+    };
+    if entries.is_empty() {
+        return Err(format!("source gem {name:?} has no lib/{name}.rb to require"));
+    }
     let mut seen = BTreeSet::new();
-    let mut pending = vec![entry];
+    let mut pending = entries;
     while let Some(file) = pending.pop() {
         if !seen.insert(file.strip_prefix(gem).unwrap().to_path_buf()) {
             continue;

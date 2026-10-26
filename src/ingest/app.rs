@@ -325,7 +325,13 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let _source_root = super::sources::set_root(dir);
     let config = roundhouse_config(vfs, dir)?;
     let extensions = project_extensions(vfs, dir, &config)?;
-    let lock = vfs.read_to_string(&dir.join("Gemfile.lock")).ok().map(|text| crate::gems::Lockfile::parse(&text));
+    let lock = vfs.read_to_string(&dir.join("Gemfile.lock")).ok().map(|text| {
+        let mut lock = crate::gems::Lockfile::parse(&text);
+        if let Ok(gemfile) = vfs.read_to_string(&dir.join("Gemfile")) {
+            lock.gemfile_requires = crate::gems::gemfile_requires(&gemfile);
+        }
+        lock
+    });
     let source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
         .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
     let mount_vfs = super::source_gems::MountVfs { inner: vfs, gems: &source_gems };
@@ -381,6 +387,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     if vfs.exists(&lock_path) {
         if let Ok(text) = vfs.read_to_string(&lock_path) {
             let mut lock = crate::gems::Lockfile::parse(&text);
+            if let Ok(gemfile) = vfs.read_to_string(&dir.join("Gemfile")) {
+                lock.gemfile_requires = crate::gems::gemfile_requires(&gemfile);
+            }
             lock.source = app.extensions.source_gems.clone();
             app.gem_lock = Some(lock);
             if let Some(lock) = &app.gem_lock {

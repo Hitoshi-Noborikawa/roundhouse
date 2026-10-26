@@ -257,6 +257,55 @@ pub struct Lockfile {
     /// The `PLATFORMS` section.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub platforms: Vec<String>,
+    /// The app Gemfile's `require:` per gem (`gem "svg-graph", require:
+    /// "SVG/Graph/TimeSeries"`): what Bundler loads in place of the gem's
+    /// name. An empty list is `require: false`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub gemfile_requires: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// Every `gem "<name>", …, require: <String | [String] | false>` in a
+/// Gemfile, at its top level or inside a block (`group :x do … end`).
+pub fn gemfile_requires(source: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    struct Gems(std::collections::BTreeMap<String, Vec<String>>);
+    fn string(node: &ruby_prism::Node<'_>) -> Option<String> {
+        node.as_string_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned())
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Gems {
+        fn visit_call_node(&mut self, call: &ruby_prism::CallNode<'pr>) {
+            if call.receiver().is_none() && call.name().as_slice() == b"gem" {
+                let args: Vec<ruby_prism::Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                if let Some(name) = args.first().and_then(string) {
+                    for arg in &args[1..] {
+                        let Some(hash) = arg.as_keyword_hash_node() else { continue };
+                        for element in hash.elements().iter() {
+                            let Some(pair) = element.as_assoc_node() else { continue };
+                            let is_require = pair.key().as_symbol_node().is_some_and(|k| k.unescaped() == b"require");
+                            if !is_require {
+                                continue;
+                            }
+                            let value = pair.value();
+                            let features = if value.as_false_node().is_some() {
+                                Some(Vec::new())
+                            } else if let Some(one) = string(&value) {
+                                Some(vec![one])
+                            } else {
+                                value.as_array_node().and_then(|a| a.elements().iter().map(|e| string(&e)).collect())
+                            };
+                            if let Some(features) = features {
+                                self.0.insert(name.clone(), features);
+                            }
+                        }
+                    }
+                }
+            }
+            ruby_prism::visit_call_node(self, call);
+        }
+    }
+    let parsed = ruby_prism::parse(source.as_bytes());
+    let mut gems = Gems(std::collections::BTreeMap::new());
+    ruby_prism::Visit::visit(&mut gems, &parsed.node());
+    gems.0
 }
 
 /// One `GIT` source from a Bundler lockfile.
@@ -1437,6 +1486,20 @@ pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemfile_requires_reads_each_spelling() {
+        let found = gemfile_requires(
+            "gem \"svg-graph\", require: \"SVG/Graph/TimeSeries\"\n\
+             gem \"plain\"\n\
+             group :development do\n  gem \"quiet\", require: false\nend\n\
+             gem \"both\", \"~> 1.0\", require: [\"a\", \"b/c\"]\n",
+        );
+        assert_eq!(found.get("svg-graph"), Some(&vec!["SVG/Graph/TimeSeries".to_string()]));
+        assert_eq!(found.get("quiet"), Some(&Vec::new()));
+        assert_eq!(found.get("both"), Some(&vec!["a".to_string(), "b/c".to_string()]));
+        assert!(!found.contains_key("plain"));
+    }
 
     #[test]
     fn a_release_version_drops_only_a_listed_platform() {
