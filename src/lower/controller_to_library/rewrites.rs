@@ -1328,10 +1328,15 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         // declined, and the typed association seed handles or refuses
         // the call instead.
         // `find_by(id: …)`: at most one row, whatever the scope's order.
+        // Not an Array or Range of ids, which can match several, so the
+        // order still picks among them.
         let by_id = matches!(kind, AssocKind::FindBy)
             && outer_args.first().is_some_and(|arg| match &*arg.node {
-                ExprNode::Hash { entries, kwargs: true } => entries.iter().any(|(k, _)| {
+                ExprNode::Hash { entries, kwargs: true } => entries.iter().any(|(k, v)| {
                     matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "id")
+                        && !matches!(&*v.node, ExprNode::Array { .. } | ExprNode::Range { .. })
+                        && !matches!(v.ty.as_ref(), Some(crate::ty::Ty::Array { .. }))
+                        && !matches!(v.ty.as_ref(), Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Range")
                 }),
                 _ => false,
             });

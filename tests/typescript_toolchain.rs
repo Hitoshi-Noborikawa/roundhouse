@@ -155,6 +155,30 @@ fn real_blog_find_by_params_index_tsc_passes() {
     assert_tsc_passes("real-blog with params[:id]", &emitted);
 }
 
+/// A class that is not a model keeps its `find`'s argument: only a class
+/// reaching `ActiveRecord::Base` has the numeric key the coercion assumes.
+#[test]
+#[ignore]
+fn non_model_find_keeps_its_params_argument() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "app/models/shelf.rb",
+            "class Shelf\n  def self.find(name)\n    name.to_s.upcase\n  end\nend\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "Article.find(params.expect(:id))",
+            "Article.find(params[:id])\n      @shelf = Shelf.find(params[:id])",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let controller =
+        std::fs::read_to_string(emitted.join("app/controllers/articles_controller.ts")).expect("emitted controller");
+    assert!(controller.contains("Shelf.find(this.params[\"id\"])"), "{controller}");
+    assert!(controller.contains("Article.find(Number(String(this.params[\"id\"]"), "{controller}");
+    assert_tsc_passes("real-blog with a non-model find", &emitted);
+}
+
 /// Diagnostic test: emit transpiled_blog and dump tsc errors so we
 /// know what the body-walker still needs to fix. Does NOT assert
 /// success — purely an inspection helper.

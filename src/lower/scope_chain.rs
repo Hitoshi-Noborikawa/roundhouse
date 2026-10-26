@@ -2156,7 +2156,10 @@ fn assoc_build(a: &Association, models: &[Model]) -> AssocBuild {
                 expansion: reproducible.then(|| (target.clone(), foreign_key.clone())),
                 scope: scope.clone(),
                 extension: extension.iter().map(|x| x.name.clone()).collect(),
-                target_keyed_by_id: models.iter().any(|m| &m.name == target && m.primary_key.is_none()),
+                // `self.primary_key = "id"` names the default key.
+                target_keyed_by_id: models.iter().any(|m| {
+                    &m.name == target && m.primary_key.as_ref().is_none_or(|key| key.as_str() == "id")
+                }),
             }
         }
         _ => AssocBuild { expansion: None, scope: None, extension: Vec::new(), target_keyed_by_id: false },

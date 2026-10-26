@@ -260,6 +260,23 @@ fn class_method_shape(class: &str, method: &str) -> Option<Shape> {
     method_shape(class, method, true)
 }
 
+/// Whether the class `class` reaches `ActiveRecord::Base` through the
+/// parents this emit recorded: a model, whose `find` takes its key.
+fn descends_from_active_record(class: &str) -> bool {
+    CLASS_SHAPES.with(|cell| {
+        let map = cell.borrow();
+        let mut current = Some(class.to_string());
+        for _ in 0..16 {
+            let Some(name) = current else { return false };
+            if name == "ActiveRecord::Base" {
+                return true;
+            }
+            current = map.get(&name).and_then(|shape| shape.parent.clone());
+        }
+        false
+    })
+}
+
 fn method_shape(class: &str, method: &str, class_side: bool) -> Option<Shape> {
     CLASS_SHAPES.with(|cell| {
         let map = cell.borrow();
@@ -2423,7 +2440,9 @@ fn js_send_inner(
         }
     }
     // `Model.find(@params[k])`, the pre-Rails-8 spelling of `find(params.
-    // expect(:id))`: the TS finder takes a `number` and the read is a
+    // expect(:id))`, on a class reaching `ActiveRecord::Base` (another
+    // class's `find`, `Rake::Task.find(name)`, keeps its argument): the
+    // TS finder takes a `number` and the read is a
     // `ParamValue`, so it is coerced as the `expect` lowering's is,
     // `Number(String(…))` — the TS counterpart of the Rust emitter's
     // `.as_i64().unwrap()`. A non-numeric id is NaN and finds nothing; the
@@ -2432,7 +2451,7 @@ fn js_send_inner(
         if let (Some(r), ExprNode::Send { recv: Some(pr), method: index, args: index_args, block: None, .. }) =
             (recv, &*args[0].node)
         {
-            if matches!(&*r.node, ExprNode::Const { .. })
+            if matches!(&*r.node, ExprNode::Const { path } if descends_from_active_record(&path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")))
                 && index.as_str() == "[]"
                 && index_args.len() == 1
                 && matches!(&*pr.node, ExprNode::Ivar { name } if name.as_str() == "params")
