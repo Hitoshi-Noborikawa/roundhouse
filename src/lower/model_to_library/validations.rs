@@ -619,11 +619,12 @@ fn validation_rule_to_calls(
         ValidationRule::Acceptance { accept, allow_nil } => {
             vec![inline_acceptance_check(msgs, attr, accept, *allow_nil != Some(false), attr_ty, runtime_relation)]
         }
-        ValidationRule::Length { min, max, message, allow_nil } => inline_length_check(
+        ValidationRule::Length { min, max, is, message, allow_nil } => inline_length_check(
             msgs,
             attr,
             min.map(|n| n as usize),
             max.map(|n| n as usize),
+            is.map(|n| n as usize),
             message.as_deref(),
             attr_ty,
             *allow_nil,
@@ -1547,6 +1548,7 @@ fn inline_length_check(
     attr: &Symbol,
     min: Option<usize>,
     max: Option<usize>,
+    is: Option<usize>,
     message: Option<&str>,
     attr_ty: Option<&Ty>,
     allow_nil: Option<bool>,
@@ -1614,6 +1616,7 @@ fn inline_length_check(
     for (bound, n, kind, op) in [
         (LengthBound::Min, min, "too_short", "<"),
         (LengthBound::Max, max, "too_long", ">"),
+        (LengthBound::Is, is, "wrong_length", "!="),
     ] {
         let Some(n) = n else { continue };
         let cmp = send(
@@ -1664,6 +1667,7 @@ fn inline_length_check(
 enum LengthBound {
     Min,
     Max,
+    Is,
 }
 
 /// Whether a nil value fails this bound. `None` is Rails' default
@@ -1672,7 +1676,7 @@ fn nil_fails_bound(bound: LengthBound, allow_nil: Option<bool>) -> bool {
     match allow_nil {
         Some(true) => false,
         Some(false) => true,
-        None => matches!(bound, LengthBound::Min),
+        None => matches!(bound, LengthBound::Min | LengthBound::Is),
     }
 }
 
@@ -2137,7 +2141,7 @@ mod tests {
 
     #[test]
     fn length_min_only_emits_too_short() {
-        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), None, None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), None, None, None, None, None);
         assert_eq!(exprs.len(), 1, "length lowers to one outer expression");
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         // Nil fails the minimum outright, and a present value fails when shorter.
@@ -2156,7 +2160,7 @@ mod tests {
 
     #[test]
     fn length_max_only_skips_nil() {
-        let exprs = inline_length_check(Messages::default(), &attr(), None, Some(100), None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), None, Some(100), None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(msgs, vec!["Title is too long (maximum is 100 characters)"]);
         let (cond, _, else_branch) = root_if(&exprs);
@@ -2170,6 +2174,7 @@ mod tests {
             Messages::default(),
             &attr(),
             Some(5),
+            None,
             None,
             None,
             None,
@@ -2189,6 +2194,7 @@ mod tests {
             Some(100),
             None,
             None,
+            None,
             Some(false),
         );
         let (cond, then_branch, _) = root_if(&exprs);
@@ -2201,7 +2207,7 @@ mod tests {
 
     #[test]
     fn length_min_and_max_emits_both_in_order() {
-        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), Some(100), None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), Some(100), None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(
             msgs,

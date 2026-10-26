@@ -1662,7 +1662,6 @@ class Widget < ApplicationRecord
   validates :stock, comparison: { less_than_or_equal_to: :max_stock }
   validates :price, numericality: { greater_than: 0, odd: true }
   validates :bounded, numericality: { equal_to: 1, other_than: 2 }
-  validates :tag, presence: true, length: { maximum: 4, is: 2 }
   # An arity>0 lambda would splice an unbound parameter into `def
   # validate`; a String condition names a method Rails resolves at
   # runtime that this build does not model. Both stay the reported gap
@@ -1684,7 +1683,6 @@ end
         "numericality: odd",
         "numericality: equal_to",
         "numericality: other_than",
-        "length: is",
         "if:",
         "unless:",
     ] {

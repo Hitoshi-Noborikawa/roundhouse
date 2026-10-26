@@ -1019,7 +1019,9 @@ fn parse_bool_or_hash(
                 _ => gaps.push("allow_nil".to_string()),
             },
             "message" => push_message(&child, name, false, &mut built.message, &mut gaps),
-            other => gaps.push(format!("{name}: {other}")),
+            "allow_blank" | "strict" | "except_on" => gaps.push(format!("{name}: {key}")),
+            // Not a gap: Rails' presence and absence validators read no other key (lobsters' `presence: { with: true }`)
+            _ => {}
         }
     }
     if gaps.is_empty() {
@@ -1476,11 +1478,13 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &su
     };
     let mut min: Option<u32> = None;
     let mut max: Option<u32> = None;
+    let mut is: Option<u32> = None;
     let mut allow_nil: Option<bool> = None;
     let mut message: Option<String> = None;
     let mut built = BuiltRule::bare(ValidationRule::Length {
         min: None,
         max: None,
+        is: None,
         message: None,
         allow_nil: None,
     });
@@ -1523,19 +1527,31 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &su
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
-            "is" | "in" | "within" => gaps.push(format!("length: {key}")),
+            "is" => match class_consts.integer(&child) {
+                Some(n) if n >= 0 => is = Some(n as u32),
+                _ => gaps.push("length: is".to_string()),
+            },
+            // Rails reads `in:`/`within:` as the minimum and maximum, with their messages
+            "in" | "within" => match bound_range(&child, class_consts) {
+                Some(range) if range.begin >= 0.0 && range.end >= range.begin => {
+                    min = Some(range.begin as u32);
+                    max = Some(if range.exclusive { range.end as u32 - 1 } else { range.end as u32 });
+                }
+                _ => gaps.push(format!("length: {key}")),
+            },
             other => gaps.push(format!("length: {other}")),
         }
     }
     if !gaps.is_empty() {
         return RuleParse::Gap(gaps);
     }
-    if min.is_none() && max.is_none() {
+    if min.is_none() && max.is_none() && is.is_none() {
         return RuleParse::Gap(vec!["length".to_string()]);
     }
     built.rule = ValidationRule::Length {
         min,
         max,
+        is,
         message,
         allow_nil,
     };
