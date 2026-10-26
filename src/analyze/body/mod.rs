@@ -59,6 +59,7 @@ fn forwarded_block_may_be_nil(ty: &Ty) -> bool {
 }
 
 mod diagnostic;
+pub(crate) use diagnostic::some_operands_take_it;
 mod const_resolution;
 mod lambda_local;
 pub(crate) use const_resolution::{ConstResolver, ConstResolverTask, definition_index};

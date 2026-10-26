@@ -2022,6 +2022,29 @@ fn report_url_helpers_includes(app: &App, target: BuildTarget) {
     }
 }
 
+/// An operator that only some arms of its operands take (`Integer | String > Integer`):
+/// a warning in analysis, since the ruby family runs it as Ruby does and raises for
+/// the arms that miss. A strict target emits a raise for the whole expression, so it
+/// is reported there. Nil-only misses were already checked by `lower::nil_operand`.
+fn report_partial_binops(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        if let Some(crate::diagnostic::DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty }) = &expr.diagnostic()
+            && crate::analyze::some_operands_take_it(op.as_str(), lhs_ty, rhs_ty)
+        {
+            crate::emit::diagnostics::report_unsupported(
+                expr.span, target.as_str(), "operator on some of its operands' types",
+                format!("`{}` takes only some of the types its operands may hold; the ruby family raises for the rest as Ruby does, this target for all", op.as_str()),
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
 /// Not left to the runtime's raise: `scope_chain` needs the receiver's model to write the join's SQL.
 fn report_dynamic_association_joins(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Futamura) {
@@ -2500,6 +2523,7 @@ fn target_files_inner(
     report_ruby_only_sends(app, target);
     report_descendant_ivar_reads(app, target);
     report_url_helpers_includes(app, target);
+    report_partial_binops(app, target);
     report_model_attribute_defaults(app, target);
     report_builtin_aliases(app, target);
     report_dynamic_association_joins(app, target);

@@ -19812,6 +19812,8 @@ mod url_helpers_include;
 mod length_is_in_within;
 #[path = "emit_and_run/bigdecimal_clamp.rs"]
 mod bigdecimal_clamp;
+#[path = "emit_and_run/partial_binop.rs"]
+mod partial_binop;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

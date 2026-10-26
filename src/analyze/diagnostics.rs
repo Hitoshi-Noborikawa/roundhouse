@@ -781,9 +781,9 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                 if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
         ) {
             let severity = match kind {
-                // Not an error where nil is the only miss: Ruby raises NoMethodError there, which the ruby family runs as written and a strict target checks (`lower::nil_operand`)
+                // Not an error where some operand arm takes it: Ruby raises for the others, which the ruby family runs as written and a strict target reports or checks (`lower::nil_operand`)
                 DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty }
-                    if crate::lower::nil_operand::nil_is_the_only_miss(op.as_str(), lhs_ty, rhs_ty) =>
+                    if crate::analyze::body::some_operands_take_it(op.as_str(), lhs_ty, rhs_ty) =>
                 {
                     crate::diagnostic::Severity::Warning
                 }

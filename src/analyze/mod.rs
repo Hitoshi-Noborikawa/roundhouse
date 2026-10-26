@@ -27,6 +27,7 @@ mod alba;
 pub(crate) mod assoc_pluck;
 mod enum_raw_input;
 mod body;
+pub(crate) use body::some_operands_take_it;
 mod class_configuration;
 mod data;
 mod class_new;
