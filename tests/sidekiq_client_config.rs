@@ -108,22 +108,32 @@ fn configure_server_is_not_the_client() {
 
 /// `config/sidekiq.yml`'s literal settings become the worker's defaults
 /// (`App::sidekiq_worker`), the `production:` section over the top
-/// level; an ERB value is a warning and is left to the command line.
+/// level; an ERB value is a warning and is left to the command line. The
+/// warning is said only to a tree on :sidekiq.
 #[test]
 fn sidekiq_yml_literals_are_the_worker_defaults() {
     let yml = ":concurrency: 4\n:timeout: <%= ENV.fetch(\"SIDEKIQ_TIMEOUT\", 8) %>\n:queues:\n  - critical\n  - [default, 2]\nproduction:\n  :concurrency: 12\n";
-    let tree: HashMap<PathBuf, Vec<u8>> = [("db/schema.rb", SCHEMA), ("config/sidekiq.yml", yml)]
-        .iter()
-        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
-        .collect();
-    let (app, diags) = prism::scope(|| ingest_app_from_tree(tree));
-    let worker = app.expect("ingest").sidekiq_worker;
+    let sidekiq = "Rails.application.configure do\n  config.active_job.queue_adapter = :sidekiq\nend\n";
+    let ingest_with = |on_sidekiq: bool| {
+        let mut files = vec![("db/schema.rb", SCHEMA), ("config/sidekiq.yml", yml)];
+        if on_sidekiq {
+            files.push(("config/environments/production.rb", sidekiq));
+            files.push(("config/cable.yml", "production:\n  adapter: redis\n"));
+        }
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let (app, diags) = prism::scope(|| ingest_app_from_tree(tree));
+        (app.expect("ingest").sidekiq_worker, sidekiq_warnings(diags))
+    };
+    let (worker, warnings) = ingest_with(true);
     assert_eq!(worker.concurrency, Some(12));
     assert_eq!(worker.timeout, None);
     assert_eq!(worker.queues, vec![("critical".to_string(), 0), ("default".to_string(), 2)]);
-    let warnings = sidekiq_warnings(diags);
     assert_eq!(warnings.len(), 1, "{warnings:#?}");
     assert!(warnings[0].contains(":timeout") && warnings[0].contains("ERB"), "{warnings:#?}");
+
+    let (_, warnings) = ingest_with(false);
+    assert!(warnings.is_empty(), "not on :sidekiq: {warnings:#?}");
 }
 
 /// `config/cable.yml`'s production `adapter: redis` is read into

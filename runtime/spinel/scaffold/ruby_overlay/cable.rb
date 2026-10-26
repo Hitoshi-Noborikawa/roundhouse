@@ -547,9 +547,6 @@ module Cable
     end
 
     def self.subscribe(stream, conn)
-      # This process's Redis subscription, when broadcasts go through
-      # Redis (runtime/redis_cable.rb).
-      RedisCable.ensure_subscriber
       fresh = !SUBS.key?(stream)
       list = (SUBS[stream] ||= [])
       list << conn unless list.include?(conn)
@@ -1013,6 +1010,10 @@ module Cable
     identity = identify(env)
     return nil if identity.nil?
 
+    # This process's Redis subscription, when broadcasts go through Redis
+    # (runtime/redis_cable.rb): started here, on the request thread, so
+    # its wait for the first confirmation never stalls the reactor.
+    RedisCable.ensure_subscriber
     socket = env["rack.hijack"].call
     conn = Connection.new(env, socket, identity == NO_IDENTITY ? nil : identity)
     Reactor.attach(conn)
