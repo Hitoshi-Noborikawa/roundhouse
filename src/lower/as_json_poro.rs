@@ -415,6 +415,16 @@ pub fn implicit_serializer_renders(app: &App) -> Vec<crate::diagnostic::Diagnost
 /// writer, and its renders keep the runtime encoder on the Hash.
 ///
 /// Returns the classes whose writer stands.
+/// The local `as_json_str` holds an ActiveModel::Serializer attribute's
+/// value in (`ingest::active_model_serializer`): `j_<name>`, a `?` name's
+/// as `j_<name>_p`, since a local can't end in `?`.
+pub fn ams_writer_local(field: &str) -> String {
+    match field.strip_suffix('?') {
+        Some(bare) => format!("j_{bare}_p"),
+        None => format!("j_{field}"),
+    }
+}
+
 fn settle_ams_writers(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) -> HashSet<ClassId> {
     use crate::dialect::LibraryClassOrigin;
     let column_type = |model: &ClassId, column: &str| -> Option<crate::schema::ColumnType> {
@@ -490,7 +500,7 @@ fn settle_ams_writers(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) -> 
                 if !(is_builder && method.as_str() == "encode_value") {
                     return None;
                 }
-                let (_, kind, column) = rewrites.iter().find(|(f, _, _)| format!("j_{f}") == local.as_str())?;
+                let (_, kind, column) = rewrites.iter().find(|(f, _, _)| ams_writer_local(f) == local.as_str())?;
                 let new_args = match (*kind, column) {
                     ("strings", _) => return Some(Expr {
                         node: Box::new(ExprNode::Send { recv: Some(r.clone()), method: Symbol::from("encode_string_array"), args: args.clone(), block: block.clone(), parenthesized: *parenthesized }),

@@ -119,3 +119,37 @@ fn a_serializer_base_stays_as_it_was() {
     assert_eq!(base.parent.as_ref().map(|p| p.0.as_str()), Some("ActiveModel::Serializer"));
     assert!(base.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "the base was lowered");
 }
+
+/// A serializer method calling what the gem supplies (`scope`) has nothing
+/// to answer it once the class loses the gem's parent: refused.
+#[test]
+fn a_call_to_the_gems_scope_is_refused() {
+    let serializer = "class ArticleSerializer < ActiveModel::Serializer\n  attributes :id, :mine\n\n  def mine\n    object.id == scope.id\n  end\nend\n";
+    survey::activate();
+    let result = ingest_app_from_tree(tree(serializer, CONTROLLER));
+    let gaps = survey::drain();
+    let app = result.expect("survey ingest recovers");
+    assert!(
+        gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. } if message.contains("`scope` is the gem's"))),
+        "{gaps:?}"
+    );
+    let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "ArticleSerializer").expect("class");
+    assert!(class.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "lowered");
+}
+
+/// A serializer used other than through `render json:` (here the gem's
+/// own `as_json` on an instance) keeps the gem's class: refused.
+#[test]
+fn a_serializer_used_outside_a_render_is_refused() {
+    let controller = "class ArticlesController < ApplicationController\n  def show\n    render json: Article.find(params[:id]), serializer: ArticleSerializer\n  end\n\n  def index\n    render plain: ArticleSerializer.new(Article.first).as_json.to_s\n  end\nend\n";
+    survey::activate();
+    let result = ingest_app_from_tree(tree(SERIALIZER, controller));
+    let gaps = survey::drain();
+    let app = result.expect("survey ingest recovers");
+    assert!(
+        gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. } if message.contains("other than through `render json:`") && message.contains("used at app/controllers/articles_controller.rb:"))),
+        "{gaps:?}"
+    );
+    let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "ArticleSerializer").expect("class");
+    assert!(class.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "lowered");
+}

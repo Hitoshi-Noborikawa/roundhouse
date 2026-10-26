@@ -99,6 +99,25 @@ pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[So
     }
     let mut decls: HashMap<ClassId, Decl> = HashMap::new();
     let mut refused: HashMap<ClassId, IngestError> = HashMap::new();
+    // A serializer named anywhere but its declaration and the renders the
+    // rewrite takes keeps the gem's class, which that use needs. Refused at
+    // its declaration, naming the use: a gap in the using file would claim
+    // that file's own findings.
+    let mut used: HashMap<ClassId, String> = HashMap::new();
+    for source in sources {
+        if !selected.iter().any(|id| source.text.contains(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()))) {
+            continue;
+        }
+        let parsed = super::prism::parse_silent(source.text.as_bytes());
+        let mut uses = OtherUses { selected: &selected, found: HashMap::new() };
+        ruby_prism::Visit::visit(&mut uses, &parsed.node());
+        for (id, offset) in uses.found {
+            let (line, _) = source.line_col(offset as u32);
+            let path = source.path.as_str();
+            let path = path.find("/app/").map(|i| &path[i + 1..]).unwrap_or(path);
+            used.entry(id).or_insert_with(|| format!("{path}:{line}"));
+        }
+    }
     for source in sources {
         if !source.text.contains(SERIALIZER) {
             continue;
@@ -112,6 +131,13 @@ pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[So
                 continue;
             }
             let offset = class.location().start_offset();
+            if let Some(at) = used.get(&id) {
+                refused.insert(
+                    id,
+                    refuse(source, offset, &format!("used at {at} other than through `render json:`, which needs the gem's class")),
+                );
+                continue;
+            }
             if decls.remove(&id).is_some() {
                 refused.insert(id, refuse(source, offset, "a reopened serializer is not supported"));
                 continue;
@@ -237,6 +263,24 @@ fn collect_fields(class: &ruby_prism::ClassNode<'_>, source: &SourceFile) -> Ing
             methods.insert(name.to_string());
         }
     }
+    // A call on the serializer to what the gem supplies (`scope`, a named
+    // scope such as `current_user`, `serialization_context`, …) has
+    // nothing to answer it once the class loses the gem's parent.
+    // Read in the method bodies and the `attribute` blocks, not the
+    // class-body DSL (`attributes :id` is the declaration).
+    let mut gem_calls = GemCalls { own: &methods, found: None };
+    for stmt in &stmts {
+        if let Some(def) = stmt.as_def_node() {
+            if let Some(body) = def.body() {
+                ruby_prism::Visit::visit(&mut gem_calls, &body);
+            }
+        } else if let Some(block) = stmt.as_call_node().and_then(|c| c.block()) {
+            ruby_prism::Visit::visit(&mut gem_calls, &block);
+        }
+    }
+    if let Some((name, offset)) = gem_calls.found {
+        return Err(refuse(source, offset, &format!("`{name}` is the gem's (the serializer's scope or adapter API), outside the subset")));
+    }
     let slice = |loc: ruby_prism::Location<'_>| -> Option<String> {
         source.text.get(loc.start_offset()..loc.end_offset()).map(str::to_string)
     };
@@ -354,8 +398,11 @@ fn synthesize(class: &mut LibraryClass, decl: &Decl) -> IngestResult<()> {
     src.push_str("\n  def as_json_str\n    parts = []\n");
     for f in &decl.fields {
         let open = serde_json::to_string(&format!("\"{}\":", f.key)).unwrap();
-        src.push_str(&format!("    j_{} = ams_{}\n", f.name, f.name));
-        src.push_str(&format!("    parts << {open} + JsonBuilder.encode_value(j_{}){}\n", f.name, guard(f)));
+        // The reader runs only when the condition holds, as the gem
+        // evaluates the attribute only then.
+        let local = crate::lower::as_json_poro::ams_writer_local(&f.name);
+        src.push_str(&format!("    {local} = ams_{}{}\n", f.name, guard(f)));
+        src.push_str(&format!("    parts << {open} + JsonBuilder.encode_value({local}){}\n", guard(f)));
     }
     src.push_str("    \"{\" + parts.join(\",\") + \"}\"\n  end\nend\n");
 
@@ -454,9 +501,134 @@ fn rewrite_renders(expr: &mut Expr, lowered: &HashSet<String>) {
     entries.retain(|(k, _)| !matches!(name(k).as_deref(), Some("serializer" | "each_serializer")));
 }
 
+/// What an ActiveModel::Serializer instance answers from the gem rather
+/// than from the app: its scope (and the conventional names a
+/// `serialization_scope` gives it), the adapter-facing API, and the
+/// cache.
+const GEM_INSTANCE_METHODS: &[&str] = &[
+    "scope",
+    "scope_name",
+    "current_user",
+    "serialization_context",
+    "read_attribute_for_serialization",
+    "attributes",
+    "associations",
+    "json_key",
+    "root",
+    "as_json",
+    "to_json",
+    "fetch",
+    "cache_key",
+    "object_cache_key",
+    "links",
+    "meta",
+];
+
+/// The first receiverless call to a gem-supplied method the class doesn't
+/// define itself.
+struct GemCalls<'a> {
+    own: &'a HashSet<String>,
+    found: Option<(String, usize)>,
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for GemCalls<'_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        let name = constant_id_str(&node.name());
+        if self.found.is_none()
+            && node.receiver().is_none()
+            && GEM_INSTANCE_METHODS.contains(&name)
+            && !self.own.contains(name)
+        {
+            self.found = Some((name.to_string(), node.location().start_offset()));
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+/// Where a selected serializer is named outside its own declaration and
+/// outside a `render json:` the rewrite takes: lowered, the class no
+/// longer has the gem's API that use expects (`S.new(x).as_json`,
+/// `SerializableResource.new(x, serializer: S)`).
+struct OtherUses<'a> {
+    selected: &'a HashSet<ClassId>,
+    found: HashMap<ClassId, usize>,
+}
+
+impl OtherUses<'_> {
+    /// The selected class a written constant path names: the full name,
+    /// or a suffix of one (`StatusSerializer` inside `module REST`).
+    fn named(&self, path: &[String]) -> Option<ClassId> {
+        let written = path.join("::");
+        self.selected
+            .iter()
+            .find(|id| {
+                let full = id.0.as_str();
+                full == written || full.ends_with(&format!("::{written}"))
+            })
+            .cloned()
+    }
+
+    fn note(&mut self, node: &ruby_prism::Node<'_>) -> bool {
+        let Some(path) = super::util::constant_path_of(node) else { return false };
+        let Some(id) = self.named(&path) else { return false };
+        self.found.entry(id).or_insert(node.location().start_offset());
+        true
+    }
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        // Its own declaration names it; its superclass and body are read.
+        if let Some(superclass) = node.superclass() {
+            self.visit(&superclass);
+        }
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+    }
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        // `render json: x, serializer: S`: S is not another use. A render
+        // the rewrite takes calls the lowered class; one with another
+        // option is already the reported residue.
+        if node.receiver().is_none() && constant_id_str(&node.name()) == "render" {
+            if let Some(args) = node.arguments() {
+                let list: Vec<_> = args.arguments().iter().collect();
+                if let [hash] = list.as_slice() {
+                    if let Some(hash) = hash.as_keyword_hash_node() {
+                        {
+                            for el in hash.elements().iter() {
+                                let Some(assoc) = el.as_assoc_node() else { continue };
+                                let key = super::util::symbol_value(&assoc.key());
+                                if matches!(key.as_deref(), Some("serializer" | "each_serializer"))
+                                    && super::util::constant_path_of(&assoc.value()).is_some_and(|p| self.named(&p).is_some())
+                                {
+                                    continue;
+                                }
+                                self.visit(&assoc.value());
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+    fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+        self.note(&node.as_node());
+    }
+    fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+        if !self.note(&node.as_node()) {
+            ruby_prism::visit_constant_path_node(self, node);
+        }
+    }
+}
+
+/// A method name an attribute can be read by: a `?` only last.
 fn is_identifier(s: &str) -> bool {
-    let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '?')
+    let body = s.strip_suffix('?').unwrap_or(s);
+    let mut chars = body.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn refuse(source: &SourceFile, offset: usize, reason: &str) -> IngestError {
