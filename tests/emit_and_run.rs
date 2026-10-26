@@ -19806,6 +19806,8 @@ mod jbuilder_record_values;
 mod nil_operand;
 #[path = "emit_and_run/descendant_ivar.rs"]
 mod descendant_ivar;
+#[path = "emit_and_run/url_helpers_include.rs"]
+mod url_helpers_include;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

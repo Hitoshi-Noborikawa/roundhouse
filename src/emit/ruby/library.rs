@@ -4580,7 +4580,11 @@ fn rewrite_helper_calls(
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));
             if route_helpers.contains(&path_name) {
-                *expr = crate::lower::view_to_library::absolute_url_interp(stem, args.clone());
+                *expr = if own_methods.contains(&Symbol::from("default_url_options")) {
+                    url_for_own_options(stem, args.clone())
+                } else {
+                    crate::lower::view_to_library::absolute_url_interp(stem, args.clone())
+                };
                 return;
             }
         }
@@ -5004,6 +5008,29 @@ fn rewrite_layout_wrap(
 ///   * `port:` follows the host as `:N`. A literal port that is the
 ///     scheme's own (80 for http, 443 for https) or `nil` is left out,
 ///     as Rails' `build_host_url` leaves it out.
+/// `ActionView::ViewHelpers.url_for_options(RouteHelpers.<stem>_path(args), default_url_options)`:
+/// a bare `<x>_url` in a class that defines its own `default_url_options`.
+fn url_for_own_options(stem: &str, args: Vec<Expr>) -> Expr {
+    let synth = |node: ExprNode| Expr::new(crate::span::Span::synthetic(), node);
+    let path_call = synth(ExprNode::Send {
+        recv: Some(synth(ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] })),
+        method: Symbol::from(format!("{stem}_path")),
+        args,
+        block: None,
+        parenthesized: true,
+    });
+    let options = synth(ExprNode::Send { recv: None, method: Symbol::from("default_url_options"), args: vec![], block: None, parenthesized: false });
+    let mut call = synth(ExprNode::Send {
+        recv: Some(synth(ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] })),
+        method: Symbol::from("url_for_options"),
+        args: vec![path_call, options],
+        block: None,
+        parenthesized: true,
+    });
+    call.ty = Some(crate::ty::Ty::Str);
+    call
+}
+
 pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite_url_helpers_absolute);
     let matches = matches!(

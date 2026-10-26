@@ -2001,6 +2001,27 @@ fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
     }
 }
 
+/// `include Rails.application.routes.url_helpers` in an app class: the
+/// ruby emit routes its helper calls through the generated RouteHelpers
+/// module; no strict target's class reaches that module's helpers.
+fn report_url_helpers_includes(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    for class in &app.library_classes {
+        for (i, included) in class.includes.iter().enumerate() {
+            if included.0.as_str() != "RouteHelpers" {
+                continue;
+            }
+            crate::emit::diagnostics::report_unsupported(
+                class.include_spans.get(i).copied().unwrap_or_default(), target.as_str(), "include of the route url_helpers",
+                format!("`{}` includes Rails.application.routes.url_helpers, whose helpers only the ruby emit gives a class", class.name.0),
+            );
+        }
+    }
+}
+
 /// Not left to the runtime's raise: `scope_chain` needs the receiver's model to write the join's SQL.
 fn report_dynamic_association_joins(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Futamura) {
@@ -2478,6 +2499,7 @@ fn target_files_inner(
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
     report_descendant_ivar_reads(app, target);
+    report_url_helpers_includes(app, target);
     report_model_attribute_defaults(app, target);
     report_builtin_aliases(app, target);
     report_dynamic_association_joins(app, target);

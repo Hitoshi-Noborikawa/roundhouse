@@ -1373,6 +1373,8 @@ impl Analyzer {
             for (i, included) in class.includes.iter().enumerate() {
                 let known = self.classes.contains_key(included)
                     || body::RUBY_TOP_LEVEL.contains(&included.0.as_str())
+                    // The generated route-helper module ingest records `include Rails.application.routes.url_helpers` as
+                    || included.0.as_str() == "RouteHelpers"
                     // A source module that only nests modeled classes (an
                     // implicit namespace: a directory of classes with no
                     // file of its own), included so the class reads its
