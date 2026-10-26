@@ -473,7 +473,11 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 1085 on 2026-10-23, with `Base.sanitize_sql_for_order(condition)`
     // answering its String unchanged; its parameter is a var on this
     // RBS-less probe (`(String) -> String` in connection.rbs).
-    const CEILING: usize = 1085;
+    // MEASURED 1092 on 2026-10-26: `record_timestamps=` keeps the switch per
+    // class (`TimestampSwitches.store` / `lookup`), and the reader walks the
+    // ancestors for it. The class name and value parameters are vars on this
+    // RBS-less probe (+7 in connection.rb); the RBS-paired gate types them.
+    const CEILING: usize = 1092;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
