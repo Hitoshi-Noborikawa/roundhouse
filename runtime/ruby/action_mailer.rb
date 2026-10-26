@@ -128,6 +128,7 @@ module ActionMailer
 
     def add_header(name, value)
       @headers[name] = value
+      value
     end
 
     # `message["To"]`: an added header, or an address header `mail` set, by
@@ -221,7 +222,15 @@ module ActionMailer
     def __start_action(name)
       return false unless @_action_name.nil?
       @_action_name = name
+      @_message = nil
+      @_headers = {}
       true
+    end
+
+    # Ends the chain `__start_action` started.
+    def __end_action
+      @_action_name = nil
+      nil
     end
 
     # `headers("X-Priority" => "1")` adds them; `headers["X"] = value`

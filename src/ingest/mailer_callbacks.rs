@@ -524,9 +524,11 @@ fn generated_methods(
         }
         let body = nested(&resolved, &format!("{ACTION_PREFIX}{action}({args})"));
         // Called from inside a running action, the method is a plain call.
-        // Called from inside a running action, the method is a plain call.
+        // The chain's state is cleared when it ends, however it ends, so
+        // the next action on this mailer (two through one `with`) runs its
+        // own chain on a fresh mail.
         text.push_str(&format!(
-            "  def {action}({args})\n    return {ACTION_PREFIX}{action}({args}) unless __start_action(\"{action}\")\n{body}    message\n  end\n\n"
+            "  def {action}({args})\n    return {ACTION_PREFIX}{action}({args}) unless __start_action(\"{action}\")\n    begin\n{body}      message\n    ensure\n      __end_action\n    end\n  end\n\n"
         ));
     }
     // This class's own block callbacks and lambda conditions.
@@ -582,5 +584,5 @@ fn nested(resolved: &[(Kind, String, String)], action: &str) -> String {
             ),
         }
     }
-    go(resolved, action, 4)
+    go(resolved, action, 6)
 }

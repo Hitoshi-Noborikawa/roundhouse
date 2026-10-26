@@ -211,3 +211,18 @@ puts "yielded passed"
     run.assert_passes();
     assert!(run.stdout.contains("yielded passed"), "{}", run.stdout);
 }
+
+#[test]
+fn two_actions_through_one_with_each_run_their_chain_on_ruby() {
+    let run = review_app().run_ruby(r##"
+CallbackLog.clear
+mailer = Reviews.with(k: 1)
+first = mailer.hello.deliver_now
+second = mailer.bye.deliver_now
+got = [CallbackLog.entries, first.subject, second.subject, second["X-Hello"]]
+raise "two actions through one with: #{got.inspect}" unless got == [["base_before", "note_hello", "before", "stamp", "base_before", "before", "stamp"], "Hello", "Bye", nil]
+puts "reused passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("reused passed"), "{}", run.stdout);
+}
