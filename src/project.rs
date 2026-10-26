@@ -2045,6 +2045,64 @@ fn report_partial_binops(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
 }
 
+/// A constant of an unknown gem (pinned in the lockfile, no façade, no
+/// spin package): the CRuby tree requires the real gem, but nothing in
+/// the Spinel tree defines it, so a subclass or a reference raises when
+/// it runs (lobsters' `SearchParser < Parslet::Parser` stopped the server
+/// at boot with a NoMethodError while the build was clean).
+fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
+    if !matches!(target, BuildTarget::Spinel) {
+        return;
+    }
+    let Some(lock) = app.gem_lock.as_ref() else { return };
+    let census = crate::gems::GemCensus::of(lock);
+    let carried = crate::gems::native_extension_gem_namespaces(app);
+    let unknown: std::collections::HashSet<&str> = census
+        .unknown()
+        .filter(|gem| !lock.is_from_git(&gem.name) && !app.extensions.is_rails_dependent(&gem.name))
+        .filter(|gem| !carried.contains(&crate::gems::namespace_of(&gem.name)))
+        .map(|gem| gem.name.as_str())
+        .collect();
+    if unknown.is_empty() {
+        return;
+    }
+    // The longest-matching gem across the whole lockfile, so `Rack::Utils` stays rack's while `Rack::MiniProfiler` is rack-mini-profiler's
+    let owner = |path: &str| -> Option<String> {
+        let owners = crate::gems::lock_gems_owning_constant(lock, path);
+        (!owners.is_empty() && owners.iter().all(|g| unknown.contains(g))).then(|| owners.join(", "))
+    };
+    let report = |span: crate::span::Span, path: &str, ns: &str| {
+        crate::emit::diagnostics::report_unsupported(
+            span, "spinel", "constant of an unknown gem",
+            format!("`{path}` belongs to the {ns} gem, which the Spinel tree does not carry (no façade, no spin package); it raises where it runs"),
+        );
+    };
+    let parents = app
+        .models
+        .iter()
+        .map(|m| (m.parent.as_ref(), m.parent_span))
+        .chain(app.library_classes.iter().map(|c| (c.parent.as_ref(), c.parent_span)))
+        .chain(app.controllers.iter().map(|c| (c.parent.as_ref(), c.parent_span)));
+    for (parent, span) in parents {
+        if let Some(parent) = parent
+            && let Some(ns) = owner(parent.0.as_str())
+        {
+            report(span, parent.0.as_str(), &ns);
+        }
+    }
+    fn visit(expr: &crate::expr::Expr, owner: &dyn Fn(&str) -> Option<String>, report: &dyn Fn(crate::span::Span, &str, &str)) {
+        if let crate::expr::ExprNode::Const { path } = &*expr.node {
+            let joined = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+            if let Some(ns) = owner(&joined) {
+                report(expr.span, &joined, &ns);
+            }
+            return;
+        }
+        expr.node.for_each_child(&mut |child| visit(child, owner, report));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, &owner, &report));
+}
+
 /// Not left to the runtime's raise: `scope_chain` needs the receiver's model to write the join's SQL.
 fn report_dynamic_association_joins(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Futamura) {
@@ -2532,6 +2590,7 @@ fn target_files_inner(
     report_descendant_ivar_reads(app, target);
     report_url_helpers_includes(app, target);
     report_partial_binops(app, target);
+    report_spinel_unknown_gem_constants(app, target);
     report_model_attribute_defaults(app, target);
     report_builtin_aliases(app, target);
     report_dynamic_association_joins(app, target);

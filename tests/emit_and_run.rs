@@ -19826,6 +19826,8 @@ mod where_time_range;
 mod route_record_to_param;
 #[path = "emit_and_run/module_factory.rs"]
 mod module_factory;
+#[path = "emit_and_run/spinel_unknown_gem.rs"]
+mod spinel_unknown_gem;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can
