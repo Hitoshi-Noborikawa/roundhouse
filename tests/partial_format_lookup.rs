@@ -74,6 +74,44 @@ fn a_turbo_stream_template_prefers_the_turbo_stream_partial() {
         .assert_passes();
 }
 
+/// A partial lookup finds partials only: `banner.turbo_stream.erb` is the
+/// template rendering `render "banner"`, not a turbo_stream `_banner`.
+#[test]
+fn a_partial_sharing_its_templates_name_renders_the_html_partial() {
+    banner_app("<%= render \"banner\" %>\n", "Html note", "Stream note")
+        .write("app/views/articles/_banner.html.erb", HTML_NOTE)
+        .run_test(CONTROLLER_TEST)
+        .assert_passes();
+}
+
+/// Nor does `show.html.erb` stand in for an html `_show` the list names.
+#[test]
+fn a_formats_list_skips_an_action_template_of_the_partials_name() {
+    banner_app(
+        "<%= render partial: \"show\", formats: [:html, :turbo_stream] %>\n",
+        "Stream note",
+        "Html note",
+    )
+    .write("app/views/articles/_show.turbo_stream.erb", STREAM_NOTE)
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
+/// A template lookup finds templates only, past a turbo_stream partial
+/// of the same name.
+#[test]
+fn a_template_render_skips_a_partial_of_the_templates_name() {
+    banner_app(
+        "<%= render template: \"articles/teaser\" %>\n",
+        "Html note",
+        "Stream note",
+    )
+    .write("app/views/articles/teaser.html.erb", HTML_NOTE)
+    .write("app/views/articles/_teaser.turbo_stream.erb", STREAM_NOTE)
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
 /// `render partial:, collection:` takes the same lookup, once per element.
 #[test]
 fn a_turbo_stream_collection_render_prefers_the_turbo_stream_partial() {

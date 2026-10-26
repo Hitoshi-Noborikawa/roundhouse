@@ -12,7 +12,7 @@ use crate::lower::view::RenderPartial;
 
 use super::{
     accumulator_append_call, assign_accumulator_string_new, lit_sym, nil_lit, send, seq,
-    var_ref, view_helpers_call, ViewCtx,
+    var_ref, view_helpers_call, ViewCtx, ViewKind,
 };
 
 pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Option<Expr> {
@@ -39,7 +39,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             let plural_camel = camelize_path(&crate::naming::pluralize_snake(&singular));
             let mut call_args = vec![var_ref(Symbol::from(crate::naming::safe_local(&singular)))];
             call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
-            let method = ctx.render_method(&plural_camel, &singular);
+            let method = ctx.render_method(ViewKind::Partial, &plural_camel, &singular);
             let call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -123,7 +123,10 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             if module_camel.is_empty() {
                 return None;
             }
-            let method_name = ctx.render_method(&module_camel, &method_sym).as_str().to_string();
+            let method_name = ctx
+                .render_method(ViewKind::Template, &module_camel, &method_sym)
+                .as_str()
+                .to_string();
             // An action view has no record arg — its params are its
             // FULL closure (threaded into the caller by the
             // render-graph fold) plus nil-default extras. No
@@ -196,7 +199,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                         call_args.push(hash);
                     }
                 }
-                let method = ctx.render_method(&module_camel, &method_sym);
+                let method = ctx.render_method(ViewKind::Partial, &module_camel, &method_sym);
                 let render_call = send(
                     Some(Expr::new(
                         Span::synthetic(),
@@ -348,7 +351,7 @@ fn named_collection_item_render(
     let mut call_args = vec![var_ref(var_name.clone())];
     call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
     call_args.extend(locals_extra_args(locals, &module_camel, &method_sym, ctx));
-    let method = ctx.render_method(&module_camel, &method_sym);
+    let method = ctx.render_method(ViewKind::Partial, &module_camel, &method_sym);
     let render_call = send(
         Some(Expr::new(
             Span::synthetic(),
@@ -485,7 +488,7 @@ fn wrap_keyed_cached_collection(
     // does (`fragment_template_path`): html and turbo_stream renders of
     // one collection would otherwise serve each other's markup.
     let (module, stem) = super::partial_name_to_key(partial, &ctx.resource_dir);
-    let format = ctx.render_format(&module, &stem);
+    let format = ctx.render_format(ViewKind::Partial, &module, &stem);
     let template = crate::lower::view::fragment_template_path(
         &match partial.rsplit_once('/') {
             Some((dir, base)) => format!("{dir}/_{}", base.trim_start_matches('_')),
@@ -850,7 +853,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
 
     let mut call_args = vec![var_ref(var_name.clone())];
     call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
-    let method = ctx.render_method(&plural_camel, &singular);
+    let method = ctx.render_method(ViewKind::Partial, &plural_camel, &singular);
     let render_call = send(
         Some(Expr::new(
             Span::synthetic(),
@@ -1003,7 +1006,7 @@ pub(super) fn named_partial_call_with_record(
             } else {
                 call_args.extend(locals_extra_args(locals, &module_camel, &method_sym, ctx));
             }
-            let method = ctx.render_method(&module_camel, &method_sym);
+            let method = ctx.render_method(ViewKind::Partial, &module_camel, &method_sym);
             let render_call = send(
                 Some(Expr::new(
                     Span::synthetic(),
