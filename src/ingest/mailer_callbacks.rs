@@ -822,11 +822,12 @@ fn generated_methods(
         // the next action on this mailer (two through one `with`) runs its
         // own chain on a fresh mail.
         // With `rescue_from` handlers, an exception the chain raises is
-        // offered to them (`__rescue`); one they take leaves the null mail.
+        // offered to them (`__rescue`); one they take leaves the mail
+        // `mail(...)` built, or the null mail if it wasn't called.
         let body = if handlers.is_empty() {
             body
         } else {
-            format!("      begin\n{body}      rescue => __error\n        raise unless __rescue(__error)\n        return __null_mail\n      end\n")
+            format!("      begin\n{body}      rescue => __error\n        raise unless __rescue(__error)\n        return self.message || self.__null_mail\n      end\n")
         };
         text.push_str(&format!(
             "  def {action}({formals})\n    return {called} unless self.__start_action(\"{action}\")\n    begin\n{body}      self.message || self.__null_mail\n    ensure\n      self.__end_action\n    end\n  end\n\n"

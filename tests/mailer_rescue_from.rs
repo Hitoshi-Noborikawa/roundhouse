@@ -131,3 +131,44 @@ puts "concern rescue passed"
     run.assert_passes();
     assert!(run.stdout.contains("concern rescue passed"), "{}", run.stdout);
 }
+
+// Review of #1394 (4375804145, oracle `test_app/review2_oracle.rb`): a
+// handled exception raised after `mail(...)`, in the action or in an
+// after_action, leaves the built mail, and it's delivered. The wrapper
+// answered the null mail, so nothing was sent.
+const LATE_MAILER: &str = "class LateMailer < ApplicationMailer\n  rescue_from(RescueErrors::Missing) { |e| DeliverLog.add(\"rescued \" + e.message) }\n  after_action :maybe_fail_after\n\n  def built\n    mail(to: \"a@example.com\", subject: \"Built\", body: \"b\")\n    raise RescueErrors::Missing, \"after mail\" if params[:fail] == \"action\"\n  end\n\n  private\n\n  def maybe_fail_after\n    raise RescueErrors::Missing, \"in after_action\" if params[:fail] == \"after\"\n  end\nend\n";
+const LATES: &str = "class Lates\n  def self.with(params)\n    LateMailer.with(params)\n  end\nend\n";
+const LATE_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+def late(params)
+  DeliverLog.clear
+  ActionMailer::Base.deliveries.clear
+  m = Lates.with(params).built.deliver_now
+  [m && m.subject, ActionMailer::Base.deliveries.size, DeliverLog.entries]
+end
+check("raised in the action after mail, handled: the built mail is sent", late(fail: "action"), ["Built", 1, ["rescued after mail", "base after_deliver"]])
+check("raised in an after_action, handled: the built mail is sent", late(fail: "after"), ["Built", 1, ["rescued in after_action", "base after_deliver"]])
+check("nothing raised", late({}), ["Built", 1, ["base after_deliver"]])
+puts "late rescue passed"
+"##;
+
+fn late_app() -> emit_and_run::Overlay {
+    app().write("app/mailers/late_mailer.rb", LATE_MAILER).write("app/models/lates.rb", LATES)
+}
+
+#[test]
+fn a_handled_exception_after_mail_keeps_the_built_mail_on_ruby() {
+    let run = late_app().run_ruby(LATE_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("late rescue passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_handled_exception_after_mail_keeps_the_built_mail_on_spinel() {
+    let run = late_app().run_spinel_with_db(LATE_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("late rescue passed"), "{}", run.stdout);
+}
