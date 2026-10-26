@@ -2081,6 +2081,28 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
             format!("`{path}` belongs to the {ns} gem, which the Spinel tree does not carry (no façade, no spin package); it raises where it runs"),
         );
     };
+    for_each_app_constant(app, &mut |span, path| {
+        if let Some(ns) = owner(path) {
+            report(span, path, &ns);
+        }
+    });
+}
+
+/// Every constant the app's classes name that the app does not define itself:
+/// superclasses, and each `Const` in an emitted body.
+fn for_each_app_constant(app: &App, f: &mut dyn FnMut(crate::span::Span, &str)) {
+    let own: std::collections::HashSet<&str> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str())
+        .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
+        .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
+        .collect();
+    let f = &mut |span: crate::span::Span, path: &str| {
+        if !own.contains(path) {
+            f(span, path);
+        }
+    };
     let parents = app
         .models
         .iter()
@@ -2088,23 +2110,19 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
         .chain(app.library_classes.iter().map(|c| (c.parent.as_ref(), c.parent_span)))
         .chain(app.controllers.iter().map(|c| (c.parent.as_ref(), c.parent_span)));
     for (parent, span) in parents {
-        if let Some(parent) = parent
-            && let Some(ns) = owner(parent.0.as_str())
-        {
-            report(span, parent.0.as_str(), &ns);
+        if let Some(parent) = parent {
+            f(span, parent.0.as_str());
         }
     }
-    fn visit(expr: &crate::expr::Expr, owner: &dyn Fn(&str) -> Option<String>, report: &dyn Fn(crate::span::Span, &str, &str)) {
+    fn visit(expr: &crate::expr::Expr, f: &mut dyn FnMut(crate::span::Span, &str)) {
         if let crate::expr::ExprNode::Const { path } = &*expr.node {
             let joined = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
-            if let Some(ns) = owner(&joined) {
-                report(expr.span, &joined, &ns);
-            }
+            f(expr.span, &joined);
             return;
         }
-        expr.node.for_each_child(&mut |child| visit(child, owner, report));
+        expr.node.for_each_child(&mut |child| visit(child, f));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, &owner, &report));
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, f));
 }
 
 /// Every class and module `runtime/spinel/*.rb` declares, by full name: a gem's
@@ -9001,6 +9019,11 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         return;
     };
     let census = crate::gems::GemCensus::of(lock);
+    // Not only the gem's conventional namespace spelled exactly: svg-graph's is `SVG::Graph`.
+    let mut owned = std::collections::HashSet::new();
+    for_each_app_constant(app, &mut |_, path| {
+        owned.extend(crate::gems::lock_gems_owning_constant(lock, path).into_iter().map(str::to_string));
+    });
     let needed: Vec<_> = census
         .unknown()
         .filter(|gem| {
@@ -9015,11 +9038,12 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
                 return false;
             }
             let namespace = crate::gems::namespace_of(&gem.name);
-            files.iter().any(|(path, content)| {
-                (path.starts_with("app/") || path.starts_with("lib/"))
-                    && path.ends_with(".rb")
-                    && names_constant(content, &namespace)
-            })
+            owned.contains(&gem.name)
+                || files.iter().any(|(path, content)| {
+                    (path.starts_with("app/") || path.starts_with("lib/"))
+                        && path.ends_with(".rb")
+                        && names_constant(content, &namespace)
+                })
         })
         .cloned()
         .collect();
@@ -9051,6 +9075,12 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         gemfile.push_str(&format!(
             "\n# Required by emitted application constants.\n{pinned}\n"
         ));
+    }
+    // Not only the gems the app names: a real gem can load a bundled one the app's own Gemfile lists for it (lobsters' rexml for svg-graph).
+    for dep in lock.dependencies.iter().filter(|dep| crate::gems::fate_of(dep) == crate::gems::GemFate::Stdlib) {
+        if !gemfile.contains(&format!("gem {dep:?}")) {
+            gemfile.push_str(&format!("gem {dep:?}\n"));
+        }
     }
     if let Some((_, boot)) = files.iter_mut().find(|(path, _)| path == "boot.rb") {
         let requires = eager_requires

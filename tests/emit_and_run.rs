@@ -19812,6 +19812,8 @@ mod nil_operand;
 mod descendant_ivar;
 #[path = "emit_and_run/initializer_top_level_def.rs"]
 mod initializer_top_level_def;
+#[path = "emit_and_run/unknown_gem_namespace.rs"]
+mod unknown_gem_namespace;
 #[path = "emit_and_run/url_helpers_include.rs"]
 mod url_helpers_include;
 #[path = "emit_and_run/length_is_in_within.rs"]
