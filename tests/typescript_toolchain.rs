@@ -155,6 +155,49 @@ fn real_blog_find_by_params_index_tsc_passes() {
     assert_tsc_passes("real-blog with params[:id]", &emitted);
 }
 
+/// `find(params[:id])` beside a row whose id is 0: a blank, absent or
+/// non-String id finds nothing (RecordNotFound) rather than row 0, which
+/// `Number("")` would answer; a numeric String finds its row.
+#[test]
+#[ignore]
+fn find_by_params_index_rejects_a_blank_id_beside_row_zero() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "Article.find(params.expect(:id))",
+            "Article.find(params[:id])",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        r#"import Database from "better-sqlite3";
+import { installDb } from "./src/juntos.js";
+import { Db } from "./src/db.js";
+import { Schema } from "./src/schema.js";
+import { ArticlesController } from "./app/controllers/articles_controller.js";
+const db = new Database(":memory:");
+for (const stmt of Schema.statements()) db.exec(stmt);
+installDb(db);
+Db.install(db);
+db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (0, 'zero', 'b', '2026-01-01 00:00:00', '2026-01-01 00:00:00'), (31, 'thirty-one', 'b', '2026-01-01 00:00:00', '2026-01-01 00:00:00')");
+const cases: [string, Record<string, any>][] = [["blank", { id: "" }], ["space", { id: " " }], ["missing", {}], ["array", { id: ["0"] }], ["abc", { id: "abc" }], ["zero", { id: "0" }], ["31", { id: "31" }]];
+const out: string[] = [];
+for (const [label, params] of cases) {
+  const c: any = new ArticlesController();
+  c.params = params;
+  try { c.show(); } catch (e: any) { if (e.constructor.name === "RecordNotFound") { out.push(`${label}=RecordNotFound`); continue; } }
+  out.push(`${label}=${c.article?.title}`);
+}
+console.log(out.join(","));
+"#,
+    );
+    assert_eq!(
+        out,
+        "blank=RecordNotFound,space=RecordNotFound,missing=RecordNotFound,array=RecordNotFound,abc=RecordNotFound,zero=zero,31=thirty-one"
+    );
+}
+
 /// A class that is not a model keeps its `find`'s argument: only a class
 /// reaching `ActiveRecord::Base` has the numeric key the coercion assumes.
 #[test]
@@ -175,7 +218,7 @@ fn non_model_find_keeps_its_params_argument() {
     let controller =
         std::fs::read_to_string(emitted.join("app/controllers/articles_controller.ts")).expect("emitted controller");
     assert!(controller.contains("Shelf.find(this.params[\"id\"])"), "{controller}");
-    assert!(controller.contains("Article.find(Number(String(this.params[\"id\"]"), "{controller}");
+    assert!(controller.contains("Article.find(Number(typeof this.params[\"id\"] === \"string\""), "{controller}");
     assert_tsc_passes("real-blog with a non-model find", &emitted);
 }
 

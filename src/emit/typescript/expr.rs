@@ -2442,11 +2442,13 @@ fn js_send_inner(
     // `Model.find(@params[k])`, the pre-Rails-8 spelling of `find(params.
     // expect(:id))`, on a class reaching `ActiveRecord::Base` (another
     // class's `find`, `Rake::Task.find(name)`, keeps its argument): the
-    // TS finder takes a `number` and the read is a
-    // `ParamValue`, so it is coerced as the `expect` lowering's is,
-    // `Number(String(…))` — the TS counterpart of the Rust emitter's
-    // `.as_i64().unwrap()`. A non-numeric id is NaN and finds nothing; the
-    // Ruby family hands the raw String to its casting finder instead.
+    // TS finder takes a `number` and the read is a `ParamValue`, so it
+    // is coerced — the TS counterpart of the Rust emitter's
+    // `.as_i64().unwrap()`. Only a nonblank String is converted: `Number`
+    // reads "" (a blank `?id=`, or a missing one) as 0, which would find
+    // row 0, so a blank, absent or non-String id is NaN and finds nothing
+    // (RecordNotFound, as Rails' `find(nil)`/`find("")`). The Ruby family
+    // hands the raw String to its casting finder instead.
     if method == "find" && args.len() == 1 && block.is_none() {
         if let (Some(r), ExprNode::Send { recv: Some(pr), method: index, args: index_args, block: None, .. }) =
             (recv, &*args[0].node)
@@ -2456,22 +2458,27 @@ fn js_send_inner(
                 && index_args.len() == 1
                 && matches!(&*pr.node, ExprNode::Ivar { name } if name.as_str() == "params")
             {
-                let send = |value: Expr, m: &str| {
-                    Expr::new(
-                        span,
-                        ExprNode::Send {
-                            recv: Some(value),
-                            method: Symbol::from(m),
-                            args: vec![],
-                            block: None,
-                            parenthesized: false,
-                        },
-                    )
-                };
-                // Through the general path below, which narrows the
-                // `Base` it returns to the model (`as Article`).
-                let coerced = send(send(args[0].clone(), "to_s"), "to_i");
-                return js_send_inner(span, recv, method, &[coerced], parenthesized, block);
+                // `Number(typeof v === "string" && v.trim() !== "" ? v : NaN)`;
+                // `v` is a property read, so reading it again is the same value.
+                let v = || js_expr(&args[0]);
+                let is_string = Js::binary(span, "===", Js::unary(span, "typeof ", v()), Js::str(span, "string"));
+                let nonblank = Js::binary(span, "!==", Js::method_call(span, v(), "trim", vec![]), Js::str(span, ""));
+                let key = Js::new(
+                    span,
+                    JsExpr::Ternary {
+                        cond: Js::binary(span, "&&", is_string, nonblank),
+                        then: v(),
+                        else_: Js::ident(span, "NaN"),
+                    },
+                );
+                let coerced = Js::call(span, Js::ident(span, "Number"), vec![key]);
+                // The `Base` it returns narrowed to the model, as the
+                // general path below narrows a class-method `find`.
+                let model = super::printer::render_expr(&js_expr(r));
+                return Js::new(
+                    span,
+                    JsExpr::Cast { expr: Js::method_call(span, js_expr(r), "find", vec![coerced]), ty: TsType(model) },
+                );
             }
         }
     }
