@@ -816,6 +816,9 @@ fn seed_well_known_classes(
         .insert(Symbol::from("select_rows"), array_of_rows.clone());
     adapter_iface
         .instance_methods
+        .insert(Symbol::from("each_row"), Ty::Nil);
+    adapter_iface
+        .instance_methods
         .insert(Symbol::from("execute_ddl"), Ty::Nil);
     adapter_iface
         .instance_methods

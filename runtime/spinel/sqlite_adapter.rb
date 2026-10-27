@@ -106,9 +106,14 @@ module SqliteAdapter
   # shims answer this now, the FFI one by storage-class dispatch. Each
   # row is its own Hash so the caller gets a stable copy after
   # `finalize`.
-  def self.select_rows(sql)
+  #
+  # `each_row` yields each row Hash as it is read; `select_rows` collects
+  # them. Hydration (`instantiate`) goes through `each_row`: Spinel can
+  # only type an Array of Hashes as a polymorphic array, so an element
+  # taken from `select_rows` reaches `<Model>Row.from_raw` boxed and
+  # widens its parameter, while a yielded row stays a Hash.
+  def self.each_row(sql)
     stmt = Db.prepare(sql)
-    rows = []
     ncols = Db.column_count(stmt)
     # Column names can't change between rows — resolve them once, not
     # rows×cols times (each column_name is a shim call, and hydrating
@@ -126,9 +131,15 @@ module SqliteAdapter
         row[names[i]] = Db.column_value(stmt, i)
         i += 1
       end
-      rows << row
+      yield row
     end
     Db.finalize(stmt)
+    nil
+  end
+
+  def self.select_rows(sql)
+    rows = []
+    each_row(sql) { |row| rows << row }
     rows
   end
 

@@ -1509,15 +1509,22 @@ module ActiveRecord
     # the model's own column list and the model hydrates typed records
     # straight from the statement (`_hydrate_all`) — the positions are
     # fixed at compile time, so no String-keyed Hash per row. An
-    # explicit `select` can project anything, and keeps the Hash path.
+    # explicit `select` can project anything, and keeps the Hash path,
+    # reading each row as `each_row` yields it (a Hash taken out of
+    # `select_rows`' Array reaches Spinel's `from_raw` boxed). The
+    # adapter goes through a local: Spinel emits a call to a block
+    # method it never defined when the receiver is the
+    # `class << self; attr_accessor` reader itself.
     # Recorded `includes` run here unless `skip_preloading!` is set.
     def load_records
       return [] if @null
       records = if @select_sql.nil?
         @model._hydrate_all(select_sql_with(@model._columns_sql))
       else
-        rows = ActiveRecord.adapter.select_rows(bound_sql)
-        rows.map { |row| @model.instantiate(row) }
+        hydrated = []
+        adapter = ActiveRecord.adapter
+        adapter.each_row(bound_sql) { |row| hydrated << @model.instantiate(row) }
+        hydrated
       end
       if @includes.length > 0 && !@skip_preloading && records.length > 0
         @model.preload_associations(records, @includes.dup)
