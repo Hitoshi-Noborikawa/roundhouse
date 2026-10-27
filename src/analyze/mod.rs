@@ -1283,7 +1283,7 @@ impl Analyzer {
             inquirers: inquiry::inquirer_methods(app),
             i18n: app.i18n.clone(),
             helper_modules: app.helper_method_index.values().cloned().collect(),
-            helper_index: app.helper_method_index.clone(),
+            helper_index: helper_instance_index(app),
             open_classes: open_classes::OpenClasses::of(app),
             const_resolver,
             source_indexed: !app.sources.is_empty(),
@@ -8545,6 +8545,23 @@ fn is_abstract_body(body: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// `App::helper_method_index` without the names whose module defines them
+/// only as `def self.x`: ingest indexes every method of a helper module, and a
+/// helper body's bare call reaches the view's instance methods, never a
+/// module's singleton one.
+fn helper_instance_index(app: &App) -> HashMap<Symbol, ClassId> {
+    app.helper_method_index
+        .iter()
+        .filter(|(name, owner)| {
+            app.library_classes.iter().any(|lc| {
+                &lc.name == *owner
+                    && lc.methods.iter().any(|m| &m.name == *name && m.receiver == crate::dialect::MethodReceiver::Instance)
+            })
+        })
+        .map(|(name, owner)| (name.clone(), owner.clone()))
+        .collect()
 }
 
 fn effective_return_ty(body: &Expr) -> Option<Ty> {

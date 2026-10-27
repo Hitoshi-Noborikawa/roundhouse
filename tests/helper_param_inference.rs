@@ -176,6 +176,13 @@ fn only_a_helper_instance_body_runs_in_the_view() {
     assert!(unresolved(&banner), "class-side helper: {banner:?}");
     let widget = returns(&app, "Widgets", "home_link", false);
     assert!(unresolved(&widget), "module outside app/helpers: {widget:?}");
+    // And a helper module's `def self.image_tag` is no answer for another
+    // helper's bare `image_tag`: the view's instance method is ActionView's.
+    let app = analyzed_app(&[
+        ("app/helpers/images_helper.rb", "module ImagesHelper\n  def self.image_tag(source)\n    37\n  end\nend\n"),
+        ("app/helpers/logos_helper.rb", "module LogosHelper\n  def logo\n    image_tag(\"logo.png\")\n  end\nend\n"),
+    ]);
+    assert_eq!(returns(&app, "LogosHelper", "logo", false), Some(Ty::Str), "a singleton image_tag is not the view's");
 }
 
 #[test]
