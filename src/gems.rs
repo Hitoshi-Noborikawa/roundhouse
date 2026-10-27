@@ -74,6 +74,7 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "faraday/retry",
     "retryable",
     "jwt",
+    "rest-client",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -91,7 +92,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 22] = [
+    const RUNTIME_GEMS: [(Marker, &str); 23] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -209,6 +210,8 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // refused on the strict targets (`lower::ruby_family_gems`).
         (Marker::Constant("Retryable"), "retryable"),
         (Marker::Constant("JWT"), "jwt"),
+        // RestClient, the same way.
+        (Marker::Constant("RestClient"), "rest-client"),
     ];
     &RUNTIME_GEMS
 }
@@ -681,6 +684,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("pushover", GemFate::Modeled),    // catalog/gems: Pushover
     ("rack-mini-profiler", GemFate::Modeled), // catalog/gems: Rack::MiniProfiler
     ("representable", GemFate::Modeled), // ingest/representable: Decorator + JSON, property/collection subset
+    ("rest-client", GemFate::Modeled), // catalog/gems: RestClient; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("retryable", GemFate::Modeled),   // catalog/gems: Retryable; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("rotp", GemFate::Modeled),        // catalog/gems: ROTP::*
     ("rqrcode", GemFate::Modeled),     // catalog/gems: RQRCode::QRCode

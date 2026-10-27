@@ -568,6 +568,64 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass { name: "JWT::MissingRequiredClaim", class_methods: &[], instance_methods: JWT_ERROR },
     GemClass { name: "JWT::Base64DecodeError", class_methods: &[], instance_methods: JWT_ERROR },
     GemClass { name: "JWT::JWKError", class_methods: &[], instance_methods: JWT_ERROR },
+    // RestClient — the HTTP client (rest-client). As Faraday: the real gem
+    // on ruby and jruby, refused elsewhere (`lower::ruby_family_gems`).
+    GemClass {
+        name: "RestClient",
+        class_methods: &[
+            ("get", GemTy::Instance("RestClient::Response")),
+            ("post", GemTy::Instance("RestClient::Response")),
+            ("put", GemTy::Instance("RestClient::Response")),
+            ("patch", GemTy::Instance("RestClient::Response")),
+            ("delete", GemTy::Instance("RestClient::Response")),
+            ("head", GemTy::Instance("RestClient::Response")),
+            ("options", GemTy::Instance("RestClient::Response")),
+        ],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "RestClient::Request",
+        // Gradual: `raw_response: true` answers a `RestClient::RawResponse`.
+        class_methods: &[("execute", GemTy::Untyped)],
+        instance_methods: &[("execute", GemTy::Untyped)],
+    },
+    GemClass {
+        name: "RestClient::Response",
+        class_methods: &[],
+        instance_methods: &[
+            ("body", GemTy::Str),
+            ("code", GemTy::Int),
+            ("headers", GemTy::Untyped),
+            ("raw_headers", GemTy::Untyped),
+            ("cookies", GemTy::Untyped),
+            ("to_s", GemTy::Str),
+            ("to_str", GemTy::Str),
+            ("request", GemTy::Untyped),
+        ],
+    },
+    GemClass { name: "RestClient::Exceptions", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "RestClient::Exception", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::ExceptionWithResponse", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::RequestFailed", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::RequestTimeout", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::ServerBrokeConnection", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::SSLCertificateNotVerified", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::Exceptions::Timeout", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::Exceptions::OpenTimeout", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::Exceptions::ReadTimeout", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::BadRequest", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::Unauthorized", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::Forbidden", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::NotFound", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::ResourceNotFound", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::MethodNotAllowed", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::Conflict", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::UnprocessableEntity", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::TooManyRequests", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::InternalServerError", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::BadGateway", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::ServiceUnavailable", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
+    GemClass { name: "RestClient::GatewayTimeout", class_methods: &[], instance_methods: REST_CLIENT_ERROR },
 ];
 
 const FARADAY_FILE_PART: &[(&str, GemTy)] = &[
@@ -589,3 +647,12 @@ const FARADAY_ERROR: &[(&str, GemTy)] = &[
 ];
 
 const JWT_ERROR: &[(&str, GemTy)] = &[("message", GemTy::Str), ("to_s", GemTy::Str)];
+
+const REST_CLIENT_ERROR: &[(&str, GemTy)] = &[
+    ("message", GemTy::Str),
+    ("to_s", GemTy::Str),
+    ("http_code", GemTy::Untyped),
+    ("http_body", GemTy::Untyped),
+    ("http_headers", GemTy::Untyped),
+    ("response", GemTy::Untyped),
+];
