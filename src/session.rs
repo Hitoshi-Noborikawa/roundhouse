@@ -79,6 +79,7 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
     if !target.parses_numericality_input() {
         refused.extend(crate::ingest::app::refuse_numericality_allow_on_untyped(app, target.as_str()));
     }
+    refused.extend(crate::lower::untyped_subclass_diagnostics(app));
     refused.extend(analyze_and_lower(app));
     refused
 }

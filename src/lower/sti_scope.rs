@@ -375,7 +375,15 @@ fn no_arg_send(recv: Expr, method: &str) -> Expr {
 /// parent walk and the inheritance-column check that would drift from
 /// this one.
 pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
-    let mut out = HashMap::new();
+    model_subclasses(app).0
+}
+
+/// Every library class whose `parent` chain reaches a Model with a
+/// table, split on that table's inheritance column: STI subclasses
+/// (with one) and plain subclasses (without one) → their base model.
+fn model_subclasses(app: &App) -> (HashMap<ClassId, ClassId>, HashMap<ClassId, ClassId>) {
+    let mut typed = HashMap::new();
+    let mut untyped = HashMap::new();
     // Name -> the FIRST model / library class of that name, the same
     // element the linear `find`s this replaced answered. Indexed once:
     // a scan per parent hop is |classes|^2 on a large app.
@@ -396,15 +404,14 @@ pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
                 break;
             }
             if let Some(base) = model_named(&parent) {
-                let has_type = app
-                    .schema
-                    .tables
-                    .get(&base.table.0)
-                    .is_some_and(|t| {
-                        t.columns.iter().any(|c| c.name.as_str() == INHERITANCE_COLUMN)
-                    });
-                if has_type {
-                    out.insert(lc.name.clone(), base.name.clone());
+                // An abstract base has no table, so its subclasses are
+                // neither.
+                if let Some(table) = app.schema.tables.get(&base.table.0) {
+                    if table.columns.iter().any(|c| c.name.as_str() == INHERITANCE_COLUMN) {
+                        typed.insert(lc.name.clone(), base.name.clone());
+                    } else {
+                        untyped.insert(lc.name.clone(), base.name.clone());
+                    }
                 }
                 break;
             }
@@ -412,7 +419,96 @@ pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
             hops += 1;
         }
     }
-    out
+    (typed, untyped)
+}
+
+/// The finders that load a subclass's records, or a relation of them.
+/// Value answers (`count`, `pluck`, `sum`, …) and the constructors are
+/// already Rails' without a `type` column.
+const LOADING_METHODS: &[&str] = &[
+    "all", "where", "find", "find_by", "find_by!", "first", "first!", "last", "last!", "take",
+    "take!", "sole", "find_sole_by", "find_each", "find_in_batches", "in_batches", "order",
+    "reorder", "limit", "offset", "joins", "left_joins", "left_outer_joins", "includes",
+    "preload", "eager_load", "distinct", "select", "group", "having", "none", "unscoped",
+    "readonly", "lock", "find_or_create_by", "find_or_create_by!", "find_or_initialize_by",
+    "create_or_find_by", "create_or_find_by!",
+];
+
+/// A subclass of a concrete model whose table has no `type` column
+/// (#1415). That isn't STI: activerecord 8.1.4 shares the table, filters
+/// nothing, and loads every row a subclass's finder answers as the
+/// subclass (`Feature.first.class` is `Feature`, `Feature.count` counts
+/// every row). Here the finder is the base's, inherited, and its rows
+/// are the base's class: `Feature.first.class` is `Article`, so a
+/// method only the subclass defines raises NoMethodError on them.
+/// Counts and constructors already match. Each call site with the
+/// subclass as its constant receiver and a loading finder, or one of
+/// the base's named scopes, is a warning: the call is still emitted.
+pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::Diagnostic> {
+    let (_, untyped) = model_subclasses(app);
+    if untyped.is_empty() {
+        return Vec::new();
+    }
+    let scopes: HashMap<&ClassId, HashSet<&str>> = app
+        .models
+        .iter()
+        .map(|m| {
+            let names = m
+                .body
+                .iter()
+                .filter_map(|item| match item {
+                    crate::dialect::ModelBodyItem::Scope { scope, .. } => Some(scope.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            (&m.name, names)
+        })
+        .collect();
+    fn walk(
+        e: &Expr,
+        untyped: &HashMap<ClassId, ClassId>,
+        scopes: &HashMap<&ClassId, HashSet<&str>>,
+        sites: &mut Vec<(Span, ClassId, ClassId, Symbol)>,
+    ) {
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*e.node {
+            if let ExprNode::Const { path } = &*recv.node {
+                let sub = const_class_id(path);
+                if let Some(base) = untyped.get(&sub) {
+                    let loads = LOADING_METHODS.contains(&method.as_str())
+                        || scopes.get(base).is_some_and(|names| names.contains(method.as_str()));
+                    if loads {
+                        sites.push((e.span, sub, base.clone(), method.clone()));
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, untyped, scopes, sites));
+    }
+    let mut sites: Vec<(Span, ClassId, ClassId, Symbol)> = Vec::new();
+    let mut visit = |body: &Expr| walk(body, &untyped, &scopes, &mut sites);
+    super::for_each_hook_body_ref(app, &mut visit);
+    for view in &app.views {
+        visit(&view.body);
+    }
+    sites
+        .into_iter()
+        .map(|(span, sub, base, method)| {
+            let (sub, base) = (sub.0.as_str(), base.0.as_str());
+            let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                span,
+                None,
+                format!("`{sub}.{}` on a subclass of a model whose table has no `type` column", method.as_str()),
+                format!("Rails loads its records as `{sub}`; this build loads them as `{base}`, whose finder it inherits"),
+            );
+            diagnostic.severity = crate::diagnostic::Severity::Warning;
+            let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
+            crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                file,
+                message: diagnostic.message.clone(),
+            });
+            diagnostic
+        })
+        .collect()
 }
 
 fn rewrite(
