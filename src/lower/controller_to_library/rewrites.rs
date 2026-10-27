@@ -54,9 +54,10 @@ pub(super) fn partial_view_call(
     locals: &[(Symbol, Expr)],
     module_name: Option<&str>,
     partials: &super::PartialMap,
+    request: Option<(Option<&str>, &str)>,
     span: Span,
 ) -> Option<Expr> {
-    partial_view_call_with_record(partial, locals, None, module_name, partials, span)
+    partial_view_call_with_record(partial, locals, None, module_name, partials, request, span)
 }
 
 /// `partial_view_call` with the record supplied directly, for a caller
@@ -74,6 +75,7 @@ pub(super) fn partial_view_call_with_record(
     record_override: Option<&Expr>,
     module_name: Option<&str>,
     partials: &super::PartialMap,
+    request: Option<(Option<&str>, &str)>,
     span: Span,
 ) -> Option<Expr> {
     let (module_dir, base_name) = match partial.rsplit_once('/') {
@@ -103,7 +105,35 @@ pub(super) fn partial_view_call_with_record(
     for n in &contract.closure {
         view_args.push(lookup(n).unwrap_or_else(|| ivar(n.as_str(), span)));
     }
-    view_args.extend(contract.extras_args(lookup, |_| None, None, || nil_expr(span), span));
+    // An action's render passes its own action, controller and path parameters, as a view's call passes them to a partial.
+    let request_value = |name: &str| -> Option<Expr> {
+        let (action, controller) = request?;
+        // Not over a strict partial's own declared default (`action_name: "fallback"`).
+        if contract.declared.iter().any(|d| d == name) {
+            return None;
+        }
+        match name {
+            // Not a helper's own name: it is not the action, so the request's is read.
+            "action_name" => Some(match action {
+                Some(action) => str_lit(span, action),
+                None => Expr::new(
+                    span,
+                    ExprNode::Send { recv: None, method: Symbol::from("action_name"), args: vec![], block: None, parenthesized: false },
+                ),
+            }),
+            // Not a helper's own controller: an inherited one (ApplicationController's) renders for the subclass the request reached.
+            "controller_name" => Some(match action {
+                Some(_) if !controller.is_empty() => str_lit(span, controller),
+                _ => Expr::new(
+                    span,
+                    ExprNode::Send { recv: None, method: Symbol::from("controller_path"), args: vec![], block: None, parenthesized: false },
+                ),
+            }),
+            "path_parameters" => Some(ivar("path_parameters", span)),
+            _ => None,
+        }
+    };
+    view_args.extend(contract.extras_args(lookup, request_value, None, || nil_expr(span), span));
     Some(Expr::new(
         span,
         ExprNode::Send {
@@ -124,6 +154,8 @@ pub(super) fn rewrite_render_to_views(
     view_ivars: &super::ViewIvarMap,
     partials: &super::PartialMap,
     current_action: &str,
+    // An action's own body, whose name is the request's action; a helper's is not.
+    is_action: bool,
     // The Views modules of every controller that INHERITS this one —
     // where a template this controller lacks may still live. See the
     // `subclass_template_hook` arm below.
@@ -196,7 +228,7 @@ pub(super) fn rewrite_render_to_views(
                 }
                 if let Some(pname) = partial_name {
                     let view_call =
-                        partial_view_call(&pname, &locals_entries, module_name, partials, e.span)?;
+                        partial_view_call(&pname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str())), e.span)?;
                     if to_string {
                         return Some(view_call);
                     }
@@ -270,7 +302,7 @@ pub(super) fn rewrite_render_to_views(
                         }
                     }
                     let view_call =
-                        partial_view_call(tname, &locals_entries, module_name, partials, e.span)?;
+                        partial_view_call(tname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str())), e.span)?;
                     let mut new_args = vec![view_call];
                     if !rest.is_empty() {
                         new_args.push(Expr::new(e.span, ExprNode::Hash { entries: rest, kwargs: true }));

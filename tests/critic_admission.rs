@@ -106,6 +106,9 @@ fn non_nil_assertions_require_runtime_support() {
     refuses("1.not_nil!", "not_nil!");
 }
 
+/// A `for` opens no scope: ingest writes it as a `while`, so the loop
+/// variable and a body local stay visible after it, as in Ruby (the
+/// answers are pinned by `emit_and_run::for_loops`).
 #[test]
 fn for_scope_is_not_a_block_scope() {
     for body in [
@@ -114,7 +117,7 @@ fn for_scope_is_not_a_block_scope() {
         "for x in [1, 2]; y = x * 10; end; y",
         "for p, q in [[1, 2], [3, 4]]; end; [p, q]",
         "for x in []; y = 1; end; [defined?(y), y]",
-    ] { refuses(body, "for"); }
+    ] { admits(body); }
 }
 
 #[test]

@@ -1061,7 +1061,7 @@ fn subclass_template_hooks(
                         parenthesized: true,
                     },
                 );
-                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, &[])
+                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, &[])
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -2387,9 +2387,11 @@ fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[
     let reads = |e: &Expr| body_calls_method(e, &action_name);
     let mut chain = ancestor_chain(controller, all);
     chain.push(controller);
+    // A method that renders a partial passes the request's `action_name` on to it, outside an action too (a helper, an inherited one).
+    let renders_partial = |e: &Expr| body_renders_partial(e);
     dispatched.iter().any(|e| reads(e))
         || chain.iter().any(|c| {
-            c.actions().any(|a| reads(&a.body))
+            c.actions().any(|a| reads(&a.body) || renders_partial(&a.body))
                 || c.filters().any(|f| {
                     [&f.block, &f.if_cond_expr, &f.unless_cond_expr]
                         .into_iter()
@@ -2397,6 +2399,22 @@ fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[
                         .any(reads)
                 })
         })
+}
+
+fn body_renders_partial(e: &Expr) -> bool {
+    if let ExprNode::Send { recv: None, method, args, .. } = &*e.node
+        && matches!(method.as_str(), "render" | "render_to_string")
+        && (args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { entries, .. }
+            if entries.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"))))
+            // `render "shared/_pager"`: the String form names the partial by its file.
+            || args.first().is_some_and(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Str { value } }
+                if value.rsplit('/').next().is_some_and(|leaf| leaf.starts_with('_')))))
+    {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || body_renders_partial(c));
+    found
 }
 
 /// Does this filter body contain a respond-capable call (render /
@@ -3225,6 +3243,7 @@ fn lower_action_body(
             view_ivars,
             partials,
             action_name,
+            is_public,
             inheritor_modules,
         )
     };
