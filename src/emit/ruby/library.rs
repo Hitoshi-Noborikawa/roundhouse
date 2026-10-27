@@ -11125,7 +11125,7 @@ end
             let target = target.0.as_str();
             let _ = write!(
                 src,
-                "  when :{name}\n    ids = []\n    records.each do |r| ids << r.id end\n    loaded = []\n    if ids.length > 0\n      rel = ActiveRecord::Relation.new({target}).where({fk}: ids).where(filter.conditions)\n      filter.orders.each do |o| rel = rel.order(o) end\n      loaded = rel.to_a\n    end\n    grouped = {{}}\n    loaded.each do |rec|\n      k = rec.{fk}\n      grouped[k] = [] if grouped[k].nil?\n      grouped[k] << rec\n    end\n    records.each do |r| r._preload_{name}(grouped[r.id] || []) end\n"
+                "  when :{name}\n    ids = []\n    records.each do |r| ids << r.id end\n    loaded = []\n    if ids.length > 0\n      rel = ActiveRecord::Relation.new({target}).where({fk}: ids)\n      filter.conditions.each do |c| rel = rel.where(c) end\n      filter.negations.each do |c| rel = rel.where.not(c) end\n      filter.orders.each do |o| rel = rel.order(o) end\n      loaded = rel.to_a\n    end\n    grouped = {{}}\n    loaded.each do |rec|\n      k = rec.{fk}\n      grouped[k] = [] if grouped[k].nil?\n      grouped[k] << rec\n    end\n    records.each do |r| r._preload_{name}(grouped[r.id] || []) end\n"
             );
         }
         src.push_str("  end\n  nil\nend\n");

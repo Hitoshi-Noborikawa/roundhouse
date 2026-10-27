@@ -23,10 +23,11 @@ pub(super) fn rewritten_extras(
     ivar_locals: &IvarLocals,
     record: &str,
     keys: Option<&[String]>,
+    request_context: bool,
 ) -> (Expr, Vec<String>) {
     let (body, flash) = flash_locals(view, ivar_locals, record, keys);
     let rewritten = rewrite_ivars_to_locals(&body, ivar_locals);
-    let extras = collect_extra_params(&rewritten, record, &flash);
+    let extras = collect_extra_params(&rewritten, record, &flash, request_context);
     (rewritten, extras)
 }
 
@@ -142,7 +143,7 @@ pub(super) fn flash_locals<'a>(
 /// whether to pass each flash slot. Cost is two unused locals per
 /// view that doesn't reference flash; emit-side it's negligible. They
 /// go by the names `flash` gives them (see `flash_locals`).
-fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2]) -> Vec<String> {
+fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2], request_context: bool) -> Vec<String> {
     let mut out: Vec<String> = flash.to_vec();
     // `action_name`/`controller_name` are controller context Rails exposes
     // to views. Unlike flash, they're collected only when the view
@@ -151,8 +152,9 @@ fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2]) -> Vec
     // at known positions). The controller passes them only to views whose
     // contract records the usage (see action_view_ivar_map) — so views
     // that don't use them gain no extra params on any target.
-    // A run-time url Hash resolves against the request's controller and action too.
-    let dynamic_url = super::view_uses_dynamic_url_hash(body);
+    // A run-time url Hash resolves against the request's controller and
+    // action too, in the view or a partial it renders (`request_context_views`).
+    let dynamic_url = request_context;
     if dynamic_url || super::view_uses_bare_name(body, "action_name") {
         out.push("action_name".to_string());
     }

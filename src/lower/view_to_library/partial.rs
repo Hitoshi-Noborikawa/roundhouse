@@ -39,6 +39,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             let plural_camel = camelize_path(&crate::naming::pluralize_snake(&singular));
             let mut call_args = vec![var_ref(Symbol::from(crate::naming::safe_local(&singular)))];
             call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
+            call_args.extend(locals_extra_args(None, &plural_camel, &singular, ctx));
             let method = ctx.render_method(ViewKind::Partial, &plural_camel, &singular);
             let call = send(
                 Some(Expr::new(
@@ -853,6 +854,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
 
     let mut call_args = vec![var_ref(var_name.clone())];
     call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
+    call_args.extend(locals_extra_args(None, &plural_camel, &singular, ctx));
     let method = ctx.render_method(ViewKind::Partial, &plural_camel, &singular);
     let render_call = send(
         Some(Expr::new(
@@ -1100,7 +1102,7 @@ fn locals_extra_args(
     method_sym: &str,
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
-    let Some(entries) = locals else { return Vec::new() };
+    let entries = locals.unwrap_or_default();
     let Some(extras) = ctx
         .partial_extras
         .get(&(module_camel.to_string(), method_sym.to_string()))
@@ -1110,12 +1112,20 @@ fn locals_extra_args(
     let bound: Vec<Option<Expr>> = extras
         .iter()
         .map(|name| {
-            entries.iter().find_map(|(k, v)| match &*k.node {
-                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name => {
-                    Some(v.clone())
-                }
-                _ => None,
-            })
+            entries
+                .iter()
+                .find_map(|(k, v)| match &*k.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name => {
+                        Some(v.clone())
+                    }
+                    _ => None,
+                })
+                // The request context a run-time url Hash reads passes on from the rendering view (`request_context_views`).
+                .or_else(|| {
+                    (matches!(name.as_str(), "action_name" | "controller_name" | "path_parameters")
+                        && ctx.locals.iter().any(|l| l == name))
+                    .then(|| var_ref(Symbol::from(name.as_str())))
+                })
         })
         .collect();
     let Some(last) = bound.iter().rposition(|b| b.is_some()) else {

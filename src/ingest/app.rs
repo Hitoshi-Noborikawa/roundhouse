@@ -333,7 +333,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             .filter(|g| !auto.contains(g))
             .collect();
         if more.is_empty() || auto.len() >= 32 {
-            app.auto_source_gems = auto;
+            app.auto_source_gems = auto.into_iter().filter(|g| app.gem_lock.as_ref().is_some_and(|l| l.source.contains(g))).collect();
             return Ok(app);
         }
         // Not the superseded pass's parse errors and survey gaps as well: the next pass reports them again.
@@ -359,9 +359,11 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let mut source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
         .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
     // Not fatal for an automatic one: the gem stays a reported boundary, as it was.
+    let mut auto_sourced: Vec<String> = Vec::new();
     for gem in auto_source_gems {
         if let Ok(mut resolved) = super::source_gems::resolve(vfs, dir, lock.as_ref(), std::slice::from_ref(gem)) {
             source_gems.append(&mut resolved);
+            auto_sourced.push(gem.clone());
         }
     }
     let mount_vfs = super::source_gems::MountVfs { inner: vfs, gems: &source_gems };
@@ -421,7 +423,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                 lock.gemfile_requires = crate::gems::gemfile_requires(&gemfile);
             }
             lock.source = app.extensions.source_gems.clone();
-            lock.source.extend(auto_source_gems.iter().cloned());
+            lock.source.extend(auto_sourced.iter().cloned());
             app.gem_lock = Some(lock);
             if let Some(lock) = &app.gem_lock {
                 app.gem_boundary = super::rbi::load_gem_boundary(vfs, dir, lock, &app.extensions);

@@ -239,6 +239,8 @@ pub struct ViewLowerCtx<'a> {
     /// `ViewCtx::multipart_partials`.
     multipart_partials: std::rc::Rc<std::collections::HashSet<ViewKey>>,
     partial_extras: std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
+    /// See [`request_context_views`].
+    request_context: std::rc::Rc<std::collections::HashSet<String>>,
     locals_keys: std::collections::HashMap<(String, String), Vec<String>>,
     reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
     reference_targets: std::rc::Rc<std::collections::HashMap<String, String>>,
@@ -307,6 +309,7 @@ impl<'a> ViewLowerCtx<'a> {
             dyn_pools: std::rc::Rc::new(dynamic_partial_pools(&app.controllers)),
             multipart_partials: std::rc::Rc::new(multipart_partials(&app.views)),
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
+            request_context: std::rc::Rc::new(request_context_views(&app.views)),
             locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
@@ -445,7 +448,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // Flash rename → ivar rewrite → extras collect, one pipeline shared
     // with the call-site contracts (see `extra_params::rewritten_extras`).
     let (rewritten, extra_params) =
-        rewritten_extras(view, &ivar_locals, &arg_name, keys.map(Vec::as_slice));
+        rewritten_extras(view, &ivar_locals, &arg_name, keys.map(Vec::as_slice), lx.request_context.contains(view.name.as_str()));
 
     // Rewrite `defined?(name)` marker Sends to `!name.nil?` checks.
     // Runs AFTER collect_extra_params so the inner Var name has been
@@ -2648,6 +2651,7 @@ pub(crate) fn partial_call_contracts(
     // Same record derivation as `build_library_class` / `partial_extras_map`
     // so `flash_locals` sees one handed name across def and callers.
     let (collection_locals, _) = collection_element_locals_from_views(views);
+    let request_context = request_context_views(views);
     let mut out = std::collections::HashMap::new();
     for view in views {
         let (dir, base) = split_view_name(view.name.as_str());
@@ -2685,7 +2689,7 @@ pub(crate) fn partial_call_contracts(
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
         let keys = keys_map.get(&key).map(Vec::as_slice);
-        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys);
+        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys, request_context.contains(view.name.as_str()));
         // The def side names each closure param by `ivar_locals` and
         // skips the one the record covers. The caller passes `@<ivar>`
         // for the rest, so the contract keeps the RAW ivar name: the
@@ -2720,6 +2724,7 @@ pub(crate) fn action_view_ivar_map(
     // view itself doesn't read it.
     let closures = view_ivar_closures(views, controllers);
     let json_closures = crate::lower::jbuilder_to_library::jbuilder_ivar_closures(views, models);
+    let request_context = request_context_views(views);
     let mut out = std::collections::HashMap::new();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
@@ -2791,9 +2796,9 @@ pub(crate) fn action_view_ivar_map(
             key,
             ViewArgs {
                 ivars,
-                uses_action_name: view_uses_bare_name(&v.body, "action_name") || view_uses_dynamic_url_hash(&v.body),
-                uses_controller_name: view_uses_bare_name(&v.body, "controller_name") || view_uses_dynamic_url_hash(&v.body),
-                uses_path_parameters: view_uses_url_options_hash(&v.body) || view_uses_dynamic_url_hash(&v.body),
+                uses_action_name: view_uses_bare_name(&v.body, "action_name") || request_context.contains(v.name.as_str()),
+                uses_controller_name: view_uses_bare_name(&v.body, "controller_name") || request_context.contains(v.name.as_str()),
+                uses_path_parameters: view_uses_url_options_hash(&v.body) || request_context.contains(v.name.as_str()),
             },
         );
     }
@@ -2843,7 +2848,14 @@ pub(crate) fn view_uses_dynamic_url_hash(body: &Expr) -> bool {
                     _ => None,
                 }
             };
-            if url.is_some_and(dynamic_url_hash) {
+            // A conditional URL resolves branch by branch (`emit_url_arg`).
+            fn any_branch(url: &Expr) -> bool {
+                match &*url.node {
+                    ExprNode::If { then_branch, else_branch, .. } => any_branch(then_branch) || any_branch(else_branch),
+                    _ => dynamic_url_hash(url),
+                }
+            }
+            if url.is_some_and(any_branch) {
                 return true;
             }
         }
@@ -2852,6 +2864,38 @@ pub(crate) fn view_uses_dynamic_url_hash(body: &Expr) -> bool {
         found
     }
     walk(body)
+}
+
+/// The views that need the request's controller, action and path
+/// parameters for a [`dynamic_url_hash`] URL: those linking to one, and
+/// those rendering a partial that does, so the values reach the partial.
+pub(crate) fn request_context_views(views: &[View]) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = views
+        .iter()
+        .filter(|v| view_uses_dynamic_url_hash(&v.body))
+        .map(|v| v.name.as_str().to_string())
+        .collect();
+    let pools = std::collections::HashMap::new();
+    loop {
+        let needed: std::collections::HashSet<ViewKey> = views
+            .iter()
+            .filter(|v| out.contains(v.name.as_str()) && split_view_name(v.name.as_str()).1.starts_with('_'))
+            .filter_map(view_key_of)
+            .collect();
+        let more: Vec<String> = views
+            .iter()
+            .filter(|v| !out.contains(v.name.as_str()))
+            .filter(|v| {
+                let (dir, _) = split_view_name(v.name.as_str());
+                render_partial_keys(&v.body, dir, &pools).iter().any(|k| needed.contains(k))
+            })
+            .map(|v| v.name.as_str().to_string())
+            .collect();
+        if more.is_empty() {
+            return out;
+        }
+        out.extend(more);
+    }
 }
 
 pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {
@@ -2896,6 +2940,7 @@ pub(super) fn partial_extras_map(
     let closures = view_ivar_closures(&app.views, &app.controllers);
     let keys_map = render_locals_keys(&app.views, &app.controllers, &app.library_classes);
     let collection_locals = collection_element_locals(&app.views, app);
+    let request_context = request_context_views(&app.views);
     let mut out: std::collections::HashMap<(String, String), Vec<String>> =
         std::collections::HashMap::new();
     for view in &app.views {
@@ -2911,7 +2956,7 @@ pub(super) fn partial_extras_map(
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
         let keys = keys_map.get(&key).map(Vec::as_slice);
-        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys);
+        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys, request_context.contains(view.name.as_str()));
         // locals-key params — mirrors the def site's append exactly.
         let closure: Vec<String> =
             closure_raw.iter().map(|s| ivar_local(&ivar_locals, s.as_str())).collect();

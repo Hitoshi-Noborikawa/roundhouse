@@ -6,7 +6,7 @@
 //!
 //! The chain is rewritten on the ruby family:
 //!
-//!   Category.includes(tags: ActiveRecord::EagerFilter.new({ tags: { active: true } }, [{ tags: { tag: :asc } }]))
+//!   Category.includes(tags: ActiveRecord::EagerFilter.new([{ tags: { active: true } }], [], [{ tags: { tag: :asc } }]))
 //!     .left_outer_joins(:tags).distinct.where(…).order(…)
 //!
 //! The join and `distinct` filter the parents. The EagerFilter rides the
@@ -93,6 +93,8 @@ struct Chain {
     included: Vec<Symbol>,
     /// Table keys of `where` hashes, and the key/value pairs themselves.
     conditions: Vec<(Symbol, Expr)>,
+    /// The same of `where.not` hashes.
+    negations: Vec<(Symbol, Expr)>,
     /// Table-keyed `order` hash entries.
     orders: Vec<(Symbol, Expr)>,
     referenced: Vec<Symbol>,
@@ -101,7 +103,7 @@ struct Chain {
 /// The relation chain `e` tops, rooted at a model constant, or at the
 /// model itself inside its own class-side body (`own`).
 fn chain_of(e: &Expr, models: &[Model], own: Option<&ClassId>) -> Option<Chain> {
-    let mut chain = Chain { model: ClassId(Symbol::from("")), included: Vec::new(), conditions: Vec::new(), orders: Vec::new(), referenced: Vec::new() };
+    let mut chain = Chain { model: ClassId(Symbol::from("")), included: Vec::new(), conditions: Vec::new(), negations: Vec::new(), orders: Vec::new(), referenced: Vec::new() };
     let mut node = e;
     let mut any = false;
     loop {
@@ -182,7 +184,13 @@ fn step(method: &str, args: &[Expr], chain: &mut Chain, any: &mut bool) -> bool 
                 }
             }
         }
-        "all" | "not" | "distinct" | "limit" | "offset" | "joins" | "left_outer_joins" | "left_joins" | "select" | "unscope" => {}
+        "not" => {
+            for arg in args {
+                table_keyed(arg, &mut chain.negations);
+            }
+        }
+        // Not `unscope`: it can drop a condition this chain would have carried to the association.
+        "all" | "distinct" | "limit" | "offset" | "joins" | "left_outer_joins" | "left_joins" | "select" => {}
         _ => return false,
     }
     true
@@ -197,20 +205,19 @@ fn apply(e: &mut Expr, chain: &Chain, models: &[Model]) {
         let Some(table) = models.iter().find(|m| &m.name == target).map(|m| m.table.0.clone()) else { continue };
         // Rails keys a `where`/`order` on the table; the association's name reads the same table here.
         let mentions = |key: &Symbol| key == &table || key == name;
-        let conditions: Vec<(Expr, Expr)> = chain
-            .conditions
-            .iter()
-            .filter(|(k, _)| mentions(k))
-            .map(|(_, v)| (sym(e.span, &table), v.clone()))
-            .collect();
-        let orders: Vec<Expr> = chain
-            .orders
-            .iter()
-            .filter(|(k, _)| mentions(k))
-            .map(|(_, v)| hash(e.span, vec![(sym(e.span, &table), v.clone())]))
-            .collect();
+        // One Hash per call, applied in turn: merged into one, a column two calls name would keep only the last.
+        let on_table = |entries: &[(Symbol, Expr)]| -> Vec<Expr> {
+            entries
+                .iter()
+                .filter(|(k, _)| mentions(k))
+                .map(|(_, v)| hash(e.span, vec![(sym(e.span, &table), v.clone())]))
+                .collect()
+        };
+        let conditions = on_table(&chain.conditions);
+        let negations = on_table(&chain.negations);
+        let orders = on_table(&chain.orders);
         let referenced = chain.referenced.iter().any(&mentions);
-        if conditions.is_empty() && orders.is_empty() && !referenced {
+        if conditions.is_empty() && negations.is_empty() && orders.is_empty() && !referenced {
             continue;
         }
         let filter = Expr::new(
@@ -218,7 +225,10 @@ fn apply(e: &mut Expr, chain: &Chain, models: &[Model]) {
             ExprNode::Send {
                 recv: Some(Expr::new(e.span, ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("EagerFilter")] })),
                 method: Symbol::from("new"),
-                args: vec![hash(e.span, conditions), Expr::new(e.span, ExprNode::Array { elements: orders, style: Default::default() })],
+                args: [conditions, negations, orders]
+                    .into_iter()
+                    .map(|elements| Expr::new(e.span, ExprNode::Array { elements, style: Default::default() }))
+                    .collect(),
                 block: None,
                 parenthesized: true,
             },

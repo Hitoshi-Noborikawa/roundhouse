@@ -287,7 +287,8 @@ module ActionMailer
       return value.to_s unless value.is_a?(Array)
       parts = []
       value.each { |part| parts << part.to_s }
-      separator = name == "References" || name == "In-Reply-To" ? "\r\n " : ", "
+      field = name.downcase
+      separator = field == "references" || field == "in-reply-to" ? "\r\n " : ", "
       parts.join(separator)
     end
 

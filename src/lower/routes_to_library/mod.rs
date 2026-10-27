@@ -453,18 +453,18 @@ pub fn lower_url_option_helpers(app: &App) -> Vec<LibraryFunction> {
 /// the one whose segments the Hash names most wins, the first written on
 /// a tie; the rest of the Hash is the query string, less the parts of
 /// the route as written (an optional segment it could not place is
-/// dropped, not moved to the query). Generated only for the controllers
-/// whose views build such a URL.
+/// dropped, not moved to the query). Generated only for an app whose
+/// views build such a URL.
 fn lower_dynamic_url_helper(app: &App, module_path: &[Symbol], flat: &[FlatRoute]) -> Option<LibraryFunction> {
-    let controllers: std::collections::BTreeSet<String> = app
-        .views
-        .iter()
-        .filter(|v| crate::lower::view_to_library::view_uses_dynamic_url_hash(&v.body))
-        .filter_map(|v| v.name.as_str().rsplit_once('/').map(|(dir, _)| dir.replace('/', "_")))
-        .collect();
-    if controllers.is_empty() {
+    if !app.views.iter().any(|v| crate::lower::view_to_library::view_uses_dynamic_url_hash(&v.body)) {
         return None;
     }
+    // Every controller's, not only the linking views' own: a shared partial renders under any controller, and the Hash can name one.
+    let controllers: std::collections::BTreeSet<String> = flat
+        .iter()
+        .filter(|r| r.method == HttpMethod::Get)
+        .map(|r| controller_symbol(r.controller.0.as_str()))
+        .collect();
     let mut arms = String::new();
     for controller in &controllers {
         let mut actions: Vec<&Symbol> = Vec::new();

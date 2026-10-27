@@ -11,7 +11,11 @@ use super::emit_and_run;
 pub const METHODS: &str = r#"  validates :title, presence: true
 
   def self.with_comments_by(name)
-    includes(:comments).where(comments: { commenter: name }).order([articles: { title: :asc }, comments: { body: :desc }])
+    includes(:comments)
+      .where(comments: { commenter: name })
+      .where(comments: { body: ["one", "three", "four", "five"] })
+      .where.not(comments: { body: "one" })
+      .order([articles: { title: :asc }, comments: { body: :desc }])
   end
 "#;
 
@@ -23,10 +27,11 @@ c = Article.create!(title: "Gamma", body: "A sufficiently long body.")
 Comment.create!(article: b, commenter: "Ann", body: "one")
 Comment.create!(article: b, commenter: "Bob", body: "two")
 Comment.create!(article: b, commenter: "Ann", body: "three")
+Comment.create!(article: b, commenter: "Bob", body: "four")
 Comment.create!(article: a, commenter: "Ann", body: "four")
 Comment.create!(article: c, commenter: "Bob", body: "five")
 got = Article.with_comments_by("Ann").to_a.map { |art| [art.title, art.comments.map { |cm| cm.body }] }
-want = [["Alpha", ["four"]], ["Beta", ["three", "one"]]]
+want = [["Alpha", ["four"]], ["Beta", ["three"]]]
 raise "eager: #{got.inspect}" unless got == want
 puts "eager load passed"
 "#;
