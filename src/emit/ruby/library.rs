@@ -1774,6 +1774,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let query_arguments = crate::lower::scope_chain::query_arguments::QueryArguments::build(app);
     // Class methods reached THROUGH an association (`user.sessions
     // .start!`) — demand-gated on the call sites this app actually
     // writes, so an app without that shape emits exactly what it did
@@ -1832,6 +1833,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // extension, and its call sites need the same rewrite.
         && !crate::lower::scope_chain::any_assoc_extensions(&assocs)
         && !wants_model_chain
+        && query_arguments.is_empty()
     {
         return;
     }
@@ -1848,6 +1850,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // The Ruby family's attrs Hash holds a record (see the field).
         owner_objects: true,
     };
+    query_arguments.rewrite(lcs, &regs);
     let sole_includers = app.sole_includer_of_modules();
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
