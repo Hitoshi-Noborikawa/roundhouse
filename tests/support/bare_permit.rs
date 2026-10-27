@@ -6,6 +6,7 @@ use super::emit_and_run;
 const CONTROLLER: &str = r#"class FindsController < ApplicationController
   def index
     @finder = Finder.new(find_params)
+    @paging = find_params
     @pairs = @finder.pairs
     @who = log_params.fetch("who", "(All)")
     @stories = log_params.dig(:what, :stories).to_s
@@ -55,6 +56,7 @@ const VIEW: &str = r#"<% @pairs.each do |pair| %>
   <% end %>
 <% end %>
 <p id="log"><%= @who %>|<%= @stories %>|<%= @bogus %>|<%= @page %>|<%= @count %></p>
+<p><%= link_to "next", @paging.merge(page: 2), id: "next" %></p>
 "#;
 
 #[allow(dead_code)]
@@ -71,7 +73,7 @@ pub fn apply(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
         .edit(
             "config/routes.rb",
             "  root \"articles#index\"\n",
-            "  root \"articles#index\"\n  resources :finds, only: [:index]\n",
+            "  root \"articles#index\"\n  resources :finds, only: [:index]\n  get \"/finds/page/:page\" => \"finds#index\"\n",
         )
         .write("app/controllers/finds_controller.rb", CONTROLLER)
         .write("app/models/finder.rb", FINDER)

@@ -2193,6 +2193,7 @@ mod tests {
             .collect();
         FlatRoute {
             method,
+            source_path: path.to_string(),
             path: path.to_string(),
             controller: ClassId(Symbol::from(controller)),
             action: Symbol::from(action),

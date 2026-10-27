@@ -2791,9 +2791,9 @@ pub(crate) fn action_view_ivar_map(
             key,
             ViewArgs {
                 ivars,
-                uses_action_name: view_uses_bare_name(&v.body, "action_name"),
-                uses_controller_name: view_uses_bare_name(&v.body, "controller_name"),
-                uses_path_parameters: view_uses_url_options_hash(&v.body),
+                uses_action_name: view_uses_bare_name(&v.body, "action_name") || view_uses_dynamic_url_hash(&v.body),
+                uses_controller_name: view_uses_bare_name(&v.body, "controller_name") || view_uses_dynamic_url_hash(&v.body),
+                uses_path_parameters: view_uses_url_options_hash(&v.body) || view_uses_dynamic_url_hash(&v.body),
             },
         );
     }
@@ -2812,6 +2812,46 @@ pub(crate) fn view_uses_url_options_hash(body: &Expr) -> bool {
     let mut sets = Vec::new();
     crate::lower::routes_to_library::collect_url_option_key_sets(body, &mut sets);
     !sets.is_empty()
+}
+
+/// A URL a view builds from a Hash known only at run time (`link_to
+/// "Page 2", @moderation_params.merge(page: 2)`): not a literal Hash,
+/// which `emit_url_options_hash` resolves, but a value the analyzer
+/// typed as a Hash.
+pub(crate) fn dynamic_url_hash(url: &Expr) -> bool {
+    // Not only a Hash: `url_for` reads request parameters (`params.merge(page: 2)`) the same way.
+    !matches!(&*url.node, ExprNode::Hash { .. })
+        && match url.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+            Some(crate::ty::Ty::Hash { .. }) => true,
+            Some(crate::ty::Ty::Class { id, .. }) => id.0.as_str() == "ActionController::Parameters",
+            _ => false,
+        }
+}
+
+/// Does the view link to a [`dynamic_url_hash`] URL? Such a view reads
+/// the request's controller, action and path parameters.
+pub(crate) fn view_uses_dynamic_url_hash(body: &Expr) -> bool {
+    fn walk(e: &Expr) -> bool {
+        if let ExprNode::Send { recv: None, method, args, block, .. } = &*e.node {
+            let url = if block.is_some() && matches!(method.as_str(), "link_to" | "button_to") {
+                args.first()
+            } else {
+                match crate::lower::view::classify_view_helper(method.as_str(), args) {
+                    Some(crate::lower::view::ViewHelperKind::LinkTo { url, .. })
+                    | Some(crate::lower::view::ViewHelperKind::LinkToIf { url, .. })
+                    | Some(crate::lower::view::ViewHelperKind::ButtonTo { target: url, .. }) => Some(url),
+                    _ => None,
+                }
+            };
+            if url.is_some_and(dynamic_url_hash) {
+                return true;
+            }
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| found = found || walk(c));
+        found
+    }
+    walk(body)
 }
 
 pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {

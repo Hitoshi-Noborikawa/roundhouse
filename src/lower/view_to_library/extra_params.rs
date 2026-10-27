@@ -151,10 +151,12 @@ fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2]) -> Vec
     // at known positions). The controller passes them only to views whose
     // contract records the usage (see action_view_ivar_map) — so views
     // that don't use them gain no extra params on any target.
-    if super::view_uses_bare_name(body, "action_name") {
+    // A run-time url Hash resolves against the request's controller and action too.
+    let dynamic_url = super::view_uses_dynamic_url_hash(body);
+    if dynamic_url || super::view_uses_bare_name(body, "action_name") {
         out.push("action_name".to_string());
     }
-    if super::view_uses_bare_name(body, "controller_name") {
+    if dynamic_url || super::view_uses_bare_name(body, "controller_name") {
         out.push("controller_name".to_string());
     }
     // The request's path parameters, for a view whose `url_for` options
@@ -162,7 +164,7 @@ fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2]) -> Vec
     // a segment the hash leaves out: Rails recalls it from the current
     // request (see `lower_url_option_helpers`). Same rule as the two
     // above — collected only when used, at a fixed position.
-    if super::view_uses_url_options_hash(body) {
+    if dynamic_url || super::view_uses_url_options_hash(body) {
         out.push("path_parameters".to_string());
     }
     let mut bound: Vec<String> = Vec::new();
