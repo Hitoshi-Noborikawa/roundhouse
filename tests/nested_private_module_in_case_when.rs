@@ -32,6 +32,12 @@ const LIFECYCLE: &str = r#"module Catalog
       module Type
         NOTIFY_OWNER_ON_ENTRY_CHANGE = :notify_owner_on_entry_change
         NOTIFY_ON_ENTRY_OWNER_DELETE = :notify_on_entry_owner_delete
+
+        class Event
+          def self.label
+            "event"
+          end
+        end
       end
       private_constant :Type
 
@@ -43,6 +49,10 @@ const LIFECYCLE: &str = r#"module Catalog
 
         def notify_on_entry_owner_delete(owner)
           new.notify(Type::NOTIFY_ON_ENTRY_OWNER_DELETE, owner)
+        end
+
+        def event_label
+          Type::Event.label
         end
       end
 
@@ -72,8 +82,9 @@ fn a_nested_module_constant_in_a_when_clause_stays_scoped() {
             "m = Catalog::Lifecycle::Entry\n\
              puts m.notify_owner_on_entry_change(1)\n\
              puts m.notify_on_entry_owner_delete(2)\n\
+             puts m.event_label\n\
              begin; m.new.notify(:x, 3); rescue m::InvalidNotifyParameter => e; puts e.message; end\n",
         );
     run.assert_passes();
-    assert_eq!(run.stdout.trim(), "changed 1\ndeleted 2\nunsupported x", "{}", run.stdout);
+    assert_eq!(run.stdout.trim(), "changed 1\ndeleted 2\nevent\nunsupported x", "{}", run.stdout);
 }

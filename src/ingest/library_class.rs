@@ -1255,7 +1255,7 @@ fn synth_sorbet_struct_methods(
     let hash_prologue = if with_constructor { struct_hash_prologue(members) } else { None };
     let params: Vec<Param> = hash_prologue
         .iter()
-        .map(|_| Param::with_default(Symbol::from(STRUCT_HASH_PARAM), Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })))
+        .map(|(param, _)| Param::with_default(Symbol::from(param.as_str()), Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })))
         .chain(members.iter()
         .map(|m| {
             // A `T.nilable` prop with no default is optional and nil
@@ -1269,6 +1269,7 @@ fn synth_sorbet_struct_methods(
         .collect();
     let assigns: Vec<Expr> = hash_prologue
         .into_iter()
+        .map(|(_, prologue)| prologue)
         .chain(members.iter().map(|m| {
             Expr::new(
                 Span::synthetic(),
@@ -1321,29 +1322,43 @@ fn synth_sorbet_struct_methods(
 /// constructor rejects that as `given 1, expected 0`.
 ///
 /// Where every prop is optional (nilable or defaulted) the constructor
-/// also takes a leading optional Hash and each prop reads from it first.
-/// A struct with a required prop keeps keywords only: a Hash cannot be
-/// told apart from missing keywords there without a `new` override, and
-/// a class that declares `new` stops being typed as its own instance.
-const STRUCT_HASH_PARAM: &str = "attributes_hash";
-
-fn struct_hash_prologue(members: &[SorbetStructMember]) -> Option<Expr> {
+/// also takes a leading optional Hash and each prop reads from it first;
+/// a key that names no prop raises, as sorbet's does. A struct with a
+/// required prop keeps keywords only: a Hash cannot be told apart from
+/// missing keywords there without a `new` override, and a class that
+/// declares `new` stops being typed as its own instance.
+///
+/// Known gap: a `factory:` default still runs when the Hash supplies its
+/// prop (the keyword default is evaluated before the body), where sorbet
+/// skips it. The value is discarded; only a factory's side effects show.
+///
+/// Returns the Hash parameter's name, `attributes_hash` unless a prop
+/// already has it, and the prologue.
+fn struct_hash_prologue(members: &[SorbetStructMember]) -> Option<(String, Expr)> {
     if members.is_empty() || !members.iter().all(|m| m.default.is_some() || m.nilable) {
         return None;
     }
+    let mut param = String::from("attributes_hash");
+    while members.iter().any(|m| m.name.as_str() == param) {
+        param.push('_');
+    }
+    let declared: Vec<String> = members.iter().map(|m| format!(":{}", m.name.as_str())).collect();
     let mut source = format!(
-        "unless {STRUCT_HASH_PARAM}.nil?\n  {STRUCT_HASH_PARAM} = {STRUCT_HASH_PARAM}.to_h.transform_keys(&:to_sym)\n"
+        "unless {param}.nil?\n  {param} = {param}.to_h.transform_keys(&:to_sym)\n  \
+         unknown = {param}.keys - [{}]\n  \
+         raise ArgumentError, \"Unrecognized properties: #{{unknown.join(\", \")}}\" unless unknown.empty?\n",
+        declared.join(", ")
     );
     for member in members {
         let name = member.name.as_str();
-        source.push_str(&format!("  {name} = {STRUCT_HASH_PARAM}.fetch(:{name}, {name})\n"));
+        source.push_str(&format!("  {name} = {param}.fetch(:{name}, {name})\n"));
     }
     source.push_str("end\n");
     let parsed = ruby_prism::parse(source.as_bytes());
     let node = parsed.node();
     let program = node.as_program_node()?;
     let stmt = program.statements().body().iter().next()?;
-    ingest_expr(&stmt, "(sorbet struct)").ok()
+    Some((param, ingest_expr(&stmt, "(sorbet struct)").ok()?))
 }
 
 /// `include T::Struct::ActsAsComparable` gives a struct value equality.

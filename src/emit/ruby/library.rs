@@ -7156,6 +7156,17 @@ fn root_shadowed_constants(
     if head.as_str().starts_with("::") {
         return;
     }
+    // The class's own constant is the innermost lexical scope, in the
+    // source as in the emit, and binds the head before any enclosing
+    // namespace's: `Catalog::Lifecycle::Entry` declares
+    // `module Type` (`private_constant`) and reads `Type::NOTIFY_*` in a
+    // `when`, while `Catalog::Type` is known and has no `NOTIFY_*`.
+    // Rooted, that was `::Type`: uninitialized constant Type. A resolved
+    // class reference is no exception: its absolute spelling would name
+    // a private constant.
+    if known(&format!("{own}::{}", head.as_str())) {
+        return;
+    }
     // Emission nests compact declarations such as `class UI::Explicit`
     // under `module UI`. Rubydex already resolved the source reference.
     // Root its actual class when the new nesting would bind the head to
@@ -7173,15 +7184,6 @@ fn root_shadowed_constants(
                 }
             }
         }
-    }
-    // The class's own constant is the innermost lexical scope, in the
-    // source as in the emit, and binds the head before any enclosing
-    // namespace's: `Catalog::Lifecycle::Entry` declares
-    // `module Type` (`private_constant`) and reads `Type::NOTIFY_*` in a
-    // `when`, while `Catalog::Type` is known and has no `NOTIFY_*`.
-    // Rooted, that was `::Type`: uninitialized constant Type.
-    if known(&format!("{own}::{}", head.as_str())) {
-        return;
     }
     // Either the name's OWN segments shadow it (the pre-existing rule:
     // `Views::Stats` referencing `Stats`, `Message::Broadcasts`
