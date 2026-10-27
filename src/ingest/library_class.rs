@@ -214,13 +214,15 @@ fn ingest_library_classes_impl(
     };
     let mut factories: Vec<LibraryClass> = made.into_iter().map(|(_, c)| c).collect();
     if !file_constants.is_empty() {
-        let host = out
-            .first_mut()
-            .or_else(|| factories.first_mut())
-            .expect("file_level_constants nonempty implies a host class or factory");
-        let mut consts = file_constants;
-        consts.extend(std::mem::take(&mut host.constants));
-        host.constants = consts;
+        // A Class.new-only file with admitted factories: hoist onto the
+        // first factory. A file with only refused factories (or bare
+        // constants and no class) still has nowhere to put them — same
+        // drop as before this tip for that shape.
+        if let Some(host) = out.first_mut().or_else(|| factories.first_mut()) {
+            let mut consts = file_constants;
+            consts.extend(std::mem::take(&mut host.constants));
+            host.constants = consts;
+        }
     }
     Ok(super::class_new_factory::order_with_file_classes(factories, out))
 }
