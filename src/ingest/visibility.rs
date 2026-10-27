@@ -640,7 +640,10 @@ impl Visibility {
                 }
             }
             if let Some(def) = def {
-                if let Some(inner) = super::library_class::included_hook_class_methods_body(&def) {
+                // The module's own `class << self` (not a ClassMethods
+                // carrier) is where `def included(base)` is the hook.
+                let in_singleton_class = class_side && !self.carrier;
+                if let Some(inner) = super::library_class::included_hook_class_methods_body(&def, in_singleton_class) {
                     self.walk_carrier(Some(inner), file)?;
                     continue;
                 }

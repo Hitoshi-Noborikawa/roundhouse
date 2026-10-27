@@ -57,9 +57,14 @@ pub fn apply_module_mattr_storage(app: &mut App) {
         for init in &lc.class_ivar_initializers {
             collect_ivars(init, &mut ivars);
         }
+        // Not one an instance method reads: that method runs on whoever includes or extends the module, where `@x` is the other object's.
+        let mut shared: HashSet<Symbol> = HashSet::new();
+        for method in lc.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+            collect_cvars(&method.body, &mut shared);
+        }
         let movable: HashSet<Symbol> = names
             .into_iter()
-            .filter(|cvar| !outside.contains(cvar) && !ivars.contains(&ivar_name(cvar)))
+            .filter(|cvar| !outside.contains(cvar) && !shared.contains(cvar) && !ivars.contains(&ivar_name(cvar)))
             .collect();
         if movable.is_empty() {
             continue;

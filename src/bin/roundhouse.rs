@@ -395,6 +395,29 @@ fn run_transpile(
             return Err(format!("ingest {}: {e}", input.display()));
         }
     };
+    // An ActiveRecord class outside app/models (a migration helper's own
+    // query class, a gem's model) is reported at ingest for the targets
+    // that lower models, which don't model it (#1278). Futamura runs on
+    // Rails and the Roda conversion on Sequel, which load it themselves;
+    // under --survey it is a recorded gap, not a failed run.
+    // Kept apart from `survey_gaps` until the punch list prints: the
+    // class did ingest, so its file is not a skipped one for attribution.
+    let mut unmodelled_gaps: Vec<roundhouse::ingest::IngestError> = Vec::new();
+    let mut parse_diags = parse_diags;
+    let unmodelled_record = |d: &roundhouse::diagnostic::Diagnostic| {
+        matches!(&d.kind, roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == roundhouse::ingest::UNMODELLED_RECORD)
+    };
+    if matches!(target, BuildTarget::Futamura | BuildTarget::Roda) {
+        parse_diags.retain(|d| !unmodelled_record(d));
+    } else if survey {
+        let (recorded, kept): (Vec<_>, Vec<_>) = parse_diags.into_iter().partition(|d| unmodelled_record(d));
+        parse_diags = kept;
+        for d in recorded {
+            let file = roundhouse::ide::source(&app, d.span.file).map(|s| s.path.clone()).unwrap_or_default();
+            unmodelled_gaps.push(roundhouse::ingest::IngestError::Unsupported { file, message: d.message.clone() });
+        }
+    }
     // Analyze + the post-analyze shared lowerings — type-directed IR
     // rewrites every target consumes (blank-predicate grounding,
     // `Time.current`). The returned residue diagnostics (sites a pass
@@ -423,7 +446,7 @@ fn run_transpile(
         roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
         Vec::new()
     } else {
-        roundhouse::session::analyze_and_lower(&mut app)
+        roundhouse::session::analyze_and_lower_for(&mut app, target)
     };
 
     // Analyze-time diagnostics — the same type errors roundhouse-check
@@ -453,17 +476,14 @@ fn run_transpile(
         } else {
             (roundhouse::gems::native_extension_gem_namespaces(&app), Default::default())
         };
+        let mut external_roots = roundhouse::gems::ExternalRootIndex::new(&external_namespaces);
         analyze_diags.retain(|diagnostic| match &diagnostic.kind {
             roundhouse::diagnostic::DiagnosticKind::Unsupported {
                 construct, detail, ..
             } if construct.as_str() == "include" => !supported_includes.contains_key(detail),
             roundhouse::diagnostic::DiagnosticKind::Unsupported {
                 construct, detail, ..
-            } if construct.as_str() == "constant" => !external_namespaces
-                .iter()
-                .any(|namespace| {
-                    roundhouse::gems::detail_names_external_namespace(detail, namespace)
-                }),
+            } if construct.as_str() == "constant" => !external_roots.names_any(detail),
             _ => true,
         });
     }
@@ -624,6 +644,7 @@ fn run_transpile(
     // The punch list, before the gate: on an app that fails the gate
     // this is the most useful thing in the run, and printing it after
     // the early `return Err` would mean never printing it at all.
+    survey_gaps.append(&mut unmodelled_gaps);
     if !survey_gaps.is_empty() {
         // `attribute_analysis_gaps` runs twice (once over `analyze_diags`,
         // once over the emit-phase `diags` — see the call sites above) and

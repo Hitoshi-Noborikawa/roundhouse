@@ -18,6 +18,7 @@
 //! broadcasts orchestration, schema → DDL, and router dispatch tables.
 
 pub mod arel;
+pub mod array_columns;
 pub mod associations;
 pub mod association_new;
 pub mod blank;
@@ -27,6 +28,8 @@ pub mod broadcasts;
 pub mod chain;
 pub mod controller;
 pub mod controller_test;
+pub mod nil_operand;
+pub mod where_bounds;
 pub mod fixtures;
 pub(crate) mod forwarding;
 pub mod functionalize;
@@ -126,6 +129,7 @@ pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
 pub mod test_cookie_jar;
 pub mod sti_scope;
+pub mod default_scope;
 mod sti_subclass_callbacks;
 pub mod sum_symbol;
 pub mod values_at_splat;
@@ -146,6 +150,7 @@ pub mod param_rebind;
 pub mod to_sgid;
 pub mod cable_test_case;
 pub mod view_test_case;
+pub mod controller_test_case;
 pub mod current_set;
 pub mod update_writer_check;
 pub mod unscope_check;
@@ -214,6 +219,7 @@ pub mod view;
 pub mod view_buffer_passing;
 pub mod tag_block_passing;
 pub mod lazy_model_state;
+pub(crate) mod eager_load;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
@@ -243,7 +249,7 @@ pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
 pub use job_test_only::apply_job_test_only_lowering;
 pub use sti_scope::apply_sti_scope_lowering;
-pub(crate) use sti_scope::sti_bases;
+pub(crate) use sti_scope::{sti_bases, untyped_subclass_diagnostics};
 pub use sti_subclass_callbacks::apply_sti_subclass_callbacks;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
@@ -349,6 +355,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("params_residue", &["bool_fold"]),
     // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
     ("params_permit", &["params_residue"]),
+    ("params_value_reads", &["params_permit"]),
     // Before the fused rewrites, which key on the plain Hash type this pass leaves on an indifferent hash.
     ("indifferent_access", &[]),
     // Independent send rewrites: one fused tree walk in
@@ -846,6 +853,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("params_residue");
     params_permit::apply_params_permit_lowering(app);
     ran!("params_permit");
+    controller_to_library::params::lower_value_reads(app);
+    ran!("params_value_reads");
     indifferent_access::apply_indifferent_access_lowering(app);
     ran!("indifferent_access");
     // Not fused: a local bound to `arel_table` is a whole-body fact, which a per-node rewrite cannot see
@@ -1025,6 +1034,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));
     ran!("params_merge");
+    diags.extend(as_json_poro::implicit_serializer_renders(app));
     as_json_poro::apply_as_json_synthesis(app, registry);
     ran!("as_json_poro");
     diags.extend(active_model_model::apply_active_model_model_synthesis(app));
@@ -1870,4 +1880,33 @@ mod body_root_tests {
         assert_eq!(seen, expected);
         for_each_forwarding_body_ref(&app, &mut |root| assert_eq!(root.span.start, 99));
     }
+}
+
+/// Does `expr` bind `name` anew anywhere: any parameter of a nested block
+/// or lambda (`|record = 0|`, `|*record|`, `|record:|`, `|&record|`), or an
+/// assignment to the local (`record = nil`, `record ||= x`, `a, record = …`)?
+/// A rewrite that reads the name as something else (`self`) is wrong past one.
+pub(crate) fn rebinds_local(expr: &crate::expr::Expr, name: &str) -> bool {
+    use crate::expr::{ExprNode, LValue};
+    let is = |n: &crate::ident::Symbol| n.as_str() == name;
+    let here = match &*expr.node {
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } => {
+            params.iter().any(is)
+                || rest_param.as_ref().is_some_and(is)
+                || block_param.as_ref().is_some_and(is)
+                || extra_params.iter().any(|p| is(&p.name))
+        }
+        ExprNode::Assign { target: LValue::Var { name: n, .. }, .. }
+        | ExprNode::OpAssign { target: LValue::Var { name: n, .. }, .. } => is(n),
+        ExprNode::MultiAssign { targets, .. } => {
+            targets.iter().any(|t| matches!(t, LValue::Var { name: n, .. } if is(n)))
+        }
+        _ => false,
+    };
+    if here {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| found |= rebinds_local(c, name));
+    found
 }

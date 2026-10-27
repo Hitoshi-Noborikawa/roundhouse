@@ -15,19 +15,39 @@ use crate::ingest::prism_api::PrismLocation;
 enum SourceKind {
     Inputs,
     Mutations,
+    /// A source that runs at boot, before models load and routes are
+    /// drawn (`config/initializers`): it admits no constant input, but a
+    /// constant it writes or mutates no longer has the input's value.
+    Boot,
 }
 
 impl EnumConstants {
     pub(in crate::ingest) fn record(&mut self, source: &[u8], file: &str) {
-        self.collect(source, file, SourceKind::Inputs);
+        self.collect(source, file, SourceKind::Inputs, false);
+    }
+
+    /// `record` for a second table over sources the pipeline already
+    /// parses and diagnoses (the routes' constants): the same inputs,
+    /// without a second set of parse errors.
+    pub(in crate::ingest) fn record_again(&mut self, source: &[u8], file: &str) {
+        self.collect(source, file, SourceKind::Inputs, true);
     }
 
     /// Observe nonlibrary sources without admitting new constant inputs.
     pub(in crate::ingest) fn record_mutations(&mut self, source: &[u8], file: &str) {
-        self.collect(source, file, SourceKind::Mutations);
+        self.collect(source, file, SourceKind::Mutations, true);
     }
 
-    fn collect(&mut self, source: &[u8], file: &str, kind: SourceKind) {
+    /// Observe a source that runs at boot (an initializer) before the
+    /// folds: it admits no input, and a constant it reassigns, mutates,
+    /// or names in `const_set` / `remove_const` is tainted
+    /// ([`super::super::ConstTaint::scan_boot`]). Its own top-level
+    /// `NAME = …` defines a top-level name and taints no other owner's.
+    pub(in crate::ingest) fn record_boot(&mut self, source: &[u8], file: &str) {
+        self.collect(source, file, SourceKind::Boot, true);
+    }
+
+    fn collect(&mut self, source: &[u8], file: &str, kind: SourceKind, silent: bool) {
         struct Collector<'a, 'pr> {
             constants: &'a mut EnumConstants,
             file: &'a str,
@@ -227,7 +247,7 @@ impl EnumConstants {
                 // A consumed (non-input) source is read after the models:
                 // its declarations are never recorded, only marked.
                 if let Some(declaration) = super::super::enum_declaration(&call)
-                    && (matches!(self.kind, SourceKind::Mutations)
+                    && (!matches!(self.kind, SourceKind::Inputs)
                         || !matches!(self.parents.as_slice(), [.., Node::ClassNode { .. }, Node::StatementsNode { .. }]))
                 {
                     constants
@@ -253,7 +273,14 @@ impl EnumConstants {
                         )
                     });
                 self.constants.record_write(&node, &self.nesting, direct);
-                if direct && node.as_constant_write_node().is_some() {
+                // A boot source's program-level `NAME = …` defines a
+                // top-level constant: not a write to another owner's.
+                let boot_top_level = matches!(self.kind, SourceKind::Boot)
+                    && self.nesting.is_empty()
+                    && self.parents.iter().all(|parent| {
+                        matches!(parent, Node::ProgramNode { .. } | Node::StatementsNode { .. })
+                    });
+                if (direct || boot_top_level) && node.as_constant_write_node().is_some() {
                     self.direct_writes.insert(node.location().start_offset());
                 }
                 // `const_set(:X, …)` / `self.send(:remove_const, :X)` in a
@@ -335,6 +362,20 @@ impl EnumConstants {
                             }
                         })
                         .or_insert(value);
+                    // A top-level `class ActivityPub::CollectionsController`
+                    // runs only where `ActivityPub` already exists, which
+                    // Zeitwerk defines from the directory when no file
+                    // declares it: its enclosing names are namespaces.
+                    // Inside another body the path resolves lexically
+                    // (`module Wrapper; class T::Enum` reopens `::T`), so
+                    // nothing is assumed there.
+                    if qualified && owner.is_empty() {
+                        let mut enclosing = name.as_str();
+                        while let Some((parent, _)) = enclosing.rsplit_once("::") {
+                            self.constants.values.entry(parent.to_string()).or_insert(EnumConstant::Namespace);
+                            enclosing = parent;
+                        }
+                    }
                     // Classes and modules both own lexical constant
                     // lookup — concern `TYPES` inside `included do`
                     // resolves through the module entry the same way a
@@ -399,11 +440,12 @@ impl EnumConstants {
                 self.constants.record_write(&node, &self.nesting, false);
             }
         }
-        let result = match kind {
-            SourceKind::Inputs => prism::parse(source, file),
-            // Already consumed/diagnosed by the real pipeline. Observe the
-            // original facts without adding a second set of parse errors.
-            SourceKind::Mutations => crate::ingest::prism::parse_silent(source),
+        // A source the real pipeline already consumes and diagnoses is
+        // observed without adding a second set of parse errors.
+        let result = if silent {
+            crate::ingest::prism::parse_silent(source)
+        } else {
+            prism::parse(source, file)
         };
         if result.errors().next().is_none() {
             let mut collector = Collector {
@@ -416,10 +458,28 @@ impl EnumConstants {
             };
             ruby_prism::Visit::visit(&mut collector, &result.node());
             let direct_writes = collector.direct_writes;
-            if matches!(kind, SourceKind::Inputs) {
-                let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
-                self.foreign_taint.extend(tainted);
-                self.reflected.extend(reflected);
+            match kind {
+                SourceKind::Inputs => {
+                    let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
+                    self.foreign_taint.extend(tainted);
+                    self.reflected.extend(reflected);
+                }
+                // A boot source calls the app's classes freely (`Gadget.count`):
+                // the scan skips a receiver rooted at a class or module
+                // (`ConstTaint::names_boot_namespace`).
+                SourceKind::Boot => {
+                    let namespaces: std::collections::HashSet<String> = self
+                        .values
+                        .iter()
+                        .filter(|(_, value)| matches!(value, EnumConstant::Namespace))
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    let (tainted, aliases) =
+                        super::super::ConstTaint::scan_boot(&result.node(), direct_writes, namespaces);
+                    self.foreign_taint.extend(tainted);
+                    self.boot_aliases.extend(aliases);
+                }
+                SourceKind::Mutations => {}
             }
         }
     }

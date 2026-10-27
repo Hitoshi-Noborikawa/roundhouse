@@ -659,7 +659,9 @@ module Cable
     drv.set_on_message(cb_msg)
     # `close(reason:)` closes this socket, and the heartbeat calls the
     # connection's `beat` (`Cable.app_beats`).
-    conn.transport = drv
+    sock = Cable::Socket.new
+    sock.ws = drv
+    conn.transport = sock
     Cable.beats.add(cb_msg)
 
     cb_close = Cable::WsClose.new
@@ -703,6 +705,32 @@ module Cable
                ",\"message\":" + message_json + "}"
     Tep::Broadcast.publish(stream, envelope)
     nil
+  end
+
+  # Rails' connection `socket` over the driver, the two calls
+  # `ActionCable::Connection::Base` hands it: `close` tells the client
+  # why and whether to come back and closes (the client's close reply
+  # runs the driver's ordinary teardown), and `perform_work` runs inline
+  # under the heartbeat's database lease.
+  class Socket
+    attr_accessor :ws
+
+    def transmit(data)
+      @ws.text(ActionCable.payload_json(data))
+      nil
+    end
+
+    def close_with_reason(reason, reconnect)
+      drv = @ws
+      drv.text(ActionCable.disconnect_json(reason, reconnect))
+      drv.close(1000, "")
+      nil
+    end
+
+    def perform_work(receiver)
+      receiver.call
+      nil
+    end
   end
 
   # Broadcasts transport: Broadcasts.record calls broadcast(stream,

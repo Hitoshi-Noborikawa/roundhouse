@@ -72,7 +72,7 @@
 use crate::app::App;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::Symbol;
+use crate::ident::{Symbol, VarId};
 use crate::ty::Ty;
 use std::collections::HashSet;
 
@@ -93,7 +93,7 @@ pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
     // (python's unemittable-cond fallback is a silent `False`; the
     // flash-notice smoke caught it).
     super::for_each_hook_body(app, &mut |body| {
-        walk(body, &defs, &mut diags);
+        walk(body, &received_vars(body), &defs, &mut diags);
     });
 
     // TEST BODIES TOO, asked for by name — the widening
@@ -113,7 +113,7 @@ pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
     // the overlay served these already and the rewrite is neutral — it
     // is the AOT and strict targets that could not dispatch them.
     super::for_each_test_body(app, &mut |body| {
-        walk(body, &defs, &mut diags);
+        walk(body, &received_vars(body), &defs, &mut diags);
     });
 
     diags
@@ -135,7 +135,7 @@ pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
 /// `view_to_library`).
 pub(crate) fn ground_body(body: &mut Expr, defs: &AppDefinitions) -> bool {
     let mut diags = Vec::new();
-    let changed = walk(body, defs, &mut diags);
+    let changed = walk(body, &received_vars(body), defs, &mut diags);
     for d in diags {
         crate::emit::diagnostics::push(d);
     }
@@ -160,21 +160,27 @@ pub(crate) fn ground_body(body: &mut Expr, defs: &AppDefinitions) -> bool {
 /// (`view_to_library::predicates`), and Spinel has no `String#present?`
 /// / `NilClass#present?`, so leaving the call dynamic is a NameError.
 pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> bool {
-    fn walk(expr: &mut Expr, in_value: bool, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
+    fn walk(
+        expr: &mut Expr,
+        in_value: bool,
+        received: &HashSet<VarId>,
+        defs: &AppDefinitions,
+        diags: &mut Vec<Diagnostic>,
+    ) -> bool {
         if !in_value {
             match &mut *expr.node {
                 ExprNode::If { cond, then_branch, else_branch } => {
                     // Condition is a value for blank predicates; branches
                     // stay template-shaped (pairs / nested ifs).
-                    let cond_changed = walk(cond, true, defs, diags);
-                    let then_changed = walk(then_branch, false, defs, diags);
-                    let else_changed = walk(else_branch, false, defs, diags);
+                    let cond_changed = walk(cond, true, received, defs, diags);
+                    let then_changed = walk(then_branch, false, received, defs, diags);
+                    let else_changed = walk(else_branch, false, received, defs, diags);
                     return cond_changed || then_changed || else_changed;
                 }
                 ExprNode::Seq { exprs } => {
                     let mut changed = false;
                     for e in exprs {
-                        changed |= walk(e, false, defs, diags);
+                        changed |= walk(e, false, received, defs, diags);
                     }
                     return changed;
                 }
@@ -183,17 +189,18 @@ pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> 
         }
         let mut changed = false;
         expr.node.for_each_child_mut(&mut |c| {
-            if walk(c, true, defs, diags) {
+            if walk(c, true, received, defs, diags) {
                 changed = true;
             }
         });
-        if try_rewrite(expr, defs, diags) {
+        if try_rewrite(expr, received, defs, diags) {
             changed = true;
         }
         changed
     }
     let mut diags = Vec::new();
-    let changed = walk(body, false, defs, &mut diags);
+    let received = received_vars(body);
+    let changed = walk(body, false, &received, defs, &mut diags);
     for d in diags {
         crate::emit::diagnostics::push(d);
     }
@@ -425,14 +432,48 @@ pub(crate) fn is_effect_free_reader(e: &Expr) -> bool {
     }
 }
 
-fn walk(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
+/// The locals of one body whose first occurrence in source order is a read,
+/// not an assignment: a parameter (method or block), even one the body later
+/// reassigns (`raw = [raw] if raw.is_a?(String)`). An assignment binds its
+/// name after its value ran; a multiple assignment and an `||=` bind it too.
+fn received_vars(body: &Expr) -> HashSet<VarId> {
+    fn visit(e: &Expr, seen: &mut HashSet<VarId>, out: &mut HashSet<VarId>) {
+        match &*e.node {
+            ExprNode::Var { id, .. } => {
+                if seen.insert(*id) {
+                    out.insert(*id);
+                }
+            }
+            ExprNode::Assign { target, value } | ExprNode::OpAssign { target, value, .. } => {
+                visit(value, seen, out);
+                if let LValue::Var { id, .. } = target {
+                    seen.insert(*id);
+                }
+            }
+            ExprNode::MultiAssign { targets, value } => {
+                visit(value, seen, out);
+                for t in targets {
+                    if let LValue::Var { id, .. } = t {
+                        seen.insert(*id);
+                    }
+                }
+            }
+            _ => e.node.for_each_child(&mut |c| visit(c, seen, out)),
+        }
+    }
+    let mut out = HashSet::new();
+    visit(body, &mut HashSet::new(), &mut out);
+    out
+}
+
+fn walk(expr: &mut Expr, received: &HashSet<VarId>, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
     let mut changed = false;
     expr.node.for_each_child_mut(&mut |c| {
-        if walk(c, defs, diags) {
+        if walk(c, received, defs, diags) {
             changed = true;
         }
     });
-    if try_rewrite(expr, defs, diags) {
+    if try_rewrite(expr, received, defs, diags) {
         changed = true;
     }
     if try_rewrite_compact_blank(expr, defs, diags) {
@@ -450,7 +491,7 @@ enum Pred {
     Presence,
 }
 
-fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
+fn try_rewrite(expr: &mut Expr, received: &HashSet<VarId>, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
     use Grounding::*;
 
     // Decision phase: everything read out of the node is owned before
@@ -490,6 +531,19 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
             }
             (Grounding::NeverBlank { nilable: false }, ExprNode::Ivar { .. }) => {
                 Grounding::NeverBlank { nilable: true }
+            }
+            (g, _) => g,
+        };
+        // A RECEIVED variable keeps its nil arm too. A parameter's type is
+        // the join of the argument types the analyzer typed at its call
+        // sites, and an argument it could not type adds nothing to it: when
+        // one caller passes `Array(x)` and another passes `body["errors"]`,
+        // the parameter is `Array`, and `raw.present?` folded to
+        // `!raw.empty?` raises on the nil the second hands in.
+        let received_var = matches!(&*r.node, ExprNode::Var { id, .. } if received.contains(id));
+        let grounding = match (grounding, received_var) {
+            (Grounding::Container { nilable: false, whitespace }, true) => {
+                Grounding::Container { nilable: true, whitespace }
             }
             (g, _) => g,
         };

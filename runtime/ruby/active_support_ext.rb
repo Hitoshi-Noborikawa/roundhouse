@@ -387,6 +387,89 @@ module ActiveSupport
     details
   end
 
+  # Rails' `errors.add(attribute, kind_or_message, **options)` where the
+  # attribute or the options are known only at run time (a validator's
+  # `validate_each`). The message is looked up as Rails does: the model's
+  # own (`overrides`, "<attr>.<kind>" then "<kind>", with its "__scope"),
+  # then what the call site baked for its literal kind (`site`):
+  # "ar_messages" or "am_messages" (<scope>.errors.messages.<kind>),
+  # "attributes.<attr>" (errors.attributes.<attr>.<kind>) and "messages"
+  # (errors.messages.<kind>), each with ".one" / ".other" / ".zero" plural
+  # forms. A String `message` is used as given. The attribute is named by
+  # the model's translated names (`names`), else humanized. Answers the
+  # error's detail; the call site pushes it and its full message onto the
+  # record's errors.
+  def self.error_detail(name, kind, message, options, site, names, overrides, before, between, after)
+    count = options["count"]
+    if kind.nil?
+      template = message.to_s
+    else
+      scoped = overrides["__scope"] == "activemodel" ? "am_messages" : "ar_messages"
+      template = error_template(overrides, name + "." + kind, count) ||
+        error_template(overrides, kind, count) ||
+        error_template(site, scoped, count) ||
+        error_template(site, "attributes." + name, count) ||
+        error_template(site, "messages", count) ||
+        ("translation missing: errors.messages." + kind)
+    end
+    human = names.key?(name) ? names[name].to_s : humanize(name.tr(".", "_"))
+    text = template
+    # A String message is kept as written, `%{…}` and all. A kind's
+    # template takes Rails' default interpolations, an explicit option
+    # winning.
+    unless kind.nil?
+      values = { "attribute" => human, "model" => names.key?("__model") ? names["__model"].to_s : "" }
+      options.each { |key, value| values[key] = value }
+      text = interpolate(template, values)
+    end
+    full = text
+    unless name == "base"
+      full = before + human + between + text + after
+    end
+    ActiveRecord::ErrorDetail.new(name, kind.nil? ? text : kind, text, full, !kind.nil?, options.empty?)
+  end
+
+  # I18n's interpolation, in one pass as its `gsub` makes: each `%{name}`
+  # the values give is replaced by its value as written (not rescanned,
+  # and not read for `\0` or `\&`), `%%` is a literal `%`, and any other
+  # `%{name}` stays as written.
+  def self.interpolate(template, values)
+    out = ""
+    rest = template
+    scanning = true
+    while scanning
+      at = rest.index("%")
+      if at.nil? || at + 1 >= rest.length
+        scanning = false
+      else
+        out = out + rest[0, at].to_s
+        after = rest[at + 1, 1].to_s
+        close = after == "{" ? rest.index("}", at + 2) : nil
+        if after == "%"
+          out = out + "%"
+          rest = rest[at + 2, rest.length - at - 2].to_s
+        elsif !close.nil? && values.key?(rest[at + 2, close - at - 2].to_s)
+          out = out + values[rest[at + 2, close - at - 2].to_s].to_s
+          rest = rest[close + 1, rest.length - close - 1].to_s
+        else
+          out = out + "%"
+          rest = rest[at + 1, rest.length - at - 1].to_s
+        end
+      end
+    end
+    out + rest
+  end
+
+  # The template under `key` in `table`, its plural form chosen by
+  # `count` as English does (zero, one, other), else the plain one.
+  def self.error_template(table, key, count)
+    unless count.nil?
+      form = count.to_s == "1" ? "one" : (count.to_s == "0" && table.key?(key + ".zero") ? "zero" : "other")
+      return table[key + "." + form] if table.key?(key + "." + form)
+    end
+    table[key]
+  end
+
   # Rails' `errors.merge!(other)`: each of the other record's errors
   # imported under its own attribute, and nothing when it is these errors.
   def self.errors_merge(errors, details, others, names, before, between, after)
@@ -618,10 +701,12 @@ module ActiveSupport
   end
 
   # Not `value == false || value == 0`: ActiveModel compares its FALSE_VALUES by string too, so :off and "0" answer false.
+  # Only the String "" is nil, as `cast_value`'s `value == ""`: `:""`
+  # is not in FALSE_VALUES, so it is true.
   def self.cast_boolean(value)
     return nil if value.nil?
+    return nil if value == ""
     text = value.to_s
-    return nil if text == ""
     !%w[0 f F false FALSE off OFF].include?(text)
   end
 
@@ -646,7 +731,11 @@ module ActiveSupport
   # string is nil. A Float that is not finite is nil (`to_i` raises
   # `FloatDomainError`). Any other string is `to_i` of its first 16
   # bytes, Rails' `byteslice(0, limit * 4)` at the default 4-byte limit.
-  # A value of another class raises `TypeError`; Rails would call `to_i`.
+  # A value of another class is what `value.presence` and then
+  # `value.to_i rescue nil` answer: a Time, a Duration (its seconds) or another Numeric (a
+  # Rational) its `to_i`, anything else nil (a Symbol, an Array, a Hash
+  # and an Object have no `to_i`). Each class is named rather than asked
+  # with `respond_to?`, so every branch is typed.
   def self.cast_integer(value)
     if value.nil?
       nil
@@ -666,9 +755,128 @@ module ActiveSupport
       end
     elsif value.is_a?(String)
       ActiveSupport.integer_from_string(value)
+    elsif value.is_a?(Time)
+      value.to_i
+    elsif value.is_a?(ActiveSupport::Duration)
+      value.to_i
+    elsif value.is_a?(Numeric)
+      value.to_i
     else
-      raise TypeError, "can't cast #{value.class} to an integer"
+      nil
     end
+  end
+
+  # `Helpers::Numeric#cast`'s `value.presence` for a value that is not
+  # nil, a boolean, a number or a String: `Object#blank?`, which is
+  # `empty?` for the classes that answer it (`[]`, `{}`, `:""`, `Set[]`) and
+  # false for any other object.
+  def self.numeric_blank?(value)
+    if value.is_a?(Array)
+      value.empty?
+    elsif value.is_a?(Hash)
+      value.empty?
+    elsif value.is_a?(Symbol)
+      value.empty?
+    elsif value.is_a?(Set)
+      value.empty?
+    else
+      false
+    end
+  end
+
+  # ActiveModel::Type::Float, through `Helpers::Numeric#cast` (a decimal
+  # column is a Float here, so it casts the same, where Rails answers a
+  # BigDecimal of the same value). A blank string is nil; `true`/`false`
+  # are 1.0/0.0; `"Infinity"`, `"-Infinity"` and `"NaN"` are those floats
+  # (`Type::Float#cast_value`); any other string is `to_f`. A value of
+  # another class is nil when blank (`[]`, `{}`, `:""`), a Time or
+  # another Numeric (a Rational) or a Duration its `to_f`; Rails does not rescue that
+  # `to_f`, so anything else (a Symbol, an Array, a Hash, an Object)
+  # raises the NoMethodError it raises there.
+  def self.cast_float(value)
+    if value.nil?
+      nil
+    elsif value == true
+      1.0
+    elsif value == false
+      0.0
+    elsif value.is_a?(Float)
+      value
+    elsif value.is_a?(Integer)
+      value.to_f
+    elsif value.is_a?(String)
+      ActiveSupport.float_from_string(value)
+    elsif ActiveSupport.numeric_blank?(value)
+      nil
+    elsif value.is_a?(Time)
+      value.to_f
+    elsif value.is_a?(ActiveSupport::Duration)
+      value.to_f
+    elsif value.is_a?(Numeric)
+      value.to_f
+    else
+      raise NoMethodError, "undefined method 'to_f' for an instance of #{value.class}"
+    end
+  end
+
+  # ActiveModel::Type::Decimal, as a Float (a decimal column is a Float
+  # here). nil, booleans, numbers and Strings cast as `cast_float` does.
+  # Another value is nil when blank; another Numeric (a Rational) is its
+  # value; anything else is what its `to_s` reads (`cast_value(value.to_s)`),
+  # so a Symbol, an Array, a Hash or an Object is 0.0 and `:"5"` is 5.0.
+  def self.cast_decimal(value)
+    if value.nil? || value == true || value == false || value.is_a?(Integer) || value.is_a?(Float) || value.is_a?(String)
+      ActiveSupport.cast_float(value)
+    elsif ActiveSupport.numeric_blank?(value)
+      nil
+    elsif value.is_a?(ActiveSupport::Duration)
+      value.to_f
+    elsif value.is_a?(Numeric)
+      value.to_f
+    else
+      ActiveSupport.float_from_string(value.to_s)
+    end
+  end
+
+  # The number ActiveModel 8.1.4's NumericalityValidator checks, or nil
+  # when it is "not a number". `raw` is the value the user assigned
+  # (`<attr>_before_type_cast`), nil when the attribute did not come from
+  # the user, in which case the cast `value` is read (`raw_value ||
+  # value`). Then `parse_as_number`: a Numeric as it is; a String of
+  # digits (`/\A[+-]?\d+\z/`) its Integer; a hex prefix not a number;
+  # anything else what `Kernel.Float` reads, or not a number where it
+  # raises. `Kernel.Float`'s grammar is the regexp, since not every
+  # target has `Float()`.
+  def self.numericality_number(raw, value)
+    v = raw.nil? || raw == false ? value : raw
+    return nil if v.nil?
+    return v if v.is_a?(Integer) || v.is_a?(Float)
+    text = v.to_s
+    return text.to_i if text.match?(/\A[+-]?\d+\z/)
+    return nil if text.match?(/\A[+-]?0[xX]/)
+    return nil unless text.match?(/\A[[:space:]]*[+-]?(?:\d+(?:_\d+)*(?:\.(?:\d+(?:_\d+)*)?)?|\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?[[:space:]]*\z/)
+    text.to_f
+  end
+
+  # The String half of `cast_float`: the blank scan `integer_from_string`
+  # makes, then Rails' three named values, then `to_f`. The named values
+  # are divisions rather than `Float::INFINITY`/`NAN`, which not every
+  # target defines.
+  def self.float_from_string(value)
+    i = 0
+    n = value.length
+    blank = true
+    while i < n
+      blank = false unless value[i].match?(/[[:space:]]/)
+      i = n unless blank
+      i = i + 1
+    end
+    return nil if blank
+    zero = 0.0
+    return 1.0 / zero if value == "Infinity"
+    return -1.0 / zero if value == "-Infinity"
+    return zero / zero if value == "NaN"
+    value.to_f
   end
 
   # `String#blank?` is `/\A[[:space:]]*\z/`, which raises ArgumentError

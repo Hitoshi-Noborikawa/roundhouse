@@ -59,6 +59,16 @@ pub(super) fn resolve(app: &mut App, sources: &[SourceFile], resolver: &ConstRes
             names.rewrite_mixin_call(call, &["extend", "prepend"]);
         }
     }
+    // A concern's `included do` statements, which the concern splices
+    // copy onto each includer: an `include Guard` there names the module
+    // as seen from inside the concern, not from the includer.
+    for items in app.concern_model_items.values_mut() {
+        for item in items {
+            if let ModelBodyItem::Unknown { expr, .. } = item {
+                names.rewrite_mixin_call(expr, &["include"]);
+            }
+        }
+    }
     for model in &mut app.models {
         if let Some(parent) = &mut model.parent {
             names.rewrite_parent(&model.name, parent, model.parent_span);
@@ -112,9 +122,58 @@ impl Names<'_> {
         if text.get(start..span.end as usize) != Some(last) {
             return None;
         }
-        let class = self.resolver.namespace(span, &path)?;
+        let Some(class) = self.resolver.namespace(span, &path) else {
+            return self.resolved_prefix(span, &path, text);
+        };
         let name = class.0.as_str();
+        // A scoped `A::B` never names a top-level constant: Ruby does not
+        // search `Object` for a scoped lookup (since 2.5 it is a
+        // NameError). Rubydex does when the app reopens `A` without
+        // declaring `B` (a gem's `A::B`), and its answer `Object` would
+        // replace the real, undeclared `A::B`.
+        if path.len() > 1 && !name.contains("::") {
+            return None;
+        }
         (name.rsplit("::").next() == Some(last)).then(|| class.clone())
+    }
+
+    /// A name Rubydex has no namespace for (a gem's module) whose leading
+    /// segments it does resolve: Ruby binds the first segment lexically
+    /// and then looks the rest up inside it, so `Testing::Assertions`
+    /// inside `module ActiveSupport` is `ActiveSupport::Testing::
+    /// Assertions` once the app declares `ActiveSupport::Testing`. Stored
+    /// as written, the name reads as the top-level `Testing::Assertions`
+    /// to every consumer that is not Ruby's own lexical lookup.
+    /// The longest resolved prefix, with the rest appended.
+    ///
+    /// Not for a name led by a framework root (`Rails::Railtie` inside
+    /// `class Billing`): the framework defines it before any app file
+    /// loads, while an app namesake (`Billing::Rails`, from a file that
+    /// may load after this one) is only there once its file has run.
+    /// Binding the prefix statically read `Billing::Rails::Railtie`, a
+    /// NameError at boot. The written name stays.
+    fn resolved_prefix(&self, span: Span, path: &[Symbol], text: &str) -> Option<ClassId> {
+        if path.first().is_some_and(|head| super::app::FRAMEWORK_ROOTS.contains(&head.as_str())) {
+            return None;
+        }
+        let written_len: usize = path.iter().map(|s| s.as_str().len()).sum::<usize>() + 2 * (path.len() - 1);
+        let start = (span.end as usize).checked_sub(written_len)?;
+        (1..path.len()).rev().find_map(|keep| {
+            let prefix = &path[..keep];
+            let prefix_len = prefix.iter().map(|s| s.as_str().len()).sum::<usize>() + 2 * (keep - 1);
+            let end = start + prefix_len;
+            let last = prefix.last()?.as_str();
+            if text.get(end - last.len()..end) != Some(last) {
+                return None;
+            }
+            let class = self.resolver.namespace(Span { file: span.file, start: start as u32, end: end as u32 }, prefix)?;
+            let name = class.0.as_str();
+            if name.rsplit("::").next() != Some(last) {
+                return None;
+            }
+            let rest = path[keep..].iter().map(Symbol::as_str).collect::<Vec<_>>().join("::");
+            Some(ClassId(Symbol::from(format!("{name}::{rest}"))))
+        })
     }
 
     fn rewrite_id(&self, id: &mut ClassId, span: Span) {

@@ -17,7 +17,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // propagate through dispatch without bottoming out at Var.
     // `Rails.env` is the one we can type concretely as Str.
     let mut rails_cls = ClassInfo::default();
-    for m in ["application", "logger", "cache", "configuration", "root", "public_path"] {
+    for m in ["application", "logger", "cache", "configuration", "public_path"] {
         rails_cls.class_methods.insert(Symbol::from(m), Ty::Untyped);
     }
     // `Rails.env` is an ActiveSupport::StringInquirer (a String
@@ -42,7 +42,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     let error_reporter = class("ActiveSupport::ErrorReporter");
     rails_cls.class_methods.insert(Symbol::from("event"), event_reporter.clone());
     rails_cls.class_methods.insert(Symbol::from("error"), error_reporter.clone());
+    // `Rails.root` is a Pathname in Rails; both lanes answer it with
+    // runtime/ruby/rails.rb's `Rails::AppPath`, so a call it lacks is an error.
+    let app_path = class("Rails::AppPath");
+    rails_cls.class_methods.insert(Symbol::from("root"), app_path.clone());
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
+    register_stdlib_class(classes, "Rails::AppPath", &[], &[
+        ("join", app_path.clone()), ("+", app_path.clone()),
+        ("to_s", Ty::Str), ("to_path", Ty::Str), ("read", Ty::Str),
+        ("readlines", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }), ("exist?", Ty::Bool),
+    ]);
     register_stdlib_class(classes, "ActiveSupport", &[
         ("event_reporter", event_reporter.clone()), ("error_reporter", error_reporter.clone()),
         ("event_reporter=", event_reporter.clone()), ("error_reporter=", error_reporter.clone()),
@@ -114,7 +123,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     blocker.class_methods.insert(Symbol::from("blocked?"), Ty::Bool);
     classes.insert(ClassId(Symbol::from("ActionController::BrowserBlocker")), blocker);
 
-    // `ActionController::RateLimiter.exceeded?(key, within, to)` — the
+    // `ActionController::RateLimiter.exceeded?(store, key, within, to)` — the
     // counter behind `rate_limit`, called from the filter method
     // `ingest::rate_limit` synthesizes; runtime/ruby/action_controller/
     // rate_limiter.rb answers it. Registered for the same reason.
@@ -142,15 +151,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // it). `Time - x` arithmetic still resolves to `Untyped` inside
     // `time_method` because receiver-only dispatch can't tell a
     // Duration arg (→ Time) from a Time arg (→ Float).
-    let time_ty = || Ty::Class {
-        id: ClassId(Symbol::from("Time")),
-        args: vec![].into(),
-    };
+    let time_ty = || Ty::Time;
     let mut time_cls = ClassInfo::default();
     time_cls.class_methods.insert(Symbol::from("current"), time_ty());
     time_cls.class_methods.insert(Symbol::from("now"), time_ty());
-    time_cls.class_methods.insert(Symbol::from("zone"), time_ty());
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
+    time_cls.class_methods.insert(Symbol::from("zone"), Ty::Class {
+        id: ClassId(Symbol::from("Time")),
+        args: vec![].into(),
+    });
     time_cls.class_methods.insert(Symbol::from("find_zone"), Ty::Union {
         variants: vec![
             Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() },
@@ -288,6 +297,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("unlink", Ty::Int), ("delete", Ty::Int), ("rename", Ty::Int),
         ("join", Ty::Str), ("basename", Ty::Str), ("dirname", Ty::Str),
         ("extname", Ty::Str), ("expand_path", Ty::Str), ("size", Ty::Int),
+        // CRuby: `File.mtime/atime/ctime(path) -> Time`.
+        ("mtime", Ty::Time), ("atime", Ty::Time), ("ctime", Ty::Time),
     ], &[]);
     register_stdlib_class(classes, "Dir", &[
         ("entries", str_arr()), ("glob", str_arr()), ("[]", str_arr()),
@@ -323,25 +334,42 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("migrate", Ty::Nil),
         ("migration_connection_pool", Ty::Untyped),
     ], &[]);
-    // Psych/YAML — campfire's Purchaser loads `config/purchased_by.yml`
-    // via `YAML.load_file`. Register the class-side surface the corpus
-    // writes so the constant is modeled (not a silent raise stub) and
-    // ruby-family emit keeps the call. Return types stay gradual: the
-    // document shape is whatever the file held.
+    // `ERB.new(template, trim_mode: "-").result_with_hash(values)`: the
+    // template half of ERB (spinel's packages/erb, required by
+    // runtime/spinel/erb_spinel.rb). `src` is the generated Ruby source.
     register_stdlib_class(classes, "ERB", &[], &[
-        ("result", Ty::Str),
+        ("result", Ty::Str), ("result_with_hash", Ty::Str), ("src", Ty::Str),
     ]);
     {
         let db = classes.entry(ClassId(Symbol::from("Db"))).or_default();
         db.class_methods.entry(Symbol::from("capture_sql")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         db.class_methods.entry(Symbol::from("escape_string")).or_insert(Ty::Str);
     }
-    register_stdlib_class(classes, "YAML", &[
-        ("load", Ty::Untyped), ("load_file", Ty::Untyped),
-        ("safe_load", Ty::Untyped), ("safe_load_file", Ty::Untyped),
-        ("unsafe_load", Ty::Untyped),
-        ("dump", Ty::Str),
-    ], &[]);
+    // Psych/YAML: campfire's Purchaser loads `config/purchased_by.yml`
+    // via `YAML.load_file`. Register the class-side surface the corpus
+    // writes so the constant is modeled (not a silent raise stub) and
+    // ruby-family emit keeps the call. Return types stay gradual: the
+    // document shape is whatever the file held. `YAML` is `Psych`
+    // (yaml.rb: `YAML = Psych`), so the two names answer the same surface.
+    for yaml in ["YAML", "Psych"] {
+        register_stdlib_class(classes, yaml, &[
+            ("load", Ty::Untyped), ("load_file", Ty::Untyped),
+            ("safe_load", Ty::Untyped), ("safe_load_file", Ty::Untyped),
+            ("unsafe_load", Ty::Untyped), ("unsafe_load_file", Ty::Untyped),
+            ("dump", Ty::Str), ("safe_dump", Ty::Str),
+        ], &[]);
+    }
+    // rexml (a bundled gem, spinel's packages/rexml): `REXML::Document.new(xml)`
+    // and the tree under it. A Document is an Element in REXML; the
+    // elements it hands out stay gradual.
+    register_stdlib_class(classes, "REXML", &[], &[]);
+    classes.entry(ClassId(Symbol::from("REXML"))).or_default().is_module = true;
+    register_stdlib_class(classes, "REXML::Document", &[], &[
+        ("root", Ty::Untyped), ("elements", Ty::Untyped),
+        ("add_element", Ty::Untyped), ("get_elements", Ty::Untyped),
+        ("attribute", Ty::Untyped), ("text", Ty::Untyped),
+        ("to_s", Ty::Str),
+    ]);
     // Framework modules an app `include`s that emit already handles
     // (Attachable sgid, Turbo stream names, ActiveModel callbacks,
     // SanitizeHelper). Empty module markers so the unresolved-include
@@ -383,11 +411,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // (`lower::random_formatter` writes it so). `uuid_v5` / `uuid_v3`
     // hash a namespace and are not registered: they stay refused.
     register_stdlib_class(classes, "Digest::UUID", &[("uuid_v4", Ty::Str)], &[]);
+    // `Digest::MD5.file(path)` is `new.file(path)`: an instance of the
+    // digest class holding the file's bytes, read back with the same
+    // three readers (spinel's packages/digest answers an object with them).
     for digest in ["Digest::MD5", "Digest::SHA1", "Digest::SHA256"] {
+        let instance = Ty::Class { id: ClassId(Symbol::from(digest)), args: vec![].into() };
         register_stdlib_class(classes, digest, &[
             ("hexdigest", Ty::Str), ("digest", Ty::Str),
-            ("base64digest", Ty::Str),
-        ], &[]);
+            ("base64digest", Ty::Str), ("file", instance),
+        ], &[
+            ("hexdigest", Ty::Str), ("digest", Ty::Str),
+            ("base64digest", Ty::Str), ("to_s", Ty::Str),
+        ]);
     }
     // `useragent` + `platform_agent`, now PORTED into
     // `runtime/ruby/user_agent.rb` rather than stubbed. Method lists are
@@ -836,6 +871,55 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
     }
+    // `rescue Psych::Exception` around `YAML.safe_load_file`: the errors a
+    // load raises, with Psych's own ancestry (psych/exception.rb,
+    // psych/syntax_error.rb), so a rescue of the base catches them all.
+    for (exc, parent) in [
+        ("Psych::Exception", "RuntimeError"),
+        ("Psych::SyntaxError", "Psych::Exception"),
+        ("Psych::DisallowedClass", "Psych::Exception"),
+        ("Psych::BadAlias", "Psych::Exception"),
+        ("Psych::AliasesNotEnabled", "Psych::BadAlias"),
+        ("Psych::AnchorNotDefined", "Psych::BadAlias"),
+    ] {
+        register_stdlib_class(classes, exc, &[], &exception_surface);
+        classes.entry(ClassId(Symbol::from(exc))).or_default().parent =
+            Some(ClassId(Symbol::from(parent)));
+    }
+    // Exception owners preserve their runtime ancestry, without claiming a
+    // constructor implementation. The body typer refuses that missing API.
+    classes.entry(ClassId(Symbol::from("ActiveStorage::Transformers"))).or_default().is_module = true;
+    classes.entry(ClassId(Symbol::from("ActiveStorage::Transformers::Transformer"))).or_default();
+    for (owner, parent) in [
+        ("ActiveStorage::Transformers::ImageProcessingTransformer", "ActiveStorage::Transformers::Transformer"),
+        ("ActiveStorage::Service::GCSService", "ActiveStorage::Service"),
+    ] {
+        classes.entry(ClassId(Symbol::from(owner))).or_default().parent = Some(ClassId(Symbol::from(parent)));
+    }
+    // Rails 8.1's Active Storage errors (including InvalidKeyError in
+    // 8.1.4): errors.rb, preview.rb, service/gcs_service.rb and
+    // transformers/image_processing_transformer.rb. Register the same
+    // Exception surface as the other library errors, with Rails' parents
+    // so rescue bindings and is_a? narrowing retain their methods.
+    for (exc, parent) in [
+        ("ActiveStorage::Error", "StandardError"),
+        ("ActiveStorage::InvariableError", "ActiveStorage::Error"),
+        ("ActiveStorage::UnpreviewableError", "ActiveStorage::Error"),
+        ("ActiveStorage::UnrepresentableError", "ActiveStorage::Error"),
+        ("ActiveStorage::IntegrityError", "ActiveStorage::Error"),
+        ("ActiveStorage::FileNotFoundError", "ActiveStorage::Error"),
+        ("ActiveStorage::PreviewError", "ActiveStorage::Error"),
+        ("ActiveStorage::InvalidKeyError", "ActiveStorage::Error"),
+        ("ActiveStorage::Preview::UnprocessedError", "StandardError"),
+        ("ActiveStorage::Service::GCSService::MetadataServerError", "ActiveStorage::Error"),
+        ("ActiveStorage::Service::GCSService::MetadataServerNotFoundError", "ActiveStorage::Error"),
+        ("ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingMethod", "StandardError"),
+        ("ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingArgument", "StandardError"),
+    ] {
+        register_stdlib_class(classes, exc, &[], &exception_surface);
+        classes.entry(ClassId(Symbol::from(exc))).or_default().parent =
+            Some(ClassId(Symbol::from(parent)));
+    }
     // `rescue Errno::ENOENT` / `Errno::EIO`: every Errno class that both
     // CRuby (on every POSIX platform) and Spinel's runtime define. The
     // lookup is by exact name, so the family is registered whole.
@@ -1009,6 +1093,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ], &[]);
     // A class test such as `URI.parse(url).is_a?(URI::HTTP)` names the
     // real bundled class, without claiming any extra instance methods.
+    for parser in ["URI::RFC2396_Parser", "URI::RFC3986_Parser"] {
+        register_stdlib_class(classes, parser, &[], &[("escape", Ty::Str), ("unescape", Ty::Str)]);
+    }
     register_stdlib_class(classes, "URI::HTTP", &[], &[]);
     register_stdlib_class(classes, "URI::HTTPS", &[], &[]);
     // `res.is_a?(Net::HTTPSuccess)` — lobsters' Github; spinel's

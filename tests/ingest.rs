@@ -1538,16 +1538,29 @@ end
     );
 }
 
-/// An arity>0 lambda is not the zero-arity body shape
-/// `callback_condition` accepts (its parameter would be unbound once
-/// spliced into `def validate`), so it stays the reported gap it
-/// always was — distinct from the now-supported zero-arity form above.
+/// A one-parameter lambda is called with the record, so its parameter
+/// reads as `self` once spliced into `def validate`. Two parameters stay
+/// the reported gap.
 #[test]
-fn arity_one_lambda_condition_on_validates_stays_a_gap() {
-    let (model, warnings, gaps) = ingest_widget(
+fn arity_one_lambda_condition_on_validates_reads_the_record() {
+    let (model, warnings, _) = ingest_widget(
         r#"
 class Widget < ApplicationRecord
   validates :name, presence: true, if: ->(w) { w.live? }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let name = rules.iter().find(|v| v.attribute.as_str() == "name").expect("name rule");
+    assert!(
+        matches!(&name.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "live?" && matches!(&*r.node, ExprNode::SelfRef))),
+        "{:?}", name.if_cond
+    );
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: ->(w, x) { w.live? }
 end
 "#,
     );
@@ -1662,13 +1675,12 @@ class Widget < ApplicationRecord
   validates :stock, comparison: { less_than_or_equal_to: :max_stock }
   validates :price, numericality: { greater_than: 0, odd: true }
   validates :bounded, numericality: { equal_to: 1, other_than: 2 }
-  validates :tag, presence: true, length: { maximum: 4, is: 2 }
-  # An arity>0 lambda would splice an unbound parameter into `def
+  # A two-parameter lambda would splice an unbound parameter into `def
   # validate`; a String condition names a method Rails resolves at
   # runtime that this build does not model. Both stay the reported gap
-  # a zero-arity lambda/proc `if:`/`unless:` no longer is (see
-  # `validates_lambda_conditions.rs`).
-  validates :note, presence: true, if: ->(w) { w.live? }
+  # a zero- or one-parameter lambda/proc `if:`/`unless:` no longer is
+  # (see `validates_lambda_conditions.rs`).
+  validates :note, presence: true, if: ->(w, x) { w.live? }
   validates :color, presence: true, unless: "a string condition"
 end
 "#,
@@ -1684,7 +1696,6 @@ end
         "numericality: odd",
         "numericality: equal_to",
         "numericality: other_than",
-        "length: is",
         "if:",
         "unless:",
     ] {
@@ -3511,7 +3522,8 @@ end
 }
 
 /// `uniqueness:` becomes a `Uniqueness` rule with its options; `conditions:`
-/// and a model with its own `default_scope` stay the reported gap.
+/// stays the reported gap. A model with its own `default_scope` lowers too
+/// (the check queries `Model.unscoped`, as Rails does).
 #[test]
 fn uniqueness_options_lower_to_a_rule() {
     let (model, warnings, _) = ingest_widget(
@@ -3539,18 +3551,19 @@ end
     let (model, warnings, _) = ingest_widget(
         "class Widget < ApplicationRecord\n  default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
     );
-    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "default_scope keeps the gap");
-    assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+    assert!(validation_rules(&model).iter().any(|v| v.attribute.as_str() == "uri"), "default_scope lowers");
+    assert!(!warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 
     let (model, warnings, _) = ingest_widget(
         "class Widget < ApplicationRecord\n  self.default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
     );
-    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "self.default_scope keeps the gap");
-    assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+    assert!(validation_rules(&model).iter().any(|v| v.attribute.as_str() == "uri"), "self.default_scope lowers");
+    assert!(!warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 }
 
 /// `inclusion: { in: NAME }` folds a list constant with each element's
-/// kind kept; a computed list (`in: ->(r) { … }`) stays the reported gap.
+/// kind kept; a computed list (`in: ->(r) { … }`) is the set the record
+/// answers when it validates.
 #[test]
 fn inclusion_in_a_list_constant_folds_with_its_kinds() {
     let (model, warnings, _) = ingest_widget(
@@ -3576,8 +3589,15 @@ end
             if matches!(values.as_slice(), [Literal::Sym { .. }, Literal::Sym { .. }])),
         "{:?}", rule("kind")
     );
-    assert!(rule("tier").is_none(), "a lambda list stays a gap: {rules:?}");
-    assert!(warnings.iter().any(|w| w.contains("validates :tier, inclusion: in:")), "{warnings:?}");
+    // A lambda `in:` is asked on the record (`tests/inclusion_callable.rs`):
+    // its parameter is `self`, so `w.class::MODES` reads the record's class.
+    assert!(
+        matches!(rule("tier").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::InclusionCall { set }])
+            if matches!(&*set.node, roundhouse::expr::ExprNode::Send { method, recv: Some(recv), .. }
+                if method.as_str() == "const_get" && matches!(&*recv.node, roundhouse::expr::ExprNode::Send { recv: Some(base), .. } if matches!(&*base.node, roundhouse::expr::ExprNode::SelfRef)))),
+        "{:?}", rule("tier")
+    );
+    assert!(!warnings.iter().any(|w| w.contains("validates :tier")), "{warnings:?}");
 }
 
 /// A list constant reassigned to something ingest can't fold no longer

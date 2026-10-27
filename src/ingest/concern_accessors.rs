@@ -31,8 +31,10 @@ pub(super) fn is_candidate(item: &ModelBodyItem) -> bool {
     matches!(item, ModelBodyItem::Unknown { expr, .. } if accessor(expr))
 }
 
-/// Computed/splat names retain concern lexical scope, and one-sided
-/// accessors need a separate analyzer fix. Neither is admitted here.
+/// Computed/splat names retain concern lexical scope and are not
+/// admitted here. A one-sided `attr_reader` / `attr_writer` is: the model
+/// lowering, the analyzer and the audit each take its half alone, as for
+/// a model's own declaration.
 pub(super) fn is_supported(item: &ModelBodyItem) -> bool {
     let ModelBodyItem::Unknown { expr, .. } = item else {
         return false;
@@ -47,7 +49,7 @@ pub(super) fn is_supported(item: &ModelBodyItem) -> bool {
     else {
         return false;
     };
-    method.as_str() == "attr_accessor"
+    matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")
         && !args.is_empty()
         && args.iter().all(|arg| {
             matches!(

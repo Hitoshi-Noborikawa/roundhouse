@@ -42,6 +42,7 @@
 # target compiles against.
 
 require "sqlite3"
+require "json"
 require "fileutils"
 require "timeout"
 
@@ -61,6 +62,10 @@ module Db
   @permit_owner = nil
   WRITE_PERMIT_TIMEOUT = 5.0
   @write_permit_timeout = WRITE_PERMIT_TIMEOUT
+  # Told how long a writer waited, when it had to: `call(stage, since)`
+  # with stage "db_permit" (behind this process's writers) or "db_flock"
+  # (behind another process's). For profiling; nil costs one check.
+  @wait_observer = nil
   # The permit's cross-process half: a flock beside the database, taken
   # by the permit's holder. See `acquire_writer_lock`.
   @writer_lock_file = nil
@@ -301,6 +306,20 @@ module Db
       Fiber[:ar_txn_callbacks] = work
     end
     work
+  end
+
+  # The tables whose model is inside `Model.unscoped { … }` on this
+  # thread (relation.rb's `Relation.unscoped_tables`). `Thread.current`,
+  # not `Fiber[]` as the transaction state: fiber storage is copied into
+  # a thread started from this one, and the copy would share this Array,
+  # so a block on one thread would lift the scope on the other.
+  def self._unscoped_tables
+    tables = Thread.current[:ar_unscoped_tables]
+    if tables.nil?
+      tables = []
+      Thread.current[:ar_unscoped_tables] = tables
+    end
+    tables
   end
 
   # Request-scoped connection lease. Checks out a handle, binds it to
@@ -832,19 +851,26 @@ module Db
     @write_permit_timeout = seconds
   end
 
+  def self.wait_observer=(observer)
+    @wait_observer = observer
+  end
+
   def self.acquire_permit
     fiber = Fiber.current
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @write_permit_timeout
+    waited = nil
     @permit_lock.synchronize do
       # A dead owner (a killed thread) never releases; a Mutex would
       # have been freed with it, so this permit treats it as free too.
       until @permit_owner.nil? || !@permit_owner.alive?
         remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
         return false if remaining <= 0
+        waited ||= Process.clock_gettime(Process::CLOCK_MONOTONIC)
         @permit_cv.wait(@permit_lock, remaining)
       end
       @permit_owner = fiber
     end
+    @wait_observer&.call("db_permit", waited) if waited
     acquire_writer_lock(deadline)
     true
   end
@@ -910,12 +936,15 @@ module Db
     file = writer_lock_file
     return false if file.nil?
     unless file.flock(File::LOCK_EX | File::LOCK_NB)
-      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      waited = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      remaining = deadline - waited
       return false if remaining <= 0
       begin
         Timeout.timeout(remaining) { file.flock(File::LOCK_EX) }
       rescue Timeout::Error
         return false
+      ensure
+        @wait_observer&.call("db_flock", waited)
       end
     end
     @writer_lock_held = true
@@ -1760,8 +1789,15 @@ module Db
   # Render an integer list for `IN (...)` eager-load batches (issue
   # #27). Empty list → "NULL" so `IN (NULL)` is valid SQL matching no
   # rows (an empty `IN ()` is a syntax error).
+  #
+  # An all-Integer list (every preload batch) goes through
+  # `JSON.generate`, which writes the whole list in C: two objects for
+  # any length, where `map { to_s }.join` costs one String per id (a
+  # room render preloads ~160 ids). Anything else keeps `to_i`, which is
+  # what makes the list safe to inline.
   def self.escape_int_list(ids)
     return "NULL" if ids.empty?
+    return JSON.generate(ids)[1..-2] if ids.all?(Integer)
 
     ids.map { |i| i.to_i.to_s }.join(", ")
   end
@@ -1794,15 +1830,77 @@ end
 module SQLite3
   module DataVersionGeneration
     def get_first_value(*args)
-      value = super
       sql = args[0]
-      if !sql.nil? && sql == "PRAGMA data_version"
-        base = value.is_a?(Integer) ? value : 0
-        base + Db.write_generation
-      else
-        value
+      return super unless !sql.nil? && sql == "PRAGMA data_version"
+      # Compiled once per connection (FixedStatements): the observer asks
+      # on every cached read.
+      value = args.length == 1 ? fixed_statement_first_value(sql) : super
+      base = value.is_a?(Integer) ? value : 0
+      base + Db.write_generation
+    end
+  end
+
+  # Statements a connection runs over and over with nothing to bind —
+  # transaction control on every request and write, and the observer's
+  # `PRAGMA data_version` — compiled once per connection and reset after
+  # each run. The gem's `execute` and `get_first_value` prepare and close
+  # a statement every call: measured on campfire's users profile, these
+  # were about 10 of the ~14 statements each request prepared.
+  #
+  # Inside `execute`, not beside it, so every caller (Db's snapshot,
+  # permit and transaction paths, an app's own `execute("BEGIN")`) takes
+  # it, and anything that wraps a connection's `execute` still sees each
+  # call. A statement that raises is reset all the same, so the next run
+  # starts clean; `close` finalizes them first. A connection inherited
+  # across fork is dropped, not closed (Db.adopt_after_fork), and its
+  # statements go with it.
+  module FixedStatements
+    # Transaction control: no rows, so `execute` answers the gem's empty
+    # result. `PRAGMA data_version` has a row; only `get_first_value`
+    # (DataVersionGeneration) takes it through here.
+    FIXED = { "BEGIN" => true, "BEGIN IMMEDIATE" => true, "COMMIT" => true, "ROLLBACK" => true }.freeze
+    NO_ROWS = [].freeze
+
+    def execute(sql, bind_vars = [], &block)
+      return super unless block.nil? && (bind_vars.nil? || bind_vars.empty?) && FIXED.key?(sql)
+      stmt = fixed_statement(sql)
+      begin
+        stmt.step
+      ensure
+        stmt.reset!
       end
+      NO_ROWS
+    end
+
+    def close
+      fixed = @rh_fixed_statements
+      @rh_fixed_statements = nil
+      fixed&.each_value { |stmt| stmt.close unless stmt.closed? }
+      super
+    end
+
+    private
+
+    def fixed_statement(sql)
+      cache = (@rh_fixed_statements ||= {})
+      stmt = cache[sql]
+      if stmt.nil? || stmt.closed?
+        stmt = prepare(sql)
+        cache[sql] = stmt
+      end
+      stmt
+    end
+
+    def fixed_statement_first_value(sql)
+      stmt = fixed_statement(sql)
+      begin
+        row = stmt.step
+      ensure
+        stmt.reset!
+      end
+      row.nil? ? nil : row[0]
     end
   end
 end
+SQLite3::Database.prepend(SQLite3::FixedStatements)
 SQLite3::Database.prepend(SQLite3::DataVersionGeneration)

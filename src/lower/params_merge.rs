@@ -113,7 +113,7 @@ pub fn apply_params_merge_lowering(app: &mut App) -> Vec<Diagnostic> {
             Symbol::from(crate::naming::snake_case(m.name.0.as_str())),
         );
     }
-    // `model_defines_writer` needs the Model, and the rewrite runs while
+    // `model_defines_public_writer` needs the Model, and the rewrite runs while
     // `app.models` is mutably borrowed — settle the per-key question now.
     let models: Vec<Model> = app.models.clone();
 
@@ -164,7 +164,7 @@ impl Ctx<'_> {
         self.models
             .iter()
             .find(|m| &m.name.0 == model)
-            .is_some_and(|m| super::model_to_library::model_defines_writer(m, field))
+            .is_some_and(|m| super::model_to_library::model_defines_public_writer(m, field))
     }
 }
 
@@ -805,6 +805,8 @@ const RUNTIME_ATTRS_SLOTS: &[&str] = &[
     "find_or_initialize_by",
     "find_or_create_by",
     "find_or_create_by!",
+    "create_or_find_by",
+    "create_or_find_by!",
 ];
 
 fn convert_attributes_assignments(app: &mut App, specs: &ParamsSpecs) {

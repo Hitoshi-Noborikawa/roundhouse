@@ -15,6 +15,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/memoized_fields.rs"]
+mod memoized_fields;
+#[path = "support/app_class_base.rs"]
+mod app_class_base;
+#[path = "support/parenless_calls.rs"]
+mod parenless_calls;
+#[path = "support/model_class_methods.rs"]
+mod model_class_methods;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -24,6 +32,11 @@ mod nested_classes;
 mod array_methods;
 #[path = "support/truthiness.rs"]
 mod truthiness;
+#[path = "support/class_constants.rs"]
+mod class_constants;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -119,13 +132,123 @@ fn assert_tsc_passes(fixture: &str, scratch: &Path) {
     );
 }
 
+/// `Post.find(params[:id])`, the pre-Rails-8 spelling of `find(params.
+/// expect(:id))`. Analysis is clean, so the emitted project must compile:
+/// it read `this.params.get("id")` (the runtime's params is a Record, not
+/// a class with `get`) and then handed `find(id: number)` a `ParamValue`.
+/// The coercion is the TS emitter's: the Ruby family's casting finder takes
+/// the raw String (tests/primary_key_casting.rs).
 #[test]
 #[ignore]
-fn tiny_blog_tsc_passes() {
-    let fixture = Path::new("fixtures/tiny-blog");
-    let scratch = scratch_dir("tiny-blog");
-    generate_project(fixture, &scratch);
-    assert_tsc_passes("tiny-blog", &scratch);
+fn real_blog_find_by_params_index_tsc_passes() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "Article.find(params.expect(:id))",
+            "Article.find(params[:id])",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let controller =
+        std::fs::read_to_string(emitted.join("app/controllers/articles_controller.ts")).expect("emitted controller");
+    assert!(!controller.contains("this.params.get("), "{controller}");
+    assert_tsc_passes("real-blog with params[:id]", &emitted);
+}
+
+/// `find(params[:id])` beside a row whose id is 0: a blank, absent or
+/// non-String id finds nothing (RecordNotFound) rather than row 0, which
+/// `Number("")` would answer; a numeric String finds its row.
+#[test]
+#[ignore]
+fn find_by_params_index_rejects_a_blank_id_beside_row_zero() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "Article.find(params.expect(:id))",
+            "Article.find(params[:id])",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        r#"import Database from "better-sqlite3";
+import { installDb } from "./src/juntos.js";
+import { Db } from "./src/db.js";
+import { Schema } from "./src/schema.js";
+import { ArticlesController } from "./app/controllers/articles_controller.js";
+const db = new Database(":memory:");
+for (const stmt of Schema.statements()) db.exec(stmt);
+installDb(db);
+Db.install(db);
+db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (0, 'zero', 'b', '2026-01-01 00:00:00', '2026-01-01 00:00:00'), (31, 'thirty-one', 'b', '2026-01-01 00:00:00', '2026-01-01 00:00:00')");
+const cases: [string, Record<string, any>][] = [["blank", { id: "" }], ["space", { id: " " }], ["missing", {}], ["array", { id: ["0"] }], ["abc", { id: "abc" }], ["zero", { id: "0" }], ["31", { id: "31" }]];
+const out: string[] = [];
+for (const [label, params] of cases) {
+  const c: any = new ArticlesController();
+  c.params = params;
+  try { c.show(); } catch (e: any) { if (e.constructor.name === "RecordNotFound") { out.push(`${label}=RecordNotFound`); continue; } }
+  out.push(`${label}=${c.article?.title}`);
+}
+console.log(out.join(","));
+"#,
+    );
+    assert_eq!(
+        out,
+        "blank=RecordNotFound,space=RecordNotFound,missing=RecordNotFound,array=RecordNotFound,abc=RecordNotFound,zero=zero,31=thirty-one"
+    );
+}
+
+/// The libsql adapter's `escape_int` beside a row whose id is 0: a NaN
+/// key (a blank or non-numeric request id) finds nothing, as on the
+/// better-sqlite3 adapter, rather than row 0.
+#[test]
+#[ignore]
+fn libsql_find_of_nan_finds_nothing_beside_row_zero() {
+    use roundhouse::profile::DeploymentProfile;
+
+    let scratch = scratch_dir("real-blog-libsql-find-nan");
+    generate_project_with_profile(roundhouse::fixtures::real_blog(), &scratch, &DeploymentProfile::node_async());
+    let out = run_under_tsx(
+        &scratch,
+        r#"import { setupTestDb } from "./src/juntos.js";
+import { Schema } from "./src/schema.js";
+import { Db } from "./src/db.js";
+import { Article } from "./app/models/article.js";
+await setupTestDb(Schema.statements().join(";"));
+await Db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (0, 'zero', 'b', '2026-01-01 00:00:00', '2026-01-01 00:00:00')");
+const out: string[] = [];
+for (const id of [NaN, 0]) {
+  try { out.push(`${id}=${(await Article.find(id) as any).title}`); }
+  catch (e: any) { out.push(`${id}=${e.constructor.name}`); }
+}
+console.log(out.join(","));
+"#,
+    );
+    assert_eq!(out, "NaN=RecordNotFound,0=zero");
+}
+
+/// A class that is not a model keeps its `find`'s argument: only a class
+/// reaching `ActiveRecord::Base` has the numeric key the coercion assumes.
+#[test]
+#[ignore]
+fn non_model_find_keeps_its_params_argument() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "app/models/shelf.rb",
+            "class Shelf\n  def self.find(name)\n    name.to_s.upcase\n  end\nend\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "Article.find(params.expect(:id))",
+            "Article.find(params[:id])\n      @shelf = Shelf.find(params[:id])",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let controller =
+        std::fs::read_to_string(emitted.join("app/controllers/articles_controller.ts")).expect("emitted controller");
+    assert!(controller.contains("Shelf.find(this.params[\"id\"])"), "{controller}");
+    assert!(controller.contains("Article.find(Number(typeof this.params[\"id\"] === \"string\""), "{controller}");
+    assert_tsc_passes("real-blog with a non-model find", &emitted);
 }
 
 /// Diagnostic test: emit transpiled_blog and dump tsc errors so we
@@ -286,6 +409,84 @@ fn run_under_tsx(emitted: &Path, script: &str) -> String {
 
 #[test]
 #[ignore]
+fn real_blog_memoized_fields_run_under_tsx() {
+    // Readers memoizing a literal answer it, on a plain class's two sides
+    // and on a model, as CRuby does (#1238); the app compiles.
+    let (emitted, errors) = memoized_fields::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Meter } from \"./app/models/meter.js\";\nimport { Comment } from \"./app/models/comment.js\";\nconst m = new Meter();\nconsole.log(JSON.stringify([Meter.label, m.name, m.items, new Comment().tone]));\n",
+    );
+    assert_eq!(out, memoized_fields::SUMMARY);
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with memoized readers", &emitted);
+}
+
+#[test]
+#[ignore]
+fn real_blog_app_class_named_like_the_alias_runs_under_tsx() {
+    // An app `ActiveRecordBase` beside an app `Base`: the runtime base
+    // takes another alias, and the app compiles and answers as CRuby.
+    let (emitted, errors) = app_class_base::alias_taken_overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Gadget } from \"./app/models/gadget.js\";\nconsole.log(Gadget.both());\n",
+    );
+    assert_eq!(out, app_class_base::BOTH);
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with app Base and ActiveRecordBase", &emitted);
+}
+
+#[test]
+#[ignore]
+fn real_blog_app_class_base_runs_under_tsx() {
+    // A class extending the app's own `Base` reads its class method and
+    // constant as CRuby does, and the app, whose records and controllers
+    // extend the runtime's base classes under aliases, compiles (#1228).
+    let (emitted, errors) = app_class_base::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Widget } from \"./app/models/widget.js\";\nconsole.log([Widget.label(), Widget.LABEL].join(\",\"));\n",
+    );
+    assert_eq!(out, app_class_base::SUMMARY);
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with an app Base", &emitted);
+}
+
+#[test]
+#[ignore]
+fn real_blog_parenless_calls_run_under_tsx() {
+    // A zero-argument `def` called without parens answers its value on a
+    // plain class, from a subclass's class method and from a model's
+    // class method, as CRuby does (#1229).
+    let (emitted, errors) = parenless_calls::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Meter } from \"./app/models/meter.js\";\nimport { Widget } from \"./app/models/widget.js\";\nimport { Comment } from \"./app/models/comment.js\";\nimport { Gauge } from \"./app/models/gauge.js\";\nconsole.log([Meter.a(), Meter.b(), Meter.c(), new Meter().e(), Widget.shout(), Comment.tags(), Gauge.show(), new Gauge().both()].join(\",\"));\n",
+    );
+    assert_eq!(out, parenless_calls::SUMMARY);
+}
+
+#[test]
+#[ignore]
+fn real_blog_model_class_methods_run_under_tsx() {
+    // A model's class method calling another without a receiver answers
+    // as CRuby does (#1236).
+    let (emitted, errors) = model_class_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Comment } from \"./app/models/comment.js\";\nconsole.log([Comment.loud_tag(), Comment.tag_size()].join(\",\"));\n",
+    );
+    assert_eq!(out, model_class_methods::SUMMARY);
+}
+
+#[test]
+#[ignore]
 fn real_blog_nested_classes_run_under_tsx() {
     // Classes nested under a class and a module, raised, rescued and
     // built from another file, answer as CRuby does.
@@ -296,6 +497,48 @@ fn real_blog_nested_classes_run_under_tsx() {
         "import { Report } from \"./app/models/report.js\";\nconsole.log(Report.summary());\n",
     );
     assert_eq!(out, nested_classes::SUMMARY);
+}
+
+#[test]
+#[ignore]
+fn real_blog_class_constants_run_under_tsx() {
+    // A class's own constants of each literal kind, read from a class
+    // method, answer as CRuby does (#1223).
+    let (emitted, errors) = class_constants::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Scale } from \"./app/models/scale.js\";\nconsole.log(Scale.summary());\n",
+    );
+    assert_eq!(out, class_constants::SUMMARY);
+}
+
+#[test]
+#[ignore]
+fn real_blog_model_constant_reads_run_under_tsx() {
+    // A model method reading its own constants through `fetch`, `key?`,
+    // `keys`, `first` and `[]` answers as CRuby does (#1223 b).
+    let (emitted, errors) = class_constants::gauge_overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Gauge } from \"./app/models/gauge.js\";\nconst g = new Gauge();\ng.size = \"large\";\nconsole.log(g.summary() + \";\" + Gauge.heaviest() + \";\" + Gauge.probe());\n",
+    );
+    assert_eq!(out, format!("{};9;true,false,true", class_constants::GAUGE_SUMMARY));
+}
+
+#[test]
+#[ignore]
+fn real_blog_shadowing_constant_runs_under_tsx() {
+    // A child's constant shadowing its parent's answers its own value, and
+    // the parent's still answers the parent's (#1223).
+    let (emitted, errors) = class_constants::shadow_overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Dial } from \"./app/models/dial.js\";\nconsole.log(Dial.summary());\n",
+    );
+    assert_eq!(out, class_constants::SHADOW_SUMMARY);
 }
 
 #[test]
@@ -351,4 +594,37 @@ fn real_blog_ruby_truthiness_runs_under_tsx() {
         "import { TruthProbe } from \"./app/models/truth_probe.js\";\nconsole.log(JSON.stringify(TruthProbe.run(0, \"\", null, false, [], [\"\", \"a\"])));\n",
     );
     assert_eq!(out, truthiness::EXPECTED);
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run_under_tsx() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby, but for a String
+    // locale named in an error: JS has no Symbol apart from String, so `"de"` shows as `:de`.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(emitted.join("config/i18n_translations").exists());
+    let out = run_under_tsx(
+        &emitted,
+        r#"import { Article } from "./app/models/article.js";
+import { I18n } from "./src/i18n_locale.js";
+const expect = (what: string, got: unknown, want: unknown) => {
+  if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(what + ": " + JSON.stringify(got));
+};
+expect("lookups", Article.lookups(), ["Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"]);
+expect("polish", Article.polish(), ["1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"]);
+expect("restored", I18n.locale(), "en");
+expect("named", [Article.named("pl"), Article.named("en"), Article.named(null)], ["Cześć", "Hello", "Hello"]);
+expect("dynamic", [Article.probe_key("greet"), Article.only_key("xx")], ["Hello", "Translation missing: en.probe.only_xx"]);
+let message = "no raise";
+try { Article.named("de"); } catch (e) { message = (e as Error).message; }
+expect("named de", message, ":de is not a valid locale");
+console.log("locales passed");
+"#,
+    );
+    assert_eq!(out, "locales passed");
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with two locales", &emitted);
 }

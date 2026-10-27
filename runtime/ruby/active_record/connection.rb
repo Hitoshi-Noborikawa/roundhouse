@@ -13,6 +13,20 @@
 # columns), so a typed bag is the honest contract rather than an
 # avoidable erasure.
 module ActiveRecord
+  # Not an ivar on each class: Rails' class_attribute is inherited until a subclass sets its own, so the reader walks the ancestors through this table
+  module TimestampSwitches
+    @switches = { "ActiveRecord::Base" => true }
+
+    def self.store(name, value)
+      @switches[name] = value
+      value
+    end
+
+    def self.lookup(name)
+      @switches[name]
+    end
+  end
+
   # `raise ActiveRecord::Rollback` inside `transaction { }` rolls it back
   # quietly: the transaction rescues it and answers nil. Here beside
   # `transaction`, which only the ruby family has.
@@ -373,6 +387,30 @@ module ActiveRecord
   # Connection class (which those tables don't ship). This file is
   # walked only into the ruby-family trees, and active_record.rb
   # requires it AFTER base.rb so the reopen sees the real class.
+
+  # Not in relation.rb: the strict targets' `Db` never raises RecordNotUnique.
+  class Relation
+    def create_or_find_by(conditions)
+      created = build(conditions)
+      begin
+        ActiveRecord::Base.transaction(requires_new: true) { created.save }
+      rescue ActiveRecord::RecordNotUnique
+        return find_by!(conditions)
+      end
+      created
+    end
+
+    def create_or_find_by!(conditions)
+      created = build(conditions)
+      begin
+        ActiveRecord::Base.transaction(requires_new: true) { created.save! }
+      rescue ActiveRecord::RecordNotUnique
+        return find_by!(conditions)
+      end
+      created
+    end
+  end
+
   class Base
     # Ruby-family only, beside the other reopens here: strict targets have
     # no `Type::Value`, no untyped `self[name]` and no relation `all`.
@@ -417,7 +455,7 @@ module ActiveRecord
     # zero/empty-string key.
     def self.find(id)
       raise RecordNotFound.new("Couldn't find #{name} without an ID", name, primary_key, id) if id.nil?
-      result = _find_primary_key_input(id)
+      result = _default_scope_where.empty? ? _find_primary_key_input(id) : _find_in_scope(id)
       raise RecordNotFound.new("Couldn't find #{name} with '#{primary_key}'=#{id.inspect}", name, primary_key, id) if result.nil?
       result
     end
@@ -441,6 +479,13 @@ module ActiveRecord
       _adapter_find_by_id(key)
     end
 
+    # `find` on a default-scoped model: the row only when the scope keeps it.
+    def self._find_in_scope(id)
+      key = _cast_primary_key(id)
+      return nil if key.nil?
+      all.find_by({ primary_key => key })
+    end
+
     # Relation and legacy-adapter finders use this shared conversion.
     # The integer parser never converts an out-of-range decimal string.
     def self._cast_primary_key(id)
@@ -461,6 +506,14 @@ module ActiveRecord
       raise ArgumentError, "wrong number of arguments (given #{ids.length}, expected 0..1)" if ids.length > 1
       id = ids[0]
       return false if id.nil?
+      # Conditions, not a key (Rails' `exists?(name: "x")`): the Relation
+      # answers them, through the default scope when the model has one.
+      return all.exists?(id) if id.is_a?(Hash)
+      unless _default_scope_where.empty?
+        key = _cast_primary_key(id)
+        return false if key.nil?
+        return all.where({ primary_key => key }).exists?
+      end
       _exists_primary_key_input(id)
     end
 
@@ -554,6 +607,14 @@ module ActiveRecord
     # raise the Bar B untyped residual via Hash[untyped] walks).
     def self.sanitize_sql_array(statement)
       sanitize_sql(statement)
+    end
+
+    # Rails' `sanitize_sql_for_order` on a String: the ORDER BY fragment
+    # as written, unchanged. The Array form is not this: Rails 8.1 checks
+    # its fragment with `disallow_raw_sql!`, which a fragment holding `?`
+    # never passes (`UnknownAttributeReference`), so it stays unsupported.
+    def self.sanitize_sql_for_order(condition)
+      condition
     end
 
     # Rails' `current_transaction`. One database, so every model's is the
@@ -845,15 +906,23 @@ module ActiveRecord
               raise e
             end
             # The records' commit callbacks first, then the held jobs,
-            # as Rails enqueues after them. A job that fails to enqueue
-            # (a Sidekiq push to a down Redis) raises after both, so no
-            # callback is skipped or left to fire at a later COMMIT.
+            # as Rails enqueues after them. A callback that raises ends
+            # the COMMIT there, as in Rails' `commit_records`, whose raise
+            # comes before the transaction's own callbacks, where
+            # `after_all_transactions_commit` enqueues: the held jobs and
+            # any `after_commit` work not yet run are dropped, and the
+            # caller sees the callback's error. A job that fails to enqueue (a Sidekiq push to a down
+            # Redis) raises after the callbacks have all run, so none is
+            # skipped or left to fire at a later COMMIT.
             begin
               ActiveRecord::Base._commit_enlisted
               ActiveRecord::Base._run_after_commits_from(0)
-            ensure
-              ActiveRecord::TransactionHooks.committed
+            rescue Exception => e
+              ActiveRecord::Base._drop_after_commits_from(0)
+              ActiveRecord::TransactionHooks.rolled_back
+              raise e
             end
+            ActiveRecord::TransactionHooks.committed
           end
         end
       end
@@ -891,6 +960,7 @@ module ActiveRecord
     # rather than counted beforehand. Ruby-family-only because
     # `changes` is — see base.rb's default.
     def self.delete_all
+      return all.delete_all unless _default_scope_where.empty?
       ActiveRecord.adapter.delete_all(table_name)
       ActiveRecord.adapter.changes
     end
@@ -993,16 +1063,22 @@ module ActiveRecord
       ActiveRecord.adapter.changes
     end
 
-    # `self.record_timestamps=` — Rails class-attribute toggling auto
-    # timestamp stamping. Kept nowhere: `fill_timestamps` always stamps,
-    # so analysis reports any assignment other than `true`; the per-call
-    # `upsert_all(…, record_timestamps:)` is honored.
     def self.record_timestamps=(value)
-      value
+      TimestampSwitches.store(name, value)
     end
 
     def self.record_timestamps
+      # Not a `superclass` walk: Spinel then mistypes an unrelated `File.read(path)` whose path may be a Rails::AppPath
+      ancestors.each do |klass|
+        found = TimestampSwitches.lookup(klass.name)
+        return found unless found.nil?
+      end
       true
+    end
+
+    # Not base.rb's answer: a strict target, which never loads this file, keeps no switch to read
+    def stamps_timestamps?
+      self.class.record_timestamps
     end
 
     # `record.update_column(name, value)` — write one attribute straight
@@ -1104,6 +1180,14 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).find_or_create_by!(conditions.to_h)
     end
 
+    def self.create_or_find_by(conditions)
+      ActiveRecord::Relation.new(self).create_or_find_by(conditions.to_h)
+    end
+
+    def self.create_or_find_by!(conditions)
+      ActiveRecord::Relation.new(self).create_or_find_by!(conditions.to_h)
+    end
+
     # `Model.find_sole_by(attrs)` — Rails' `where(attrs).sole`; see
     # Relation#find_sole_by. `Model.sole` is the same on the whole table.
     def self.find_sole_by(conditions)
@@ -1124,6 +1208,52 @@ module ActiveRecord
     # `ActiveRecord::Relation.new(Model)` directly.
     def self.all
       ActiveRecord::Relation.new(self)
+    end
+
+    # A Relation over the model with no default scope applied, which is
+    # what Rails' UniquenessValidator queries (`finder_class.unscoped`).
+    # With a block, Rails runs it with the model's default scope removed
+    # from every relation built inside, and returns the block's value.
+    def self.unscoped
+      if block_given?
+        tables = ActiveRecord::Relation.unscoped_tables
+        tables << _table_sql
+        value = nil
+        begin
+          value = yield
+        ensure
+          tables.pop
+        end
+        return value
+      end
+      ActiveRecord::Relation.new(self, false)
+    end
+
+    # The conditions of the model's `default_scope { where(…) }`, which
+    # `Relation#initialize` adds; a scoped model's emit overrides this.
+    def self._default_scope_where
+      {}
+    end
+
+    # A default-scoped model is read only through its Relation, which
+    # applies the scope (or not, inside `unscoped { }`): these class
+    # forms answer from it rather than from the model's whole-table
+    # adapter primitives, which base.rb's defaults use.
+    def self.count
+      return all.count unless _default_scope_where.empty?
+      _adapter_count
+    end
+
+    def self.last
+      return all.last unless _default_scope_where.empty?
+      _adapter_last
+    end
+
+    def self.destroy_all
+      return all.destroy_all unless _default_scope_where.empty?
+      records = _adapter_all
+      records.each { |r| r.destroy() }
+      records
     end
 
     # SELECT 1 LIMIT 1. Strict targets keep COUNT in base.rb.
@@ -1352,6 +1482,75 @@ module ActiveRecord
       ActiveRecord.adapter.select_rows(sql).map { |row| instantiate(row) }
     end
 
+    # A plucked value as the record would hold it (`Relation#pluck`). A
+    # model with a stored PostgreSQL array column overrides this to decode
+    # that column's JSON text (`lower::array_columns`); every other value
+    # is what the row held.
+    def self.decode_plucked(column, value)
+      value
+    end
+
+    # Not in base.rb: a block here would put one on every strict target's runtime.
+    def _run_save_callbacks
+      done = false
+      value = catch(:abort) do
+        before_save
+        result = block_given? ? yield : true
+        after_save
+        done = true
+        result
+      end
+      done ? value : false
+    end
+
+    def _run_create_callbacks
+      done = false
+      value = catch(:abort) do
+        before_create
+        result = block_given? ? yield : true
+        after_create
+        done = true
+        result
+      end
+      done ? value : false
+    end
+
+    def _run_update_callbacks
+      done = false
+      value = catch(:abort) do
+        before_update
+        result = block_given? ? yield : true
+        after_update
+        done = true
+        result
+      end
+      done ? value : false
+    end
+
+    def _run_destroy_callbacks
+      done = false
+      value = catch(:abort) do
+        before_destroy
+        result = block_given? ? yield : true
+        after_destroy
+        done = true
+        result
+      end
+      done ? value : false
+    end
+
+    def _run_validation_callbacks
+      done = false
+      value = catch(:abort) do
+        before_validation
+        result = block_given? ? yield : true
+        after_validation
+        done = true
+        result
+      end
+      done ? value : false
+    end
+
     # Rails' `update_attribute`: one writer, then save WITHOUT
     # validations (validation callbacks skipped too) — save callbacks
     # still run. Specs use it to construct records a validation would
@@ -1363,6 +1562,7 @@ module ActiveRecord
       status = false
       self.class.transaction do
         status = save_after_validation
+        raise ActiveRecord::Rollback unless status
       end
       status
     end
@@ -1378,14 +1578,96 @@ module ActiveRecord
     # ruby-family method the strict targets' base does not have.
     def save
       status = false
+      @_save_halted = false
       self.class.transaction do
-        before_validation
+        # Ahead of valid?, as base.rb's save explains.
+        _autosave_belongs_to
         ok = valid?
-        after_validation
         status = ok ? save_after_validation : false
         raise ActiveRecord::Rollback unless status
       end
       status
+    end
+
+    # base.rb's body with before_validation able to halt it, as Rails'
+    # can: the validations and after_validation are skipped and the
+    # record is invalid with no errors. Rails clears the errors ahead
+    # of that hook, so a halt also drops the previous run's.
+    def valid?
+      @errors = []
+      @error_details = []
+      return false if _halted_by_abort { before_validation }
+      validate
+      ok = @errors.empty?
+      after_validation
+      ok
+    end
+
+    def save!
+      return self if save
+      raise RecordNotSaved.new("Failed to save the record", self) if @_save_halted
+      raise RecordInvalid, self
+    end
+
+    # base.rb's body with each before_* hook able to halt the save, as
+    # Rails' before callbacks can; an after_* hook's `throw :abort` is not
+    # caught, as in Rails, where it escapes as UncaughtThrowError.
+    def save_after_validation
+      if _halted_by_abort { before_save }
+        @_save_halted = true
+        return false
+      end
+      was_new = new_record?
+      if was_new
+        if _halted_by_abort { before_create }
+          @_save_halted = true
+          return false
+        end
+        fill_timestamps(true) if stamps_timestamps?
+        @__id_before_insert = @id
+        self.id = _adapter_insert
+        @persisted = true
+        _enlist_write(0)
+        __track_saved_changes(was_new)
+        after_create
+      else
+        if _halted_by_abort { before_update }
+          @_save_halted = true
+          return false
+        end
+        fill_timestamps(false) if stamps_timestamps?
+        _adapter_update
+        _enlist_write(1)
+        __track_saved_changes(was_new)
+        after_update
+      end
+      after_save
+      true
+    end
+
+    # The write is enlisted as soon as it's made, ahead of the after_*
+    # hooks, as Rails adds the record to the transaction before the
+    # save's callbacks: an exception one of them raises rolls the write
+    # back, and the record is put back too (`_rollback_enlisted`), a
+    # create a new record again. Its commit callbacks still wait for the
+    # COMMIT. `save` always runs inside a transaction (its own, at
+    # least), so the write is always enlisted here.
+    def _enlist_write(kind)
+      # The Dirty baseline before this transaction's first write of the
+      # record, which a rollback puts back: its changes are pending again,
+      # as Rails' `restore_transaction_record_state` leaves them.
+      unless @__rollback_saved
+        @__rollback_saved = true
+        @__rollback_baseline = @__last_saved_attributes
+      end
+      _enlist_or_run(kind)
+    end
+
+    # The transaction that enlisted the record ended: nothing to put back.
+    def _forget_rollback_state
+      @__rollback_saved = false
+      @__rollback_baseline = nil
+      nil
     end
 
     # `destroy` in a transaction too, for the same reason: a dependent
@@ -1393,15 +1675,31 @@ module ActiveRecord
     # base.rb's body, restated as `save` is.
     def destroy
       return self unless persisted?
+      halted = false
       self.class.transaction do
-        before_destroy
+        halted = _halted_by_abort { before_destroy }
+        raise ActiveRecord::Rollback if halted
         _adapter_delete
         @persisted = false
         @destroyed = true
         after_destroy
         _destroy_committed
       end
-      self
+      halted ? false : self
+    end
+
+    def destroy!
+      return self if destroy
+      raise RecordNotDestroyed.new("Failed to destroy #{self.class.name} with id=#{id}", self)
+    end
+
+    def _halted_by_abort
+      done = false
+      catch(:abort) do
+        yield
+        done = true
+      end
+      !done
     end
 
     # Rails' `touch` runs in a transaction too, and is an update as far
@@ -1529,6 +1827,8 @@ module ActiveRecord
     end
 
     def _run_commit_callbacks(kind)
+      # Committed: a later rollback has nothing of this one to put back.
+      _forget_rollback_state
       if kind == 2
         after_destroy_commit
       else
@@ -1598,15 +1898,20 @@ module ActiveRecord
       nil
     end
 
-    # The id a rolled-back create was given stays on the record (Rails
-    # puts back the pre-save nil): the unsaved sentinel differs by key
-    # type, and a later save inserts the row afresh either way.
+    # A rolled-back create gets back the id it had before the insert, as
+    # Rails puts back the pre-save nil, so it reads as unsaved again (its
+    # held associations among them).
     def _restore_after_rollback(kind)
       if kind == 0
         @persisted = false
+        @id = @__id_before_insert
       elsif kind == 2
         @persisted = true
         @destroyed = false
+      end
+      if @__rollback_saved
+        @__last_saved_attributes = @__rollback_baseline
+        _forget_rollback_state
       end
       nil
     end

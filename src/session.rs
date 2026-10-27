@@ -50,3 +50,36 @@ pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
         })
     })
 }
+
+/// [`analyze_and_lower`] for the app one target emits: the target's own
+/// pre-analysis choices first. A target that stores PostgreSQL array
+/// columns as the Array Rails reads types them so
+/// (`lower::array_columns`); every other target sees the ingested app.
+pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    if target.stores_array_columns() {
+        crate::lower::array_columns::store_arrays(app);
+    }
+    if target.lowers_nested_attributes() {
+        crate::ingest::nested_attributes::expand(app);
+        crate::ingest::nested_attributes::expand_autosave(app);
+    }
+    let mut refused = if target.lowers_validates_with() {
+        crate::ingest::validates_with::expand(app);
+        crate::ingest::mailer_defaults::expand(app);
+        crate::ingest::has_many_hold::expand(app);
+        let mut found = crate::ingest::each_validator::expand(app, target.as_str());
+        found.extend(crate::ingest::mailer_helpers::apply(app, target.as_str()));
+        found.extend(crate::ingest::mailer_callbacks::expand(app, target.as_str()));
+        found
+    } else {
+        let mut found = crate::ingest::each_validator::refuse(app, target.as_str());
+        found.extend(crate::ingest::mailer_callbacks::refuse(app, target.as_str()));
+        found
+    };
+    if !target.parses_numericality_input() {
+        refused.extend(crate::ingest::app::refuse_numericality_allow_on_untyped(app, target.as_str()));
+    }
+    refused.extend(crate::lower::untyped_subclass_diagnostics(app));
+    refused.extend(analyze_and_lower(app));
+    refused
+}

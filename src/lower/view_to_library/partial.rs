@@ -2,7 +2,7 @@
 //! dispatches from `emit_io_append`.
 
 use crate::expr::{
-    Arm, BlockStyle, Expr, ExprNode, InterpPart, Literal, LValue, Pattern,
+    Arm, BlockStyle, Expr, ExprNode, Literal, LValue, Pattern,
 };
 use crate::ident::{Symbol, VarId};
 use crate::naming::{camelize_path, last_segment, singularize, snake_case};
@@ -12,7 +12,7 @@ use crate::lower::view::RenderPartial;
 
 use super::{
     accumulator_append_call, assign_accumulator_string_new, lit_sym, nil_lit, send, seq,
-    var_ref, view_helpers_call, ViewCtx,
+    var_ref, view_helpers_call, ViewCtx, ViewKind,
 };
 
 pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Option<Expr> {
@@ -39,6 +39,8 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             let plural_camel = camelize_path(&crate::naming::pluralize_snake(&singular));
             let mut call_args = vec![var_ref(Symbol::from(crate::naming::safe_local(&singular)))];
             call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
+            call_args.extend(locals_extra_args(None, &plural_camel, &singular, ctx));
+            let method = ctx.render_method(ViewKind::Partial, &plural_camel, &singular);
             let call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -46,7 +48,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                         path: vec![Symbol::from("Views"), Symbol::from(plural_camel)],
                     },
                 )),
-                &singular,
+                method.as_str(),
                 call_args,
                 None,
                 true,
@@ -102,9 +104,9 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             cached_key,
         } => {
             if let Some(key) = cached_key {
-                wrap_keyed_cached_collection(collection, partial, *as_name, *locals, key, ctx)
+                wrap_keyed_cached_collection(collection, partial, *as_name, *locals, key, KeyedCache::Callable, ctx)
             } else if *cached {
-                wrap_cached_collection(collection, partial, *as_name, *locals, ctx)
+                wrap_cached_true_collection(collection, partial, *as_name, *locals, ctx)
             } else {
                 emit_named_collection_each(collection, partial, *as_name, *locals, ctx)
             }
@@ -122,8 +124,10 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             if module_camel.is_empty() {
                 return None;
             }
-            let method_name =
-                crate::lower::view::view_method_name(&method_sym).as_str().to_string();
+            let method_name = ctx
+                .render_method(ViewKind::Template, &module_camel, &method_sym)
+                .as_str()
+                .to_string();
             // An action view has no record arg — its params are its
             // FULL closure (threaded into the caller by the
             // render-graph fold) plus nil-default extras. No
@@ -192,10 +196,11 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 let mut call_args = vec![record];
                 call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
                 if let Some(decl) = strict_decl {
-                    if let Some(hash) = strict_kwargs(&decl[1..], &lookup) {
+                    if let Some(hash) = strict_kwargs(&decl[1..], &lookup, context_kwargs(ctx, &module_camel, &method_sym)) {
                         call_args.push(hash);
                     }
                 }
+                let method = ctx.render_method(ViewKind::Partial, &module_camel, &method_sym);
                 let render_call = send(
                     Some(Expr::new(
                         Span::synthetic(),
@@ -203,7 +208,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                             path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
                         },
                     )),
-                    crate::lower::view::view_method_name(&method_sym).as_str(),
+                    method.as_str(),
                     call_args,
                     None,
                     true,
@@ -236,10 +241,12 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
 fn strict_kwargs(
     kw_locals: &[crate::dialect::Param],
     lookup: &impl Fn(&str) -> Option<Expr>,
+    context: Vec<(Expr, Expr)>,
 ) -> Option<Expr> {
     let entries: Vec<(Expr, Expr)> = kw_locals
         .iter()
         .filter_map(|p| lookup(p.name.as_str()).map(|v| (lit_sym(p.name.clone()), v)))
+        .chain(context)
         .collect();
     if entries.is_empty() {
         return None;
@@ -347,6 +354,7 @@ fn named_collection_item_render(
     let mut call_args = vec![var_ref(var_name.clone())];
     call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
     call_args.extend(locals_extra_args(locals, &module_camel, &method_sym, ctx));
+    let method = ctx.render_method(ViewKind::Partial, &module_camel, &method_sym);
     let render_call = send(
         Some(Expr::new(
             Span::synthetic(),
@@ -354,7 +362,7 @@ fn named_collection_item_render(
                 path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
             },
         )),
-        crate::lower::view::view_method_name(&method_sym).as_str(),
+        method.as_str(),
         call_args,
         None,
         true,
@@ -368,9 +376,9 @@ fn named_collection_item_render(
 /// ```ruby
 /// c = <collection>
 /// if ActionView::ViewHelpers.collection_caching?
-///   c.preload_associations(c) if c.respond_to?(:preload_associations)
+///   c.preload_associations(c.to_a) if c.respond_to?(:preload_associations)
 ///   keys = []
-///   c.each { |item| keys << ActionView::ViewHelpers.collection_fragment_key("x/y", <key>) }
+///   c.each { |item| keys << ActionView::ViewHelpers.collection_fragment_key("x/_y", <key>) }
 ///   hits = ActionView::ViewHelpers.collection_fragment_read_multi(keys)
 ///   i = 0
 ///   c.each do |y|
@@ -379,7 +387,7 @@ fn named_collection_item_render(
 ///   end
 ///   ActionView::ViewHelpers.collection_rendered("app/views/x/_y.html.erb", hits)
 /// else
-///   c.preload_associations(c) if c.respond_to?(:preload_associations)
+///   c.preload_associations(c.to_a) if c.respond_to?(:preload_associations)
 ///   c.each { |y| io << <render y> }
 /// end
 /// ```
@@ -391,12 +399,25 @@ fn named_collection_item_render(
 /// `PreloadCollectionIterator` does at iteration: campfire's message
 /// page is loaded with `skip_preloading!` and relies on it, and without
 /// it each of 40 messages loaded five associations on its own.
+///
+/// `KeyedCache::Item` is `cached: true` (`wrap_cached_true_collection`):
+/// the key is the element itself, which reads no association, so as in
+/// Rails nothing is preloaded before the lookup and only the misses are
+/// preloaded, just before they render; collections at or below
+/// `MAX_UNCACHED_COLLECTION_LENGTH` take the uncached branch.
+#[derive(Clone, Copy, PartialEq)]
+enum KeyedCache {
+    Callable,
+    Item,
+}
+
 fn wrap_keyed_cached_collection(
     collection: &Expr,
     partial: &str,
     as_name: Option<&str>,
     locals: Option<&[(Expr, Expr)]>,
     key_lambda: &Expr,
+    mode: KeyedCache,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
     let ExprNode::Lambda { params, body, .. } = &*key_lambda.node else {
@@ -448,10 +469,11 @@ fn wrap_keyed_cached_collection(
                 None,
                 false,
             ),
+            // Not the collection itself: `preload_associations` takes its records, and a Spinel build reads an argument typed Array as one
             then_branch: send(
                 Some(var_ref(coll.clone())),
                 "preload_associations",
-                vec![var_ref(coll.clone())],
+                vec![send(Some(var_ref(coll.clone())), "to_a", Vec::new(), None, false)],
                 None,
                 false,
             ),
@@ -459,6 +481,24 @@ fn wrap_keyed_cached_collection(
         },
     );
 
+    // Rails keys each element under the partial's TEMPLATE
+    // (`messages/_message`, its digest path), the same name the
+    // partial's own `<% cache message do %>` uses (`ctx.view_name`,
+    // `walker::record_cache_key`). Keyed by the render's spelling
+    // (`messages/message`), a miss rendered the partial and its block
+    // filed a second copy under its own name that nothing read. The
+    // variant the render resolves to names it, as the block's view
+    // does (`fragment_template_path`): html and turbo_stream renders of
+    // one collection would otherwise serve each other's markup.
+    let (module, stem) = super::partial_name_to_key(partial, &ctx.resource_dir);
+    let format = ctx.render_format(ViewKind::Partial, &module, &stem);
+    let template = crate::lower::view::fragment_template_path(
+        &match partial.rsplit_once('/') {
+            Some((dir, base)) => format!("{dir}/_{}", base.trim_start_matches('_')),
+            None => format!("{}/_{}", ctx.resource_dir, partial.trim_start_matches('_')),
+        },
+        format,
+    );
     let build_keys = send(
         Some(var_ref(coll.clone())),
         "each",
@@ -471,7 +511,7 @@ fn wrap_keyed_cached_collection(
                     "<<",
                     vec![view_helpers_call(
                         "collection_fragment_key",
-                        vec![str_lit(partial), body.clone()],
+                        vec![str_lit(&template), body.clone()],
                     )],
                     None,
                     false,
@@ -486,10 +526,10 @@ fn wrap_keyed_cached_collection(
         view_helpers_call("collection_fragment_read_multi", vec![var_ref(keys.clone())]),
     );
     // Rails' `render_collection.action_view` names the partial's template
-    // file; the walker lowers HTML ERB, so that is its extension.
+    // file: an ERB one, in the format the render resolves it to.
     let identifier = match partial.rsplit_once('/') {
-        Some((dir, base)) => format!("app/views/{dir}/_{base}.html.erb"),
-        None => format!("app/views/_{partial}.html.erb"),
+        Some((dir, base)) => format!("app/views/{dir}/_{base}.{format}.erb"),
+        None => format!("app/views/_{partial}.{format}.erb"),
     };
     let rendered = view_helpers_call(
         "collection_rendered",
@@ -529,56 +569,136 @@ fn wrap_keyed_cached_collection(
         )),
         false,
     );
-    let cached = seq(vec![
-        preload(),
-        assign(&keys, Expr::new(span, ExprNode::Array { elements: Vec::new(), style: Default::default() })),
-        build_keys,
-        read_all,
-        assign(&idx, int_lit(0)),
-        render_each,
-        rendered,
-    ]);
-    let uncached = seq(vec![
-        preload(),
-        emit_named_collection_each(&var_ref(coll.clone()), partial, as_name, locals, ctx)?,
-    ]);
+    let empty_array = || Expr::new(span, ExprNode::Array { elements: Vec::new(), style: Default::default() });
+    let cached = match mode {
+        KeyedCache::Callable => seq(vec![
+            preload(),
+            assign(&keys, empty_array()),
+            build_keys,
+            read_all,
+            assign(&idx, int_lit(0)),
+            render_each,
+            rendered,
+        ]),
+        KeyedCache::Item => {
+            // Only the misses are preloaded, once every key has been read.
+            let misses = name("misses");
+            let elem = name("e");
+            let collect_misses = send(
+                Some(var_ref(coll.clone())),
+                "each",
+                Vec::new(),
+                Some(block(
+                    elem.clone(),
+                    seq(vec![
+                        Expr::new(
+                            span,
+                            ExprNode::If {
+                                cond: send(Some(at(&hits)), "nil?", Vec::new(), None, false),
+                                then_branch: send(Some(var_ref(misses.clone())), "<<", vec![var_ref(elem.clone())], None, false),
+                                else_branch: nil_lit(),
+                            },
+                        ),
+                        assign(&idx, send(Some(var_ref(idx.clone())), "+", vec![int_lit(1)], None, false)),
+                        nil_lit(),
+                    ]),
+                )),
+                false,
+            );
+            let preload_misses = Expr::new(
+                span,
+                ExprNode::If {
+                    cond: send(
+                        Some(var_ref(coll.clone())),
+                        "respond_to?",
+                        vec![lit_sym(Symbol::from("preload_associations"))],
+                        None,
+                        false,
+                    ),
+                    then_branch: Expr::new(
+                        span,
+                        ExprNode::If {
+                            cond: send(Some(var_ref(misses.clone())), "empty?", Vec::new(), None, false),
+                            then_branch: nil_lit(),
+                            else_branch: send(
+                                Some(var_ref(coll.clone())),
+                                "preload_associations",
+                                vec![var_ref(misses.clone())],
+                                None,
+                                false,
+                            ),
+                        },
+                    ),
+                    else_branch: nil_lit(),
+                },
+            );
+            seq(vec![
+                assign(&keys, empty_array()),
+                build_keys,
+                read_all,
+                assign(&misses, empty_array()),
+                assign(&idx, int_lit(0)),
+                collect_misses,
+                preload_misses,
+                assign(&idx, int_lit(0)),
+                render_each,
+                rendered,
+            ])
+        }
+    };
+    let uncached = || -> Option<Expr> {
+        Some(seq(vec![
+            preload(),
+            emit_named_collection_each(&var_ref(coll.clone()), partial, as_name, locals, ctx)?,
+        ]))
+    };
+    let when_caching = match mode {
+        KeyedCache::Callable => cached,
+        // Small collections render without the store (the cost gate).
+        KeyedCache::Item => Expr::new(
+            span,
+            ExprNode::If {
+                cond: send(
+                    Some(send(Some(var_ref(coll.clone())), "length", Vec::new(), None, false)),
+                    ">",
+                    vec![int_lit(MAX_UNCACHED_COLLECTION_LENGTH)],
+                    None,
+                    false,
+                ),
+                then_branch: cached,
+                else_branch: uncached()?,
+            },
+        ),
+    };
     Some(seq(vec![
         assign(&coll, collection.clone()),
         Expr::new(
             span,
             ExprNode::If {
                 cond: view_helpers_call("collection_caching?", Vec::new()),
-                then_branch: cached,
-                else_branch: uncached,
+                then_branch: when_caching,
+                else_branch: uncached()?,
             },
         ),
     ]))
 }
 
-/// At or below this length, `cached: true` skips the collection store:
-/// key build + `read_str` costs more than rendering a small/empty page
-/// (Campfire sidebar after #488). Room/messages keep `PAGE_SIZE` 40
-/// above the line. Prefer `length` over `size` so an unloaded Relation
-/// loads once rather than `COUNT` then load. The emit is `length > N`.
-const MAX_UNCACHED_COLLECTION_LENGTH: i64 = super::MAX_UNCACHED_COLLECTION_LENGTH;
-
-/// Rails' collection cache: one `read_str` of the concatenated partials,
-/// keyed by each element's `cache_key_with_version`. A miss still walks
-/// the collection (inner `<% cache %>` fragments still apply).
+/// `render collection:, cached: true`: Rails' collection cache keyed by
+/// each element itself (its `cache_key_with_version`, under the app's
+/// `combined_fragment_cache_key`), read in one `read_multi`, with only
+/// the misses preloaded and rendered. `wrap_keyed_cached_collection`
+/// does the work with the element as the key.
 ///
-/// Key shape (aligned with Rails' item key + template digest intent):
-/// `views/coll/<cache_scope><view>/<partial>/<name>=<stable>/…/<record versions>`.
-/// Explicit `locals:` and the partial's threaded closure ivars are named
-/// segments; records use `cache_key_with_version`, scalars use `inspect`
-/// (quoted, so `a/b`+`c` cannot collide with `a`+`b/c`). A local whose
-/// name is not a literal Symbol/String cannot be keyed safely — fall
-/// back to the uncached each path.
-///
-/// Small collections (`length <= MAX_UNCACHED_COLLECTION_LENGTH`) take
-/// the uncached each path instead: same HTML, no store tax. Deliberate
-/// divergence from Rails, which always collection-caches when
-/// `cached: true`.
-fn wrap_cached_collection(
+/// The element stays an OBJECT in the key, so an app's
+/// `combined_fragment_cache_key` can ask what it is (campfire's shares
+/// fragments of messages whose version the database maintains across
+/// viewers and commits). Explicit `locals:` and the partial's threaded
+/// closure ivars follow it as `name=value` segments, where Rails would
+/// leave them out: two renders of the same records with different
+/// context cannot share markup. A local whose name is not a literal
+/// Symbol/String cannot be keyed safely — the collection renders
+/// uncached.
+fn wrap_cached_true_collection(
     collection: &Expr,
     partial: &str,
     as_name: Option<&str>,
@@ -595,233 +715,47 @@ fn wrap_cached_collection(
     }
     let module_camel = camelize_path(&snake_case(&module_dir));
     let method_sym = base_name.trim_start_matches('_').to_string();
-
     let mut named_inputs: Vec<(String, Expr)> = Vec::new();
     if let Some(entries) = locals {
         for (k, v) in entries {
             let Some(name) = local_key_name(k) else {
-                // Name is dynamic — cannot build a stable key segment.
                 return emit_named_collection_each(collection, partial, as_name, locals, ctx);
             };
             named_inputs.push((name, v.clone()));
         }
     }
-    for (name, expr) in partial_extra_named_args(ctx, &module_camel, &method_sym) {
-        named_inputs.push((name, expr));
-    }
+    named_inputs.extend(partial_extra_named_args(ctx, &module_camel, &method_sym));
 
-    let uniq = span.start;
-    // Bind once: `collection:` may be a stateful expression (e.g. `next_batch()`).
-    // The length gate, cache key walk, and each-paths must all see the same value.
-    let collection_name = Symbol::from(format!("__cc_collection_{uniq}"));
-    let collection_ref = || var_ref(collection_name.clone());
-    let key_name = Symbol::from(format!("__cc_key_{uniq}"));
-    let hit_name = Symbol::from(format!("__cc_hit_{uniq}"));
-    let rec_name = Symbol::from(format!("__cc_r_{uniq}"));
-    let cap = format!("__cc_io_{uniq}");
-
-    let prefix = Expr::new(
-        span,
-        ExprNode::StringInterp {
-            parts: vec![
-                InterpPart::Text {
-                    value: "views/coll/".to_string(),
+    let item = Symbol::from(format!("__ck_item_{}", span.start));
+    let key = if named_inputs.is_empty() {
+        var_ref(item.clone())
+    } else {
+        let mut elements = vec![var_ref(item.clone())];
+        for (name, v) in named_inputs {
+            elements.push(Expr::new(
+                span,
+                ExprNode::StringInterp {
+                    parts: vec![
+                        crate::expr::InterpPart::Text { value: format!("{name}=") },
+                        crate::expr::InterpPart::Expr { expr: stable_cache_fragment(v) },
+                    ],
                 },
-                InterpPart::Expr {
-                    expr: view_helpers_call("cache_scope", Vec::new()),
-                },
-                InterpPart::Text {
-                    value: format!("{}/{}/", ctx.view_name, partial),
-                },
-            ],
-        },
-    );
-    let assign_key = Expr::new(
-        span,
-        ExprNode::Assign {
-            target: LValue::Var {
-                id: VarId(0),
-                name: key_name.clone(),
-            },
-            value: prefix,
-        },
-    );
-    let str_lit = |value: &str| {
-        Expr::new(
-            span,
-            ExprNode::Lit {
-                value: Literal::Str {
-                    value: value.to_string(),
-                },
-            },
-        )
+            ));
+        }
+        Expr::new(span, ExprNode::Array { elements, style: Default::default() })
     };
-    let mut local_key_parts: Vec<Expr> = Vec::new();
-    for (name, v) in &named_inputs {
-        let append_name = send(
-            Some(var_ref(key_name.clone())),
-            "<<",
-            vec![str_lit(&format!("/{name}="))],
-            None,
-            false,
-        );
-        local_key_parts.push(send(
-            Some(append_name),
-            "<<",
-            vec![stable_cache_fragment(v.clone())],
-            None,
-            false,
-        ));
-    }
-    let rec_ref = var_ref(rec_name.clone());
-    let version = send(
-        Some(rec_ref),
-        "cache_key_with_version",
-        Vec::new(),
-        None,
-        false,
-    );
-    let append_slash = send(
-        Some(var_ref(key_name.clone())),
-        "<<",
-        vec![str_lit("/")],
-        None,
-        false,
-    );
-    let append_version = send(Some(append_slash), "<<", vec![version], None, false);
-    // The block ends in `nil`: with `key << …` last, its value is the key
-    // itself, and Spinel boxes that value (a copy of the whole buffer) on
-    // every element when `each` takes the block as a proc. `each` drops it.
     let key_lambda = Expr::new(
         span,
-        ExprNode::Lambda { extra_params: Vec::new(),
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
             rest_param: None,
-            params: vec![rec_name],
+            params: vec![item],
             block_param: None,
-            body: seq(vec![append_version, nil_lit()]),
-            block_style: BlockStyle::Do,
+            body: key,
+            block_style: BlockStyle::Brace,
         },
     );
-    let build_key = send(
-        Some(collection_ref()),
-        "each",
-        Vec::new(),
-        Some(key_lambda),
-        false,
-    );
-
-    // Through the controller on the ruby family and spinel, as the
-    // single-fragment `<% cache %>` is (`ActionView::ViewHelpers.
-    // fragment_read`); the runtime's own store elsewhere.
-    let store = || {
-        Expr::new(
-            span,
-            ExprNode::Const {
-                path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
-            },
-        )
-    };
-    let key_ref = || var_ref(key_name.clone());
-    let hit_ref = || var_ref(hit_name.clone());
-    let read = Expr::new(
-        span,
-        ExprNode::Assign {
-            target: LValue::Var {
-                id: VarId(0),
-                name: hit_name.clone(),
-            },
-            value: send(
-                Some(store()),
-                "fragment_read",
-                vec![key_ref()],
-                None,
-                true,
-            ),
-        },
-    );
-
-    let miss_ctx = ViewCtx {
-        accumulator: cap.clone(),
-        ..ctx.clone()
-    };
-    let miss_each = emit_named_collection_each(
-        &collection_ref(),
-        partial,
-        as_name,
-        locals,
-        &miss_ctx,
-    )?;
-    let miss = vec![
-        assign_accumulator_string_new(&cap),
-        miss_each,
-        accumulator_append_call(
-            send(
-                Some(store()),
-                "fragment_write",
-                vec![
-                    key_ref(),
-                    super::accumulator_result_ref(&cap),
-                    Expr::new(span, ExprNode::Lit {
-                        value: Literal::Int { value: 0 },
-                    }),
-                ],
-                None,
-                true,
-            ),
-            ctx,
-        ),
-    ];
-    let mut prelude = vec![assign_key];
-    prelude.extend(local_key_parts);
-    prelude.push(build_key);
-    prelude.push(read);
-    prelude.push(Expr::new(
-        span,
-        ExprNode::If {
-            cond: send(Some(hit_ref()), "nil?", Vec::new(), None, false),
-            then_branch: seq(miss),
-            else_branch: seq(vec![accumulator_append_call(hit_ref(), ctx)]),
-        },
-    ));
-    let cached = seq(prelude);
-    let uncached =
-        emit_named_collection_each(&collection_ref(), partial, as_name, locals, ctx)?;
-    let length = send(
-        Some(collection_ref()),
-        "length",
-        Vec::new(),
-        None,
-        false,
-    );
-    let threshold = Expr::new(
-        span,
-        ExprNode::Lit {
-            value: Literal::Int {
-                value: MAX_UNCACHED_COLLECTION_LENGTH,
-            },
-        },
-    );
-    let choose_path = Expr::new(
-        span,
-        ExprNode::If {
-            cond: send(Some(length), ">", vec![threshold], None, false),
-            then_branch: cached,
-            else_branch: uncached,
-        },
-    );
-    Some(seq(vec![
-        Expr::new(
-            span,
-            ExprNode::Assign {
-                target: LValue::Var {
-                    id: VarId(0),
-                    name: collection_name.clone(),
-                },
-                value: collection.clone(),
-            },
-        ),
-        choose_path,
-    ]))
+    wrap_keyed_cached_collection(collection, partial, as_name, locals, &key_lambda, KeyedCache::Item, ctx)
 }
 
 /// Literal Symbol/String name of a `locals:` key, or None when dynamic.
@@ -901,6 +835,14 @@ fn partial_extra_named_args(
         .unwrap_or_default()
 }
 
+
+/// At or below this length, `cached: true` skips the collection store:
+/// key build + `read_str` costs more than rendering a small/empty page
+/// (Campfire sidebar after #488). Room/messages keep `PAGE_SIZE` 40
+/// above the line. Prefer `length` over `size` so an unloaded Relation
+/// loads once rather than `COUNT` then load. The emit is `length > N`.
+const MAX_UNCACHED_COLLECTION_LENGTH: i64 = super::MAX_UNCACHED_COLLECTION_LENGTH;
+
 /// Common shape for collection / association partial renders:
 /// `<recv>.each { |x| <accumulator> << Views::<Plural>.<singular>(x) }`.
 /// `plural_name` is the resource name in plural form
@@ -914,6 +856,8 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
 
     let mut call_args = vec![var_ref(var_name.clone())];
     call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
+    call_args.extend(locals_extra_args(None, &plural_camel, &singular, ctx));
+    let method = ctx.render_method(ViewKind::Partial, &plural_camel, &singular);
     let render_call = send(
         Some(Expr::new(
             Span::synthetic(),
@@ -921,7 +865,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
                 path: vec![Symbol::from("Views"), Symbol::from(plural_camel.clone())],
             },
         )),
-        &singular,
+        method.as_str(),
         call_args,
         None,
         true,
@@ -1060,12 +1004,13 @@ pub(super) fn named_partial_call_with_record(
                 // the record (index 0) rode positionally as `arg_expr` and
                 // the closure ivars followed. Omitted optionals fall to the
                 // header defaults.
-                if let Some(hash) = strict_kwargs(&decl[1..], &lookup_local) {
+                if let Some(hash) = strict_kwargs(&decl[1..], &lookup_local, context_kwargs(ctx, &module_camel, &method_sym)) {
                     call_args.push(hash);
                 }
             } else {
                 call_args.extend(locals_extra_args(locals, &module_camel, &method_sym, ctx));
             }
+            let method = ctx.render_method(ViewKind::Partial, &module_camel, &method_sym);
             let render_call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -1081,7 +1026,7 @@ pub(super) fn named_partial_call_with_record(
                 // latent until campfire's `rooms/layouts/_new`. The
                 // extras/strict-locals keys stay on the RAW stem, which
                 // is what the def side keys on too.
-                crate::lower::view::view_method_name(&method_sym).as_str(),
+                method.as_str(),
                 call_args,
                 None,
                 true,
@@ -1159,7 +1104,8 @@ fn locals_extra_args(
     method_sym: &str,
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
-    let Some(entries) = locals else { return Vec::new() };
+    let entries = locals.unwrap_or_default();
+    let strict = ctx.strict_locals.contains_key(&(module_camel.to_string(), method_sym.to_string()));
     let Some(extras) = ctx
         .partial_extras
         .get(&(module_camel.to_string(), method_sym.to_string()))
@@ -1169,20 +1115,49 @@ fn locals_extra_args(
     let bound: Vec<Option<Expr>> = extras
         .iter()
         .map(|name| {
-            entries.iter().find_map(|(k, v)| match &*k.node {
-                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name => {
-                    Some(v.clone())
-                }
-                _ => None,
-            })
+            entries
+                .iter()
+                .find_map(|(k, v)| match &*k.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name => {
+                        Some(v.clone())
+                    }
+                    _ => None,
+                })
+                // The request context a run-time url Hash reads passes on from the rendering view (`request_context_views`).
+                .or_else(|| {
+                    (!strict
+                        && matches!(name.as_str(), "action_name" | "controller_name" | "path_parameters")
+                        && ctx.locals.iter().any(|l| l == name))
+                    .then(|| var_ref(Symbol::from(name.as_str())))
+                })
         })
         .collect();
-    let Some(last) = bound.iter().rposition(|b| b.is_some()) else {
-        return Vec::new();
+    let mut out: Vec<Expr> = match bound.iter().rposition(|b| b.is_some()) {
+        Some(last) => bound.into_iter().take(last + 1).map(|b| b.unwrap_or_else(nil_lit)).collect(),
+        None => Vec::new(),
     };
-    bound
+    if strict {
+        let context = context_kwargs(ctx, module_camel, method_sym);
+        if !context.is_empty() {
+            out.push(Expr::new(Span::synthetic(), ExprNode::Hash { entries: context, kwargs: true }));
+        }
+    }
+    out
+}
+
+/// The request context a strict-locals partial takes as keywords
+/// (`request_context_views`), bound from the rendering view's own.
+fn context_kwargs(ctx: &ViewCtx, module: &str, method: &str) -> Vec<(Expr, Expr)> {
+    let key = (module.to_string(), method.to_string());
+    let Some(declared) = ctx.strict_locals.get(&key) else { return Vec::new() };
+    let Some(extras) = ctx.partial_extras.get(&key) else { return Vec::new() };
+    ["action_name", "controller_name", "path_parameters"]
         .into_iter()
-        .take(last + 1)
-        .map(|b| b.unwrap_or_else(nil_lit))
+        .filter(|n| {
+            extras.iter().any(|e| e == n)
+                && !declared.iter().any(|p| p.name.as_str() == *n)
+                && ctx.locals.iter().any(|l| l == n)
+        })
+        .map(|n| (lit_sym(Symbol::from(n)), var_ref(Symbol::from(n))))
         .collect()
 }

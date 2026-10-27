@@ -210,6 +210,9 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("provisioning_uri", GemTy::Str),
             ("now", GemTy::Str),
             ("at", GemTy::Str),
+            // The step in seconds, 30 unless `interval:` named another;
+            // lobsters widens `verify`'s drift by it.
+            ("interval", GemTy::Int),
             // `verify` returns the matching timestamp Integer or nil —
             // gradual rather than committing to `Int?`.
             ("verify", GemTy::Untyped),

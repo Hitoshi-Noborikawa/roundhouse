@@ -248,7 +248,9 @@ def socket_for(fd, conn)
   msg = Cable::WsMessage.new
   msg.ws = Tep::WebSocket::Driver.new(fd)
   msg.connection = conn
-  conn.transport = msg.ws
+  sock = Cable::Socket.new    # what `Cable.upgrade` does
+  sock.ws = msg.ws
+  conn.transport = sock
   Cable.beats.add(msg)
   Cable.register(msg.ws)    # what the socket's open handler does
   msg

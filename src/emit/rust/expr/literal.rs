@@ -235,10 +235,7 @@ pub(super) fn attach_block(base: &str, block: &Expr) -> String {
     let closure = match &*block.node {
         ExprNode::Lambda { params, body, .. } => emit_closure(params, body),
         ExprNode::Var { name, .. } => name.as_str().to_string(),
-        _ => format!(
-            "/* TODO rust2: non-Lambda/non-Var block: {:?} */",
-            std::mem::discriminant(&*block.node)
-        ),
+        _ => crate::emit::diagnostics::report_unsupported(block.span, "rust", block.node.kind_str(), "block argument"),
     };
     if let Some(stripped) = base.strip_suffix("()") {
         format!("{stripped}({closure})")

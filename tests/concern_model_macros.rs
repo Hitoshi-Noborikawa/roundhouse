@@ -215,8 +215,6 @@ fn unsupported_accessor_shapes_are_reported_only_for_includers() {
         "attr_accessor *FIELDS",
         "attr_accessor :scratch, *FIELDS",
         "attr_accessor(:scratch) { nil }",
-        "attr_reader :scratch",
-        "attr_writer :scratch",
         "attr_accessor :scratch if false",
         "attr_accessor :scratch if true",
         "attr_reader :scratch unless false",
@@ -771,7 +769,9 @@ fn accessor_probes_do_not_add_or_swallow_real_emit_diagnostics() {
         });
         assert_eq!(diags, vec![sentinel], "ingest must preserve only the outer diagnostic");
         let (_, diags) = scope(|| ruby::emit_lowered_models(&app));
-        assert_eq!(diags.iter().filter(|diag| diag.message.contains("permitted key `tags`") && diag.message.contains("non-scalar")).count(), 1, "real emission must still report the dropped key: {diags:?}");
+        // The ruby family carries `tags: []` (#1338); Message has no
+        // `tags=`, so the model side reports the key as writerless.
+        assert_eq!(diags.iter().filter(|diag| diag.message.contains("permitted field `tags` has no writer")).count(), 1, "real emission must still report the dropped key: {diags:?}");
     }
 }
 

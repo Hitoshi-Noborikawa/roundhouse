@@ -36,6 +36,9 @@ thread_local! {
     static EXTERNAL_GEM_NAMESPACES: RefCell<std::collections::BTreeSet<String>> = const {
         RefCell::new(std::collections::BTreeSet::new())
     };
+    /// The same namespaces as a hash index with a per-detail memo, so the
+    /// per-constant check is not a scan of every namespace.
+    static EXTERNAL_ROOT_INDEX: RefCell<crate::gems::ExternalRootIndex> = RefCell::new(crate::gems::ExternalRootIndex::default());
     /// `gems::statically_resolved_external_includes` of the app being
     /// emitted, computed once with the namespaces above: it scans every
     /// class, and asked per class it was most of Mastodon's emit.
@@ -114,8 +117,11 @@ pub(super) fn with_external_gem_namespaces<R>(
 ) -> R {
     let previous = EXTERNAL_GEM_NAMESPACES
         .with(|current| std::mem::replace(&mut *current.borrow_mut(), namespaces.clone()));
+    let previous_index = EXTERNAL_ROOT_INDEX
+        .with(|current| current.replace(crate::gems::ExternalRootIndex::new(namespaces)));
     let previous_includes = EXTERNAL_INCLUDES.with(|current| current.replace(includes));
     let result = f();
+    EXTERNAL_ROOT_INDEX.with(|current| current.replace(previous_index));
     EXTERNAL_GEM_NAMESPACES.with(|current| {
         *current.borrow_mut() = previous;
     });
@@ -138,6 +144,19 @@ pub(crate) fn external_gem_namespace_is_enabled(namespace: &str) -> bool {
 pub fn emit_expr(e: &Expr) -> String {
     if is_locked_external_gem_constant(e) {
         return emit_node(&e.node);
+    }
+    // `self.class::KINDS`, which ingest gave the analysis as `const_get`.
+    if e.decisions & crate::expr::CONST_PATH != 0
+        && let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node
+        && method.as_str() == "const_get"
+        && let [arg] = args.as_slice()
+        && let Some(name) = match &*arg.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str().to_string()),
+            ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.clone()),
+            _ => None,
+        }
+    {
+        return format!("{}::{name}", emit_postfix_recv(r));
     }
     // A site a lowering replaced with a stub — `lower::object_extend`,
     // the arel `ColumnSpec::Named` placeholder — renders as the raise
@@ -188,12 +207,7 @@ fn is_locked_external_gem_constant(expr: &Expr) -> bool {
     if construct.as_str() != "constant" {
         return false;
     }
-    EXTERNAL_GEM_NAMESPACES.with(|namespaces| {
-        namespaces
-            .borrow()
-            .iter()
-            .any(|root| crate::gems::detail_names_external_namespace(detail, root))
-    })
+    EXTERNAL_ROOT_INDEX.with(|index| index.borrow_mut().names_any(detail))
 }
 
 /// A string literal ingested from `+"literal"`. Written back with its
@@ -1194,8 +1208,8 @@ fn recv_needs_parens(r: &Expr) -> bool {
 /// hash (`Hash[Symbol, _]`, e.g. a keyword-arg hash like
 /// `StoryRepository#@params`) has a different type and is left alone, as
 /// is any `untyped`/unknown receiver. A request's params value is
-/// String-keyed at run time whatever the key's static type, so it also
-/// matches (`is_indifferent_params`) and its keys are coerced in full.
+/// String-keyed when it holds a Hash, so it also matches. It can also
+/// hold an Array; its index reads coerce only String or Symbol keys.
 ///
 /// This is the type-directed emit hook (the `[]` analog of the shared
 /// `classify_add`/`_sub`/`_cmp` operator dispatch) where a future
@@ -1261,7 +1275,20 @@ fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr]) -> Option<Stri
     let recv_s = emit_expr(recv);
     let indifferent = is_indifferent_params(recv);
     match method {
-        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0], indifferent))),
+        "[]" if args.len() == 1 => {
+            let key = &args[0];
+            let param_value = matches!(recv.ty.as_ref(), Some(Ty::Class { id, .. })
+                if id.0.as_str() == crate::analyze::PARAM_VALUE);
+            let string_key = matches!(&*key.node,
+                ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+                || key.ty.as_ref().is_some_and(Ty::is_stringish);
+            let key_s = if param_value && !string_key {
+                format!("Params.nested_key({})", emit_arg(key))
+            } else {
+                coerce_str_key(key, indifferent)
+            };
+            Some(format!("{recv_s}[{key_s}]"))
+        }
         "[]=" if args.len() == 2 => Some(format!(
             "{recv_s}[{}] = {}",
             coerce_str_key(&args[0], indifferent),

@@ -14,6 +14,22 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+thread_local! {
+    /// The name the enclosing library method bound its forwarded anonymous
+    /// `*` to (`forwarding::Formals::forwarded_rest_name`); a bare `*` in
+    /// its body reads it.
+    static ANONYMOUS_REST: std::cell::RefCell<Option<Symbol>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `name` as the bound anonymous rest of the def being
+/// ingested (`None` for a def that binds none: a nested `def` has its own).
+pub(super) fn with_anonymous_rest<T>(name: Option<Symbol>, f: impl FnOnce() -> T) -> T {
+    let saved = ANONYMOUS_REST.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), name));
+    let out = f();
+    ANONYMOUS_REST.with(|slot| *slot.borrow_mut() = saved);
+    out
+}
+
 use crate::ingest::prism_api::PrismLocation;
 pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Survey-mode gate: when active, intercept Err returns and
@@ -1022,6 +1038,53 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
         n if n.as_constant_path_node().is_some() => {
             let p = n.as_constant_path_node().unwrap();
+            // `self.class::KINDS` / `record.class::KINDS`: the parent is a
+            // value, not a constant, and Ruby looks `KINDS` up through that
+            // class's ancestors. Its own spelling is `const_get(:KINDS)`;
+            // dropping the parent made it a lexical `KINDS`.
+            if super::util::constant_path_has_value_parent(&p) {
+                // A chain (`self.class::NAMES::LABEL`) is one scoped lookup,
+                // `const_get("NAMES::LABEL")`, as Ruby resolves it: the
+                // first segment through the value's ancestors, the rest
+                // inside it. One call keeps the receiver a proven class.
+                let mut names = Vec::new();
+                let mut at = p;
+                // A rooted segment (`::A`) has no value under it, and its
+                // path is all constants, so the walk always ends on one.
+                let value = loop {
+                    names.push(at.name().map(|id| constant_id_str(&id).to_string()).unwrap_or_default());
+                    match at.parent().map(|parent| (parent.as_constant_path_node(), parent)) {
+                        Some((Some(inner), _)) => at = inner,
+                        Some((None, parent)) => break Some(parent),
+                        None => break None,
+                    }
+                };
+                let Some(value) = value else {
+                    return Err(IngestError::Unsupported {
+                        file: file.to_string(),
+                        message: "constant path with no value under it".into(),
+                    });
+                };
+                names.reverse();
+                let recv = ingest_expr(&value, file)?;
+                let name = if names.len() == 1 {
+                    Literal::Sym { value: Symbol::from(names[0].as_str()) }
+                } else {
+                    Literal::Str { value: names.join("::") }
+                };
+                let mut send = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(recv),
+                        method: Symbol::from("const_get"),
+                        args: vec![Expr::new(span, ExprNode::Lit { value: name })],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                send.decisions |= crate::expr::CONST_PATH;
+                return Ok(send);
+            }
             // `::StatsD` names the top-level constant from anywhere; an empty
             // first segment keeps that through passes that qualify a bare
             // name into its enclosing namespace (`qualify_lexical_consts`
@@ -1670,7 +1733,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             refuse_block_capture(l.parameters(), file)?;
             let extra_params = block_extra_params(l.parameters(), file)?;
             let params = block_param_names(l.parameters());
-            let mut rest_param = block_rest_param(l.parameters());
+            let mut rest_param = lambda_rest_param(l.parameters());
             let body = match l.body() {
                 Some(b) => ingest_expr(&b, file)?,
                 None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
@@ -2735,10 +2798,10 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let s = n.as_splat_node().unwrap();
             let value = match s.expression() {
                 Some(e) => ingest_expr(&e, file)?,
-                None => Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Lit { value: Literal::Nil },
-                ),
+                None => match ANONYMOUS_REST.with(|slot| slot.borrow().clone()) {
+                    Some(name) => Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name }),
+                    None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                },
             };
             ExprNode::Splat { value }
         }
@@ -3640,7 +3703,7 @@ fn ingest_call_block(
                 refuse_block_capture(lam.parameters(), file)?;
                 let extra_params = block_extra_params(lam.parameters(), file)?;
                 let params = block_param_names(lam.parameters());
-                let mut rest_param = block_rest_param(lam.parameters());
+                let mut rest_param = lambda_rest_param(lam.parameters());
                 let body = match lam.body() {
                     Some(body) => ingest_expr(&body, file)?,
                     None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
@@ -3994,6 +4057,21 @@ fn block_rest_param(params_node: Option<Node<'_>>) -> Option<Symbol> {
     let rest = pn.rest()?;
     let rp = rest.as_rest_parameter_node()?;
     Some(Symbol::from(constant_id_str(&rp.name()?)))
+}
+
+/// `block_rest_param` for a `->(...)` literal. A lambda counts its
+/// arguments, so its anonymous rest (`->(*) { ... }`) is what lets it take
+/// any: dropped, the lambda became `-> { ... }` and raised "wrong number of
+/// arguments (given 2, expected 0)" when a caller passed any. It is named
+/// `__rest`, as `desugar_post_params` names it for `->(*, payload)`.
+fn lambda_rest_param(params_node: Option<Node<'_>>) -> Option<Symbol> {
+    let anonymous = params_node
+        .as_ref()
+        .and_then(|node| node.as_block_parameters_node())
+        .and_then(|bpn| bpn.parameters())
+        .and_then(|pn| pn.rest())
+        .is_some_and(|rest| rest.as_rest_parameter_node().is_some_and(|rp| rp.name().is_none()));
+    block_rest_param(params_node).or_else(|| anonymous.then(|| Symbol::from("__rest")))
 }
 
 /// The parameters AFTER a block's or lambda's rest (`|*, payload|`,

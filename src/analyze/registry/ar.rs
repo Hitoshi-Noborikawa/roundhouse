@@ -139,7 +139,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .or_insert_with(connection_ty);
         base.class_methods.entry(Symbol::from("configurations")).or_insert(Ty::Untyped);
         base.class_methods.entry(Symbol::from("configurations=")).or_insert(Ty::Untyped);
-        for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_like"] {
+        for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_for_order", "sanitize_sql_like"] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
         // Association / ActionText macro helpers call these on the
@@ -544,12 +544,6 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ClassId(Symbol::from("ActiveStorage::Previewer::VideoPreviewer")),
             video_previewer,
         );
-        // Rails' error hierarchy: `PreviewError < Error < StandardError`.
-        let as_error_id = ClassId(Symbol::from("ActiveStorage::Error"));
-        classes.insert(as_error_id.clone(), ClassInfo::default());
-        let mut preview_error = ClassInfo::default();
-        preview_error.parent = Some(as_error_id);
-        classes.insert(ClassId(Symbol::from("ActiveStorage::PreviewError")), preview_error);
 
         // The multipart part a permitted `has_one_attached` field
         // carries (`runtime/spinel/multipart.rbs` verbatim): what the

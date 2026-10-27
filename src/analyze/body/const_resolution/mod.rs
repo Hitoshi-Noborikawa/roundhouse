@@ -98,7 +98,24 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     // `packages/openssl` (same values) on spinel.
     ("OpenSSL::SSL", "VERIFY_NONE", || Ty::Int),
     ("OpenSSL::SSL", "VERIFY_PEER", || Ty::Int),
+    // `URI::RFC2396_PARSER.escape(url)` — lobsters' webmention job. The
+    // uri library's on the ruby family, spinel's `packages/uri` on spinel;
+    // DEFAULT_PARSER is RFC 3986's, as on Ruby 3.4.
+    ("URI", "DEFAULT_PARSER", uri_rfc3986_parser),
+    ("URI", "RFC3986_PARSER", uri_rfc3986_parser),
+    ("URI", "RFC2396_PARSER", uri_rfc2396_parser),
 ];
+
+fn uri_rfc2396_parser() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("URI::RFC2396_Parser")), args: vec![].into() }
+}
+
+fn uri_rfc3986_parser() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("URI::RFC3986_Parser")), args: vec![].into() }
+}
+
+/// Owners of value Consts that Ruby defines as modules, not classes.
+const CORE_VALUE_MODULES: &[&str] = &["URI"];
 
 /// Ruby's top-level value Consts: `STDERR.puts "…"` (discourse's
 /// warnings) reads the process's own stream, which `$stderr` is only
@@ -149,6 +166,21 @@ fn core_rbs() -> &'static str {
             out.push('\n');
             for (owner, field, ty) in CORE_VALUE_CONSTS {
                 if owner == class {
+                    out.push_str("  ");
+                    out.push_str(field);
+                    out.push_str(": ");
+                    out.push_str(rbs_type_name(&ty()));
+                    out.push('\n');
+                }
+            }
+            out.push_str("end\n");
+        }
+        for module in CORE_VALUE_MODULES {
+            out.push_str("module ");
+            out.push_str(module);
+            out.push('\n');
+            for (owner, field, ty) in CORE_VALUE_CONSTS {
+                if owner == module {
                     out.push_str("  ");
                     out.push_str(field);
                     out.push_str(": ");

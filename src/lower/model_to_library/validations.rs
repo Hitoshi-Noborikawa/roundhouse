@@ -30,6 +30,10 @@ pub(super) fn push_validate_method(
 ) {
     let model_msgs = Messages(Some(model), None);
     let mut stmts: Vec<Expr> = Vec::new();
+    let store_attrs: std::collections::HashSet<Symbol> = crate::lower::typed_store::typed_store_decls(&model.body)
+        .into_iter()
+        .flat_map(|(_, attrs)| attrs.into_iter().map(|a| a.name))
+        .collect();
 
     // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
     for item in &model.body {
@@ -120,6 +124,12 @@ pub(super) fn push_validate_method(
                         };
                         produced = vec![with_condition_guard(body, &v.if_cond, &v.unless_cond)];
                     }
+                    // Not the `@attr` slot a column has: a typed_store attribute lives in its store column, behind the reader Rails validates through.
+                    if store_attrs.contains(&v.attribute) {
+                        for check in &mut produced {
+                            read_through_reader(check, &v.attribute);
+                        }
+                    }
                     for mut check in produced {
                         // Each expanded check attributes to its `validates` line.
                         check.inherit_span(span);
@@ -136,6 +146,13 @@ pub(super) fn push_validate_method(
                 } = assoc
                 {
                     let mut check = inline_belongs_to_check(model_msgs, name, foreign_key, *polymorphic);
+                    // `accepts_nested_attributes_for` (`ingest::nested_attributes`)
+                    // builds the record before the save, which writes its id:
+                    // Rails checks the object it built, so a pending one passes,
+                    // and one marked for destruction fails.
+                    if super::model_defines_instance_method(model, &Symbol::from(format!("__nested_{}_marked", name.as_str()))) {
+                        check = skip_when_nested_pending(check, name);
+                    }
                     check.inherit_span(span);
                     stmts.push(check);
                 }
@@ -295,7 +312,16 @@ pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model:
     if defines_initialize {
         return;
     }
-    let names = super::markers::declared_attr_names(model);
+    let mut names = super::markers::declared_attr_names(model);
+    // `attribute :name, :type` (ActiveModel::Attributes) names, assigned
+    // through their casting writers.
+    let attribute_api: Vec<Symbol> =
+        super::markers::attribute_api_decls(&model.body).into_iter().map(|(name, _)| name).collect();
+    for name in &attribute_api {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
     if names.is_empty() {
         return;
     }
@@ -304,10 +330,14 @@ pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model:
     // classes ingest cannot classify as tableless models (campfire's
     // `ActionText::Attachment::OpengraphEmbed`, which lives in `lib/`),
     // and the two must not drift into two constructors.
+    let defaulted: Vec<Symbol> =
+        super::markers::attribute_api_defaults(&model.body).into_iter().map(|(name, _)| name).collect();
     methods.push(crate::lower::active_model_model::attributes_initialize(
         &model.name,
         model.span,
         &names,
+        &attribute_api,
+        &defaulted,
     ));
 }
 
@@ -594,16 +624,17 @@ fn validation_rule_to_calls(
     runtime_relation: super::RuntimeRelation,
 ) -> Vec<Expr> {
     match rule {
-        ValidationRule::Presence => vec![inline_presence_check(msgs, attr, attr_ty)],
-        ValidationRule::Absence => vec![inline_absence_check(msgs, attr)],
+        ValidationRule::Presence => vec![inline_presence_check(msgs, attr, attr_ty, runtime_relation)],
+        ValidationRule::Absence => vec![inline_absence_check(msgs, attr, attr_ty, runtime_relation)],
         ValidationRule::Acceptance { accept, allow_nil } => {
             vec![inline_acceptance_check(msgs, attr, accept, *allow_nil != Some(false), attr_ty, runtime_relation)]
         }
-        ValidationRule::Length { min, max, message, allow_nil } => inline_length_check(
+        ValidationRule::Length { min, max, is, message, allow_nil } => inline_length_check(
             msgs,
             attr,
             min.map(|n| n as usize),
             max.map(|n| n as usize),
+            is.map(|n| n as usize),
             message.as_deref(),
             attr_ty,
             *allow_nil,
@@ -632,12 +663,20 @@ fn validation_rule_to_calls(
             *allow_blank,
             runtime_relation,
         ),
+        ValidationRule::Inclusion { values, range } if range.is_none() && is_array_ty(attr_ty) => {
+            vec![inline_set_call_check(msgs, attr, &literal_list(values), false, attr_ty)]
+        }
+        ValidationRule::Exclusion { values, range } if range.is_none() && is_array_ty(attr_ty) => {
+            vec![inline_set_call_check(msgs, attr, &literal_list(values), true, attr_ty)]
+        }
         ValidationRule::Inclusion { values, range } => {
             vec![inline_inclusion_check(msgs, attr, values, range.as_ref())]
         }
         ValidationRule::Exclusion { values, range } => {
             vec![inline_exclusion_check(msgs, attr, values, range.as_ref())]
         }
+        ValidationRule::InclusionCall { set } => vec![inline_set_call_check(msgs, attr, set, false, attr_ty)],
+        ValidationRule::ExclusionCall { set } => vec![inline_set_call_check(msgs, attr, set, true, attr_ty)],
         // `validate :validate_url` — a method the model defines, which
         // adds to `errors` itself. The synthesized `validate` just
         // calls it; everything else about the shape (when it runs, what
@@ -694,7 +733,7 @@ fn validation_rule_to_calls(
 /// error (an unset owner).
 /// Inline `validates :attr, uniqueness: …`, as Rails 8.1's
 /// `UniquenessValidator` queries (on a target with the runtime Relation):
-///   if Model.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
+///   if Model.unscoped.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
 ///     errors << "attr has already been taken"
 ///   end
 /// `case_sensitive: false` compares `LOWER(table.attr) = LOWER(?)`, except
@@ -705,7 +744,10 @@ fn validation_rule_to_calls(
 /// under `self.primary_key = "code"`, even beside an `id` column); on a new record it is `<pk> IS NOT NULL`,
 /// which every stored row satisfies, so the answer is the same. A `scope:`
 /// naming a `belongs_to` reads its foreign key (and type column when
-/// polymorphic), as Rails resolves it.
+/// polymorphic), as Rails resolves it, and so does the validated attribute
+/// itself when it names a non-polymorphic `belongs_to` (`validates
+/// :reblog, uniqueness:` queries `reblog_of_id`; the error stays on
+/// `reblog`).
 fn inline_uniqueness_check(
     msgs: Messages,
     model: &Model,
@@ -726,15 +768,38 @@ fn inline_uniqueness_check(
         Span::synthetic(),
         ExprNode::Const { path: model.name.0.as_str().split("::").map(Symbol::from).collect() },
     );
-    let value = ivar(attr);
-    let mut relation = if case_sensitive {
-        send(finder, "where", vec![hash(attr.as_str(), value.clone())])
+    // `Model.unscoped`, as Rails' UniquenessValidator builds its query on
+    // `finder_class.unscoped`: a row a `default_scope` hides still collides.
+    let finder = send(finder, "unscoped", vec![]);
+    // An attribute naming a `belongs_to` compares its foreign key, as
+    // Rails' `bind_attribute` resolves it (`where(reblog: r)` is
+    // `"reblog_of_id" = r.id`), and the value read is that key. Ingest
+    // keeps a polymorphic one a gap: Rails raises computing its class.
+    let column = model
+        .associations()
+        .find_map(|a| match a {
+            Association::BelongsTo { name, foreign_key, polymorphic: false, .. } if name == attr => Some(foreign_key.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| attr.clone());
+    let association = column != *attr;
+    let value = ivar(&column);
+    // `case_sensitive: false` lowers a String comparison, a String foreign
+    // key's too (Rails: `LOWER("tickets"."code_ref") = LOWER(?)`). An
+    // Integer key compares as an id: Rails' `LOWER` over it answers the same.
+    let string_key = match model.attributes.fields.get(&column) {
+        Some(Ty::Str) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Str)),
+        _ => false,
+    };
+    let mut relation = if case_sensitive || (association && !string_key) {
+        send(finder, "where", vec![hash(column.as_str(), value.clone())])
     } else {
         let lowered = Expr::new(
             Span::synthetic(),
             ExprNode::Lit {
                 value: Literal::Str {
-                    value: format!("LOWER({}.{}) = LOWER(?)", model.table.0.as_str(), attr.as_str()),
+                    value: format!("LOWER({}.{}) = LOWER(?)", model.table.0.as_str(), column.as_str()),
                 },
             },
         );
@@ -742,7 +807,7 @@ fn inline_uniqueness_check(
             Span::synthetic(),
             ExprNode::If {
                 cond: send(value.clone(), "nil?", vec![]),
-                then_branch: send(finder.clone(), "where", vec![hash(attr.as_str(), value.clone())]),
+                then_branch: send(finder.clone(), "where", vec![hash(column.as_str(), value.clone())]),
                 else_branch: send(finder, "where", vec![lowered, value.clone()]),
             },
         )
@@ -833,6 +898,41 @@ fn inline_belongs_to_check(
     if_with_nil_else(cond, push_err)
 }
 
+/// `if <cond> … end` from `inline_belongs_to_check`, with `&&
+/// (@__nested_<assoc>.nil? || @__nested_<assoc>.empty?)` added: no record
+/// built or updated by the association's nested-attributes writer is
+/// waiting for the save. A record the writer marked for destruction
+/// counts as absent, as Rails' presence check reads it: the check also
+/// fails when the generated `__nested_<assoc>_marked` answers true.
+fn skip_when_nested_pending(check: Expr, assoc_name: &Symbol) -> Expr {
+    let ExprNode::If { cond, then_branch, else_branch } = &*check.node else { return check };
+    let pending = ivar(&Symbol::from(format!("__nested_{}", assoc_name.as_str())));
+    let none_pending = bool_op(
+        BoolOpKind::Or,
+        send(pending.clone(), "nil?", vec![]),
+        send(pending, "empty?", vec![]),
+    );
+    let marked = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from(format!("__nested_{}_marked", assoc_name.as_str())),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let missing = bool_op(BoolOpKind::Or, cond.clone(), marked);
+    Expr::new(
+        check.span,
+        ExprNode::If {
+            cond: bool_op(BoolOpKind::And, missing, none_pending),
+            then_branch: then_branch.clone(),
+            else_branch: else_branch.clone(),
+        },
+    )
+}
+
 /// `validate :method, if: :pred` / `unless: :pred`. The Symbol becomes
 /// the same receiverless call `validates`'s expression guard uses.
 fn with_method_guard(body: Expr, if_method: &Option<Symbol>, unless_method: &Option<Symbol>) -> Expr {
@@ -876,6 +976,13 @@ fn with_condition_guard(body: Expr, if_cond: &Option<Expr>, unless_cond: &Option
 
 /// `@<attr>` — direct ivar read passed as the `value` positional arg
 /// to every validates_* helper.
+fn read_through_reader(expr: &mut Expr, attr: &Symbol) {
+    expr.node.for_each_child_mut(&mut |c| read_through_reader(c, attr));
+    if matches!(&*expr.node, ExprNode::Ivar { name } if name == attr) {
+        *expr.node = ExprNode::Send { recv: None, method: attr.clone(), args: vec![], block: None, parenthesized: false };
+    }
+}
+
 fn ivar(attr: &Symbol) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Ivar { name: attr.clone() })
 }
@@ -895,28 +1002,101 @@ fn ivar(attr: &Symbol) -> Expr {
 /// `never` and reject the subsequent property access). Same logic for
 /// `Some(Ty::Array { .. })` — the String arm drops. `None` keeps the
 /// generic three-way form so untyped/dynamic-shape attrs still work.
-fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>) -> Expr {
-    // Temporal columns (schema-typed `Time`) store ISO-8601 text in
-    // `@<attr>_raw`; `@<attr>` is never the storage slot (the ruby
-    // tree's parse memo is `@__t_<attr>`), so a check against it fired
-    // unconditionally — lobsters' `validates :created_at, presence:
-    // true` on Username rejected every record. Blank on the stored
-    // form is nil-or-empty text.
-    if matches!(attr_ty, Some(Ty::Time)) {
-        let raw_ivar = ivar(&Symbol::from(format!("{}_raw", attr.as_str())));
-        let cond = bool_op(
-            BoolOpKind::Or,
-            send(raw_ivar.clone(), "nil?", vec![]),
-            send(raw_ivar, "empty?", vec![]),
-        );
-        let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
-        return if_with_nil_else(cond, push_err);
-    }
-    let cond = blank_cond(attr, attr_ty);
+fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::RuntimeRelation) -> Expr {
+    let cond = blank_cond(attr, attr_ty, runtime_relation);
     // `errors << "attr can't be blank"`
     let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
     // The wrapping `if cond then push_err end` (Nil else).
     if_with_nil_else(cond, push_err)
+}
+
+/// Rails' `blank?` for a presence or absence check: nil, `false`, a String
+/// of nothing but Unicode whitespace (`/\A[[:space:]]*\z/`: U+3000 and
+/// U+00A0 count, U+200B does not), an empty Array or Hash.
+///
+/// The ruby family can hold the raw input in any column (the writer does not
+/// cast), so every column but a String, Array or temporal one gets the full
+/// test, and a String column the whitespace regex over its value's `to_s`
+/// (Rails casts a non-String value there first, and no cast is blank). A strict target's field is
+/// its column's type, so it gets only what that type can be: a String's
+/// `strip.empty?` (each target's trim: Unicode White_Space on rust and go;
+/// TypeScript's `trim()` keeps U+0085 and removes U+FEFF, the two places
+/// it differs from Rails' `blank?`),
+/// a boolean's `== false`, an Array's `empty?`, and `nil?` alone for a
+/// number. No `empty?` on a type that has none.
+///
+/// Temporal columns (a `Time`, `Date` or `ActiveSupport::Duration`
+/// attribute, nullable or not) store their text in `@<attr>_raw`;
+/// `@<attr>` is never the storage slot (the ruby tree's parse memo is
+/// `@__t_<attr>`), so a check against it fired unconditionally —
+/// lobsters' `validates :created_at, presence: true` on Username
+/// rejected every record. Blank on the stored form is nil-or-empty text.
+fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::RuntimeRelation) -> Expr {
+    let temporal = match peel_nilable(attr_ty).0 {
+        Some(Ty::Time | Ty::Date) => true,
+        Some(Ty::Class { id, .. }) => id.0.as_str() == "ActiveSupport::Duration",
+        _ => false,
+    };
+    if temporal {
+        let raw_ivar = ivar(&Symbol::from(format!("{}_raw", attr.as_str())));
+        return bool_op(
+            BoolOpKind::Or,
+            send(raw_ivar.clone(), "nil?", vec![]),
+            send(raw_ivar, "empty?", vec![]),
+        );
+    }
+    let attr_ivar = ivar(attr);
+    let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
+    // Nullable column: the `nil?` disjunct already covers nil, so the
+    // emptiness test reads the narrowed value — `@attr.empty?` on an
+    // Option doesn't compile on a strict target.
+    let (attr_ty, nilable) = peel_nilable(attr_ty);
+    let narrowed = match (nilable, attr_ty) {
+        (true, Some(inner)) => narrowed_ivar(attr, inner),
+        _ => attr_ivar.clone(),
+    };
+    let or = |a, b| bool_op(BoolOpKind::Or, a, b);
+    let and = |a, b| bool_op(BoolOpKind::And, a, b);
+    let is_false = |value: Expr| {
+        send(value, "==", vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: false } })])
+    };
+    match (runtime_relation, attr_ty) {
+        (_, Some(Ty::Array { .. })) => or(nil_check, send(narrowed, "empty?", vec![])),
+        // The uncast writer can hold an Integer, `false` or an Array here,
+        // which Rails casts to a String before validating (`5` is `"5"`,
+        // `false` is `"f"`, `[]` is `"[]"`): none is blank, and `to_s`
+        // answers the same without raising on the regexp.
+        (super::RuntimeRelation::Present, Some(Ty::Str)) => {
+            or(nil_check, whitespace(send(attr_ivar.clone(), "to_s", vec![])))
+        }
+        (super::RuntimeRelation::Present, _) => or(
+            or(
+                or(or(nil_check, is_false(attr_ivar.clone())), and(is_a_check(&attr_ivar, "String"), whitespace(attr_ivar.clone()))),
+                and(is_a_check(&attr_ivar, "Array"), send(attr_ivar.clone(), "empty?", vec![])),
+            ),
+            and(is_a_check(&attr_ivar, "Hash"), send(attr_ivar, "empty?", vec![])),
+        ),
+        (super::RuntimeRelation::Absent, Some(Ty::Str)) => {
+            or(nil_check, send(stripped_str(narrowed), "empty?", vec![]))
+        }
+        (super::RuntimeRelation::Absent, Some(Ty::Bool)) => or(nil_check, is_false(narrowed)),
+        (super::RuntimeRelation::Absent, Some(_)) => nil_check,
+        // No type known: the old generic form, unchanged.
+        (super::RuntimeRelation::Absent, None) => or(
+            or(nil_check, and(is_a_check(&attr_ivar, "String"), send(attr_ivar.clone(), "empty?", vec![]))),
+            and(is_a_check(&attr_ivar, "Array"), send(attr_ivar, "empty?", vec![])),
+        ),
+    }
+}
+
+/// Rails' `blank?` for a String, `/\A[[:space:]]*\z/.match?(value)`:
+/// U+3000 and U+00A0 count as whitespace, U+200B does not.
+fn whitespace(value: Expr) -> Expr {
+    let re = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit { value: Literal::Regex { pattern: r"\A[[:space:]]*\z".to_string(), flags: String::new() } },
+    );
+    send(re, "match?", vec![value])
 }
 
 /// Rails skips an `EachValidator` for a nil value under `allow_nil:` and a
@@ -950,8 +1130,8 @@ fn skip_nil_or_blank(
 /// `allow_blank:`'s skip for a numericality or format rule. On the ruby
 /// family the uncast writer can store the raw input, so a whitespace-only
 /// String (and `false`) is blank, as Rails reads it: `@attr.nil? ||
-/// @attr == false || @attr.to_s.strip.empty?` (`to_s`, the spelling Spinel
-/// takes). A String column drops the `false` disjunct: Rails casts `false`
+/// @attr == false || /\A[[:space:]]*\z/.match?(@attr.to_s)` (`to_s`, the
+/// spelling Spinel takes; the presence check's whitespace test). A String column drops the `false` disjunct: Rails casts `false`
 /// to `"f"` there, which is not blank. A strict target's field is its
 /// column's type: a String's narrowed `strip.empty?`, a Boolean's
 /// narrowed `== false` (`false.blank?` is true), else `nil?` (a numeric
@@ -964,7 +1144,7 @@ fn allow_blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super
     let string_column = matches!(attr_ty, Some(Ty::Str));
     match runtime_relation {
         super::RuntimeRelation::Present => {
-            let empty = send(send(send(value.clone(), "to_s", vec![]), "strip", vec![]), "empty?", vec![]);
+            let empty = whitespace(send(value.clone(), "to_s", vec![]));
             if string_column {
                 return bool_op(BoolOpKind::Or, nil, empty);
             }
@@ -979,7 +1159,7 @@ fn allow_blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super
             // The `nil?` disjunct covers nil, so the strip reads the
             // narrowed value, as the presence check's does.
             let narrowed = if nilable { narrowed_ivar(attr, &Ty::Str) } else { value };
-            bool_op(BoolOpKind::Or, nil, send(send(narrowed, "strip", vec![]), "empty?", vec![]))
+            bool_op(BoolOpKind::Or, nil, send(stripped_str(narrowed), "empty?", vec![]))
         }
         super::RuntimeRelation::Absent if matches!(attr_ty, Some(Ty::Bool)) => {
             let narrowed = if nilable { narrowed_ivar(attr, &Ty::Bool) } else { value };
@@ -994,94 +1174,16 @@ fn allow_blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super
     }
 }
 
-/// The presence check's blank test, `@attr.nil?` or empty by the
-/// column's type: a String or Array column's `empty?`, else the
-/// generic `is_a?(String)` / `is_a?(Array)` form. Shared with
-/// `numericality:`'s `allow_blank:` skip so "blank" means one thing.
-fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>) -> Expr {
-    let attr_ivar = ivar(attr);
-    // `@attr.nil?`
-    let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
-    // Nullable column: the `nil?` disjunct already covers nil, so the
-    // emptiness test reads the narrowed value — `@attr.empty?` on an
-    // Option doesn't compile on a strict target.
-    let (attr_ty, nilable) = peel_nilable(attr_ty);
-    let attr_ivar = if nilable {
-        match attr_ty {
-            Some(inner) => narrowed_ivar(attr, inner),
-            None => attr_ivar,
-        }
-    } else {
-        attr_ivar
-    };
-    let cond = match attr_ty {
-        Some(Ty::Str) => {
-            // Skip is_a?(Array) — `body : String` can never be an array.
-            bool_op(
-                BoolOpKind::Or,
-                nil_check,
-                send(attr_ivar, "empty?", vec![]),
-            )
-        }
-        Some(Ty::Array { .. }) => {
-            // Skip is_a?(String) — symmetric.
-            bool_op(
-                BoolOpKind::Or,
-                nil_check,
-                send(attr_ivar, "empty?", vec![]),
-            )
-        }
-        _ => {
-            // Generic: `@attr.nil? || (@attr.is_a?(String) && @attr.empty?) ||
-            //          (@attr.is_a?(Array) && @attr.empty?)`
-            let string_blank = bool_op(
-                BoolOpKind::And,
-                is_a_check(&attr_ivar, "String"),
-                send(attr_ivar.clone(), "empty?", vec![]),
-            );
-            let array_blank = bool_op(
-                BoolOpKind::And,
-                is_a_check(&attr_ivar, "Array"),
-                send(attr_ivar, "empty?", vec![]),
-            );
-            bool_op(
-                BoolOpKind::Or,
-                bool_op(BoolOpKind::Or, nil_check, string_blank),
-                array_blank,
-            )
-        }
-    };
-    cond
-}
-
 /// Inline `validates :attr, absence: true` — the negation of presence.
 ///   if !(@attr.nil? || (@attr.is_a?(String) && @attr.empty?) || (@attr.is_a?(Array) && @attr.empty?))
 ///     errors << "attr must be blank"
 ///   end
 /// Reuses the presence condition tree and wraps with unary `!`.
-fn inline_absence_check(msgs: Messages, attr: &Symbol) -> Expr {
-    // Re-derive the blank-condition (matches inline_presence_check's tree).
-    let attr_ivar = ivar(attr);
-    let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
-    let string_blank = bool_op(
-        BoolOpKind::And,
-        is_a_check(&attr_ivar, "String"),
-        send(attr_ivar.clone(), "empty?", vec![]),
-    );
-    let array_blank = bool_op(
-        BoolOpKind::And,
-        is_a_check(&attr_ivar, "Array"),
-        send(attr_ivar, "empty?", vec![]),
-    );
-    let blank_cond = bool_op(
-        BoolOpKind::Or,
-        bool_op(BoolOpKind::Or, nil_check, string_blank),
-        array_blank,
-    );
+fn inline_absence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::RuntimeRelation) -> Expr {
     let not_blank = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
-            recv: Some(blank_cond),
+            recv: Some(blank_cond(attr, attr_ty, runtime_relation)),
             method: Symbol::from("!"),
             args: vec![],
             block: None,
@@ -1163,6 +1265,97 @@ fn inline_inclusion_check(
     let push_err =
         errors_push(attr.as_str(), msgs.error(attr.as_str(), "inclusion", &Default::default()));
     if_with_nil_else(not_included, push_err)
+}
+
+/// Inline `inclusion:` / `exclusion:` with a callable `in:`, the set read
+/// on the record when it validates (Rails' `Clusivity#include?`):
+///   if !(<set>).include?(@attr)      # inclusion: "is not included in the list"
+///   if (<set>).include?(@attr)       # exclusion: "is reserved"
+///     errors << …
+///   end
+///
+/// An Array value (an array column the target stores as an Array) is in
+/// the set when every element is, as `Clusivity#include?` checks it:
+/// `@attr.all? { |v| (<set>).include?(v) }` (nil is asked of the set as
+/// it is). So an exclusion rejects it
+/// only when all of its elements are reserved, and `[]` is in every set.
+/// The set is read once per element there, where Rails reads it once.
+fn inline_set_call_check(msgs: Messages, attr: &Symbol, set: &Expr, exclusion: bool, attr_ty: Option<&Ty>) -> Expr {
+    let include_call = if is_array_ty(attr_ty) {
+        let elem = Symbol::from("v");
+        let test = send(
+            set.clone(),
+            "include?",
+            vec![Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: elem.clone() })],
+        );
+        let block = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                extra_params: Vec::new(),
+                rest_param: None,
+                params: vec![elem],
+                block_param: None,
+                body: test,
+                block_style: crate::expr::BlockStyle::Brace,
+            },
+        );
+        let all = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(ivar(attr)), method: Symbol::from("all?"), args: vec![], block: Some(block), parenthesized: false },
+        );
+        // A nil column value isn't an Array: Rails asks the set for nil.
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: send(ivar(attr), "nil?", vec![]),
+                then_branch: send(set.clone(), "include?", vec![ivar(attr)]),
+                else_branch: all,
+            },
+        )
+    } else {
+        send(set.clone(), "include?", vec![ivar(attr)])
+    };
+    let cond = if exclusion {
+        include_call
+    } else {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(include_call),
+                method: Symbol::from("!"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let kind = if exclusion { "exclusion" } else { "inclusion" };
+    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), kind, &Default::default()));
+    if_with_nil_else(cond, push_err)
+}
+
+/// An Array slot, nullable or not (`ty_of_column_slot`'s stored array
+/// column, `Array[T] | nil` when the column allows null).
+fn is_array_ty(ty: Option<&Ty>) -> bool {
+    match ty {
+        Some(Ty::Array { .. }) => true,
+        Some(Ty::Union { variants }) => {
+            variants.iter().any(|v| matches!(v, Ty::Array { .. }))
+                && variants.iter().all(|v| matches!(v, Ty::Array { .. } | Ty::Nil))
+        }
+        _ => false,
+    }
+}
+
+/// `[v1, v2]`, a literal `in:` list as an expression.
+fn literal_list(values: &[Literal]) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Array {
+            elements: values.iter().map(|lit| Expr::new(Span::synthetic(), ExprNode::Lit { value: lit.clone() })).collect(),
+            style: ArrayStyle::Brackets,
+        },
+    )
 }
 
 /// Inline `validates :attr, exclusion: { in: … }`, Rails' "is reserved":
@@ -1372,6 +1565,7 @@ fn inline_length_check(
     attr: &Symbol,
     min: Option<usize>,
     max: Option<usize>,
+    is: Option<usize>,
     message: Option<&str>,
     attr_ty: Option<&Ty>,
     allow_nil: Option<bool>,
@@ -1393,16 +1587,22 @@ fn inline_length_check(
     let len_expr = match attr_ty {
         Some(Ty::Str) | Some(Ty::Array { .. }) => length_send,
         _ => {
-            let zero_lit = Expr::new(
+            // Not 0: Rails measures a value without `length` by its text (`value.to_s.length`), so `42` is two long.
+            let text_length = send(send(attr_ivar.clone(), "to_s", vec![]), "length", vec![]);
+            let hash_or_text = Expr::new(
                 Span::synthetic(),
-                ExprNode::Lit { value: Literal::Int { value: 0 } },
+                ExprNode::If {
+                    cond: is_a_check(&attr_ivar, "Hash"),
+                    then_branch: length_send.clone(),
+                    else_branch: text_length,
+                },
             );
             let inner_else = Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
                     cond: is_a_check(&attr_ivar, "Array"),
                     then_branch: length_send.clone(),
-                    else_branch: zero_lit,
+                    else_branch: hash_or_text,
                 },
             );
             Expr::new(
@@ -1439,6 +1639,7 @@ fn inline_length_check(
     for (bound, n, kind, op) in [
         (LengthBound::Min, min, "too_short", "<"),
         (LengthBound::Max, max, "too_long", ">"),
+        (LengthBound::Is, is, "wrong_length", "!="),
     ] {
         let Some(n) = n else { continue };
         let cmp = send(
@@ -1489,6 +1690,7 @@ fn inline_length_check(
 enum LengthBound {
     Min,
     Max,
+    Is,
 }
 
 /// Whether a nil value fails this bound. `None` is Rails' default
@@ -1497,7 +1699,7 @@ fn nil_fails_bound(bound: LengthBound, allow_nil: Option<bool>) -> bool {
     match allow_nil {
         Some(true) => false,
         Some(false) => true,
-        None => matches!(bound, LengthBound::Min),
+        None => matches!(bound, LengthBound::Min | LengthBound::Is),
     }
 }
 
@@ -1927,7 +2129,7 @@ mod tests {
 
     #[test]
     fn presence_emits_blank_error() {
-        let expr = inline_presence_check(Messages::default(), &attr(), None);
+        let expr = inline_presence_check(Messages::default(), &attr(), None, super::super::RuntimeRelation::Absent);
         assert_eq!(collect_error_messages(&expr), vec!["Title can't be blank"]);
     }
 
@@ -1936,7 +2138,7 @@ mod tests {
         // Statically-typed string attr: the `is_a?(Array) && ...` arm
         // must drop out, otherwise tsc narrows the dead branch to
         // `never` and rejects the subsequent `.length` access.
-        let expr = inline_presence_check(Messages::default(), &attr(), Some(&Ty::Str));
+        let expr = inline_presence_check(Messages::default(), &attr(), Some(&Ty::Str), super::super::RuntimeRelation::Absent);
         let dbg = format!("{:?}", expr);
         assert!(
             !dbg.contains("\"Array\""),
@@ -1946,7 +2148,7 @@ mod tests {
 
     #[test]
     fn presence_array_typed_attr_drops_is_a_string_branch() {
-        let expr = inline_presence_check(Messages::default(), &attr(), Some(&Ty::Array { elem: std::sync::Arc::new(Ty::Str) }));
+        let expr = inline_presence_check(Messages::default(), &attr(), Some(&Ty::Array { elem: std::sync::Arc::new(Ty::Str) }), super::super::RuntimeRelation::Absent);
         let dbg = format!("{:?}", expr);
         assert!(
             !dbg.contains("\"String\""),
@@ -1956,13 +2158,13 @@ mod tests {
 
     #[test]
     fn absence_emits_must_be_blank_error() {
-        let expr = inline_absence_check(Messages::default(), &attr());
+        let expr = inline_absence_check(Messages::default(), &attr(), None, super::super::RuntimeRelation::Absent);
         assert_eq!(collect_error_messages(&expr), vec!["Title must be blank"]);
     }
 
     #[test]
     fn length_min_only_emits_too_short() {
-        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), None, None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), None, None, None, None, None);
         assert_eq!(exprs.len(), 1, "length lowers to one outer expression");
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         // Nil fails the minimum outright, and a present value fails when shorter.
@@ -1981,7 +2183,7 @@ mod tests {
 
     #[test]
     fn length_max_only_skips_nil() {
-        let exprs = inline_length_check(Messages::default(), &attr(), None, Some(100), None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), None, Some(100), None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(msgs, vec!["Title is too long (maximum is 100 characters)"]);
         let (cond, _, else_branch) = root_if(&exprs);
@@ -1995,6 +2197,7 @@ mod tests {
             Messages::default(),
             &attr(),
             Some(5),
+            None,
             None,
             None,
             None,
@@ -2014,6 +2217,7 @@ mod tests {
             Some(100),
             None,
             None,
+            None,
             Some(false),
         );
         let (cond, then_branch, _) = root_if(&exprs);
@@ -2026,7 +2230,7 @@ mod tests {
 
     #[test]
     fn length_min_and_max_emits_both_in_order() {
-        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), Some(100), None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), Some(100), None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(
             msgs,
@@ -2208,6 +2412,17 @@ fn peel_nilable(ty: Option<&Ty>) -> (Option<&Ty>, bool) {
 
 /// `Cast(@attr, T)` — the nil-excluded read. Callers place it only
 /// where a preceding `nil?` disjunct/conjunct guarantees the value.
+/// `value.strip`, typed as the String it is. The strict String arms ask
+/// `empty?` of it; an emitter that dispatches `empty?` by the receiver's
+/// type (elixir: `s == ""`) needs that type on the synthesized call,
+/// which has none of its own, or it falls back to a struct dispatch.
+fn stripped_str(value: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Cast { value: send(value, "strip", vec![]), target_ty: Ty::Str },
+    )
+}
+
 fn narrowed_ivar(attr: &Symbol, inner: &Ty) -> Expr {
     Expr::new(
         Span::synthetic(),

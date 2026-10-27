@@ -40,7 +40,7 @@ use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 
 use super::util::{
-    constant_id_str, constant_path_of, find_call_named, flatten_statements, string_value, symbol_list_value,
+    bool_value, constant_id_str, constant_path_of, find_call_named, flatten_statements, string_value, symbol_list_value,
     symbol_or_string_value, symbol_value,
 };
 use super::{IngestError, IngestResult};
@@ -1564,11 +1564,32 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
     }
 }
 
+std::thread_local! {
+    /// The constants the app's route files read, folded from their owners
+    /// (`ingest::app` builds it as a model body's `ClassConsts`).
+    static ROUTE_CONSTANTS: RefCell<Option<super::model::ClassConsts>> = const { RefCell::new(None) };
+}
+
+/// Ingest routes with `consts` answering the constants a `constraints:`
+/// value names (`Regexp.union(KindsController::KINDS)`, `ID_RE`).
+pub(super) fn with_route_constants<R>(consts: super::model::ClassConsts, f: impl FnOnce() -> R) -> R {
+    let prev = ROUTE_CONSTANTS.with(|cell| cell.replace(Some(consts)));
+    let out = f();
+    ROUTE_CONSTANTS.with(|cell| *cell.borrow_mut() = prev);
+    out
+}
+
+/// A `constraints:` value the route files' constants fold to a regex:
+/// a constant naming one, or `Regexp.union` of a String list constant.
+fn folded_regex(node: &Node<'_>) -> Option<(String, String)> {
+    ROUTE_CONSTANTS.with(|cell| cell.borrow().as_ref().and_then(|consts| consts.regex(node)))
+}
+
 /// Param→regex-source map from a `constraints:` / `constraints(...)`
 /// hash's assoc elements. Fail-closed: a value that isn't a literal
-/// regex, or a literal carrying `/i`/`/x`/`/m` (which `regex_source`
-/// cannot express), is `Unsupported` rather than silently omitted or
-/// stripped (#857/#1087). Shared by the explicit-route kwarg, the
+/// regex or a plain-name String or Symbol, or a regex literal carrying
+/// `/i`/`/x`/`/m` (which `regex_source` cannot express), is
+/// `Unsupported` rather than silently omitted or stripped (#857/#1087). Shared by the explicit-route kwarg, the
 /// `resources`/`resource` kwarg, and the block-form reader below.
 fn read_param_regex_constraints<'a>(
     elements: impl IntoIterator<Item = Node<'a>>,
@@ -1579,6 +1600,9 @@ fn read_param_regex_constraints<'a>(
     for el in elements {
         let Some(a) = el.as_assoc_node() else { continue };
         let Some(param) = symbol_value(&a.key()) else { continue };
+        // `format` names the `(.:format)` extension, not a path param: a
+        // requirement on it, which forces no format of its own.
+        let key = if param == "format" { crate::dialect::FORMAT_REQUIREMENT } else { param.as_str() };
         let constraint_value = a.value();
         match regex_source(&constraint_value) {
             Some(_) if regex_has_unsupported_modifiers(&constraint_value) => {
@@ -1590,13 +1614,43 @@ fn read_param_regex_constraints<'a>(
                 });
             }
             Some(src) => {
-                out.insert(Symbol::from(param.as_str()), src);
+                out.insert(Symbol::from(key), src);
             }
+            // `Regexp.union(Owner::LIST)` / `NAME_RE`: what the constant
+            // folds to, under the same modifier rule as a literal.
+            None if let Some((src, flags)) = folded_regex(&constraint_value) => {
+                if !flags.is_empty() {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!(
+                            "{context} constraints: {param}: regex modifiers (/i, /x, /m) are not carried into the lowered constraint"
+                        ),
+                    });
+                }
+                out.insert(Symbol::from(key), src);
+            }
+            // `constraints: { format: :csv }` / `{ id: "main" }`: Rails
+            // matches the text exactly. Only a plain name is taken (see
+            // `plain_literal_source`); any other value stays a gap.
+            None if let Some(src) = string_value(&constraint_value)
+                .or_else(|| symbol_value(&constraint_value))
+                .as_deref()
+                .and_then(plain_literal_source) =>
+            {
+                out.insert(Symbol::from(key), src);
+            }
+            // `constraints host: Rails.configuration.app_host_constraint,
+            // protocol: "https://" do … end`: Rails matches a key that
+            // names no path segment against the request's own method of
+            // that name. A request constraint, as a guard object is: the
+            // block's routes are kept and the request is not checked
+            // (`constraints(SomeGuard.new)` stays unenforced the same way).
+            None if REQUEST_CONSTRAINT_KEYS.contains(&param.as_str()) => {}
             None => {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
                     message: format!(
-                        "{context} constraints: {param} is not a literal regex"
+                        "{context} constraints: {param} is not a literal regex or a plain name"
                     ),
                 });
             }
@@ -1604,6 +1658,11 @@ fn read_param_regex_constraints<'a>(
     }
     Ok(out)
 }
+
+/// The `constraints` keys Rails answers from the request rather than the
+/// path (`ActionDispatch::Request#host`, `#protocol`, …) when a value is
+/// not a literal.
+const REQUEST_CONSTRAINT_KEYS: &[&str] = &["host", "protocol", "subdomain", "domain", "port"];
 
 /// The param→regex-source map from a `constraints(...)` call's own
 /// arguments — the block-level counterpart of the route-level
@@ -3081,6 +3140,16 @@ fn segment_matches(pattern: &str, s: &str) -> bool {
 /// between the delimiters, verbatim (escapes like `\/` preserved so it
 /// drops straight back into a Ruby regex literal), None for non-regex
 /// values. Used for `constraints:` param restrictions (#67).
+/// The regex source of a constraint written as plain text, which Rails
+/// matches exactly and case-sensitively. Only letters, digits, `_` and
+/// `-`, which are their own regex source: Rails never matches a String
+/// requirement holding a `.` (its router splits segments there), and
+/// other punctuation is left to a regex literal.
+fn plain_literal_source(text: &str) -> Option<String> {
+    (!text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .then(|| text.to_string())
+}
+
 fn regex_source(node: &Node<'_>) -> Option<String> {
     let r = node.as_regular_expression_node()?;
     Some(String::from_utf8_lossy(r.content_loc().as_slice()).into_owned())
@@ -3249,6 +3318,34 @@ fn ingest_explicit_route(
                                 file,
                                 &ctx,
                             )?);
+                        }
+                    }
+                    // `format: "rss"` is a requirement and the forced
+                    // format both (`/rss.json` is a 404, `/rss` answers
+                    // rss); `format: false` refuses any extension;
+                    // `format: :json` does neither in Rails, so it stays
+                    // as ignored as before.
+                    "format" => {
+                        if let Some(v) = string_value(value) {
+                            let Some(src) = plain_literal_source(&v) else {
+                                return Err(IngestError::Unsupported {
+                                    file: file.into(),
+                                    message: format!("route {:?} format: {v:?} is not a plain format name", path.as_deref().unwrap_or("?")),
+                                });
+                            };
+                            constraints.insert(Symbol::from(crate::dialect::FORMAT_REQUIREMENT), src);
+                            constraints.insert(Symbol::from("format"), v);
+                        } else if let Some(b) = bool_value(value) {
+                            if b {
+                                return Err(IngestError::Unsupported {
+                                    file: file.into(),
+                                    message: format!(
+                                        "route {:?} format: true (an extension the request must carry) is not modeled",
+                                        path.as_deref().unwrap_or("?")
+                                    ),
+                                });
+                            }
+                            constraints.insert(Symbol::from(crate::dialect::FORMAT_REQUIREMENT), crate::dialect::FORMAT_NONE.to_string());
                         }
                     }
                     other => {
@@ -3468,6 +3565,7 @@ fn ingest_resources_route(
     let mut except: Vec<Symbol> = Vec::new();
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
+    let mut module: Option<String> = None;
     let mut param: Option<Symbol> = None;
     let mut path: Option<String> = None;
     let mut concern_names: Vec<String> = Vec::new();
@@ -3539,6 +3637,12 @@ fn ingest_resources_route(
                 // pointed five routes at `MessagesController`, which
                 // answers them with the human HTML flow.
                 "controller" => controller = rname(&value),
+                "module" => {
+                    module = Some(rname(&value).ok_or_else(|| IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!("resources :{name_str} `module:` is not a literal string or symbol"),
+                    })?);
+                }
                 // `param: :task_id` renames the MEMBER SEGMENT: the
                 // path binds `:task_id` and the controller reads
                 // `params[:task_id]`. Dropped, the path bound `:id`
@@ -3613,11 +3717,23 @@ fn ingest_resources_route(
             .collect();
     }
 
-    let mut nested = block_entries(call, file, Some(name_str.as_str()), cx)?;
+    // A verb in the block with no `to:` (`member { get :download }`)
+    // dispatches to the resource's controller: `controller:` when given,
+    // as Rails routes it, else the resource name — pluralized for a
+    // singular `resource :profile`, whose routes all go to
+    // `ProfilesController` (Rails 8.1.4: `preview_profile GET
+    // /profile/preview profiles#preview`), as the lowering already does
+    // for the resource's own actions.
+    let block_controller = match controller.as_deref() {
+        Some(c) => c.to_string(),
+        None if singular => crate::naming::pluralize_snake(name_str.as_str()),
+        None => name_str.clone(),
+    };
+    let mut nested = block_entries(call, file, Some(block_controller.as_str()), cx)?;
     if !concern_names.is_empty() {
         let none = eval::RVal::Hash(Vec::new());
         nested.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
-            run_concerns(&concern_names, &none, file, Some(name_str.as_str()), cx)
+            run_concerns(&concern_names, &none, file, Some(block_controller.as_str()), cx)
         })?);
     }
     // Push the inline `constraints:` kwarg down into every `member do`/
@@ -3629,7 +3745,7 @@ fn ingest_resources_route(
     // the member route it was meant to narrow (#857).
     merge_outer_constraints(&mut nested, &constraints);
 
-    Ok(RouteSpec::Resources {
+    let resource = RouteSpec::Resources {
         name,
         only,
         except,
@@ -3640,6 +3756,18 @@ fn ingest_resources_route(
         param,
         path,
         constraints,
+    };
+    Ok(match module {
+        Some(module) => RouteSpec::Scope {
+            path: None,
+            module: Some(module),
+            as_prefix: None,
+            defaults: IndexMap::new(),
+            nest: false,
+            suppress_helpers: false,
+            entries: vec![resource],
+        },
+        None => resource,
     })
 }
 

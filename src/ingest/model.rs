@@ -34,6 +34,7 @@ pub use table_prefix::{
 };
 
 mod validations;
+mod with_options;
 use validations::{and_guard, context_guard, parse_validates_call, validation_items, ParsedValidates, ValidatesKind};
 
 /// Parse a single model file. The first class definition is treated as the
@@ -211,6 +212,15 @@ pub(super) fn ingest_model_with_enum_constants(
                             enum_defaults.insert(expanded.column.clone(), d);
                         }
                         if let Some(mapping) = expanded.mapping {
+                            if mapping
+                                .iter()
+                                .all(|(label, stored)| matches!(stored, Literal::Str { value } if value == label))
+                            {
+                                class_consts.note_enum_labels(
+                                    expanded.column.as_str(),
+                                    mapping.iter().map(|(label, _)| label.clone()).collect(),
+                                );
+                            }
                             enums.insert(expanded.column, mapping);
                         }
                         let mut blank = leading_blank;
@@ -511,6 +521,22 @@ pub(super) fn ingest_model_body_items(
         end: stmt.location().end_offset() as u32,
     };
     if let Some(call) = stmt.as_call_node() {
+        if with_options::is_with_options(&call) {
+            return match with_options::expand(&call, &[], owner, file, class_consts) {
+                Ok(items) => Ok(items),
+                // Declined: reported with what blocked it, and dropped like
+                // any unlowered model DSL (none of its calls is kept).
+                Err(IngestError::Unsupported { message, .. }) => {
+                    let mut diagnostic =
+                        crate::diagnostic::Diagnostic::unsupported(span, None, "with_options", message.clone());
+                    diagnostic.severity = crate::diagnostic::Severity::Warning;
+                    super::prism::push(diagnostic);
+                    super::survey::record(&IngestError::Unsupported { file: file.into(), message });
+                    Ok(Vec::new())
+                }
+                Err(err) => Err(err),
+            };
+        }
         if call.receiver().is_none() {
             let name = constant_id_str(&call.name()).to_string();
             let of_kind = match name.as_str() {
@@ -526,6 +552,16 @@ pub(super) fn ingest_model_body_items(
                     ParsedValidates::Gap => return Ok(Vec::new()),
                     ParsedValidates::Modeled(parsed) if !parsed.is_empty() => {
                         return Ok(validation_items(parsed, leading_comments, span));
+                    }
+                    // The lowered rules, and the call itself for its custom
+                    // keys (`ingest::each_validator` lowers or reports them).
+                    ParsedValidates::Custom(parsed, keys) => {
+                        let mut items = validation_items(parsed, leading_comments, span);
+                        let expr = ingest_expr(stmt, file)?;
+                        let text = String::from_utf8_lossy(call.location().as_slice()).into_owned();
+                        super::each_validator::note(expr.span, text, keys);
+                        items.push(ModelBodyItem::Unknown { expr, leading_comments: Vec::new(), leading_blank_line: false });
+                        return Ok(items);
                     }
                     ParsedValidates::Decline | ParsedValidates::Modeled(_) => {}
                 }
@@ -1503,6 +1539,13 @@ struct ConstTaint {
     /// The constants a [`REFLECTION_METHODS`] call's receiver chain is
     /// rooted at (`Rule.const_set`): owners whose constants it may replace.
     reflected: std::collections::HashSet<String>,
+    /// The constant a `const_set(:NAME, …)` / `remove_const(:NAME)` call
+    /// names, whatever its receiver.
+    named_writes: std::collections::HashSet<String>,
+    /// For a boot source: the qualified classes and modules the inputs
+    /// define. A call on one, or a variable holding one, is not a change
+    /// to a constant (`Gadget.count`); see [`ConstTaint::names_boot_namespace`].
+    boot_namespaces: Option<std::collections::HashSet<String>>,
 }
 
 /// Calls on an owner that can write or remove its constants, run code in
@@ -1562,6 +1605,51 @@ fn chain_root(node: &Node<'_>) -> Option<String> {
     node.as_constant_path_node()?.name().map(|n| constant_id_str(&n).to_string())
 }
 
+/// [`chain_root`]'s constant as written: `Gadget`, `Vendor::Gadget`,
+/// `::Catalog::KINDS`.
+fn chain_root_path(node: &Node<'_>) -> Option<String> {
+    fn path(node: &Node<'_>) -> Option<String> {
+        if let Some(cr) = node.as_constant_read_node() {
+            return Some(constant_id_str(&cr.name()).to_string());
+        }
+        let cp = node.as_constant_path_node()?;
+        let name = constant_id_str(&cp.name()?).to_string();
+        match cp.parent() {
+            Some(parent) => Some(format!("{}::{name}", path(&parent)?)),
+            None => Some(format!("::{name}")),
+        }
+    }
+    if let Some(paren) = node.as_parentheses_node() {
+        return chain_root_path(&paren.body()?);
+    }
+    if let Some(stmts) = node.as_statements_node() {
+        let body: Vec<Node<'_>> = stmts.body().iter().collect();
+        let [only] = body.as_slice() else { return None };
+        return chain_root_path(only);
+    }
+    if let Some(call) = node.as_call_node() {
+        if FRESH_RESULT_METHODS.contains(&constant_id_str(&call.name()).as_ref()) {
+            return None;
+        }
+        return chain_root_path(&call.receiver()?);
+    }
+    path(node)
+}
+
+/// `send(:const_set, :NAME, …)` / `public_send(:remove_const, :NAME)`:
+/// the constant a literal dispatch to a named write names.
+fn dispatched_named_constant_write(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    if !matches!(constant_id_str(&call.name()).as_ref(), "send" | "__send__" | "public_send") {
+        return None;
+    }
+    let arguments: Vec<Node<'_>> = call.arguments()?.arguments().iter().collect();
+    let [method, name, ..] = arguments.as_slice() else { return None };
+    if !matches!(symbol_value(method).as_deref(), Some("const_set" | "remove_const")) {
+        return None;
+    }
+    symbol_value(name).or_else(|| string_value(name))
+}
+
 /// Every constant a node reads, at any depth.
 fn constant_reads(node: &Node<'_>) -> Vec<String> {
     struct Reads(Vec<String>);
@@ -1593,6 +1681,8 @@ impl ConstTaint {
             tainted: Default::default(),
             aliases: Vec::new(),
             reflected: Default::default(),
+            named_writes: Default::default(),
+            boot_namespaces: None,
         };
         for stmt in stmts {
             ruby_prism::Visit::visit(&mut scan, stmt);
@@ -1619,11 +1709,67 @@ impl ConstTaint {
             tainted: Default::default(),
             aliases: Vec::new(),
             reflected: Default::default(),
+            named_writes: Default::default(),
+            boot_namespaces: None,
         };
         ruby_prism::Visit::visit(&mut scan, root);
         let ConstTaint { mut tainted, aliases, reflected, .. } = scan;
         Self::alias_closure(&mut tainted, &aliases);
         (tainted, reflected)
+    }
+
+    /// The names a source that runs at boot may leave with another value:
+    /// the constants it writes outside `direct_writes`, mutates or lets a
+    /// variable hold, and each constant a `const_set` / `remove_const`
+    /// names; with its alias edges (`ALIAS = KINDS`), left unclosed. A call on an owner (`Gadget.count`, `Vendor::Gadget.class_eval`)
+    /// is not a write to one of its constants: a mutation inside the
+    /// block is scanned on its own.
+    pub(super) fn scan_boot(
+        root: &Node<'_>,
+        direct_writes: std::collections::HashSet<usize>,
+        namespaces: std::collections::HashSet<String>,
+    ) -> (std::collections::HashSet<String>, Vec<(String, String)>) {
+        let mut scan = ConstTaint {
+            top_level: direct_writes,
+            top_writes: Default::default(),
+            tainted: Default::default(),
+            aliases: Vec::new(),
+            reflected: Default::default(),
+            named_writes: Default::default(),
+            boot_namespaces: Some(namespaces),
+        };
+        ruby_prism::Visit::visit(&mut scan, root);
+        let ConstTaint { mut tainted, aliases, named_writes, .. } = scan;
+        tainted.extend(named_writes);
+        // Unclosed: an alias one boot source writes and another mutates
+        // through is one object, so the caller closes over every boot
+        // source's edges together (`EnumConstants::finish`).
+        (tainted, aliases)
+    }
+
+    /// [`Self::alias_closure`] for a caller that collects taints and alias
+    /// edges from several sources before closing them.
+    pub(super) fn close_aliases(tainted: &mut std::collections::HashSet<String>, aliases: &[(String, String)]) {
+        Self::alias_closure(tainted, aliases);
+    }
+
+    /// Whether a boot source's receiver chain (`Gadget.count`,
+    /// `Vendor::Gadget.class_eval`) is rooted at a class or module rather
+    /// than at a constant it could change: a bare name an input namespace
+    /// has, a path an input defines as a namespace, or a path rooted
+    /// outside the inputs (a library class). `Catalog::KINDS` is rooted in
+    /// an input namespace and is not one, so it is a constant, whatever
+    /// else is named `KINDS`.
+    fn names_boot_namespace(&self, node: &Node<'_>) -> bool {
+        let Some(namespaces) = &self.boot_namespaces else { return false };
+        let Some(path) = chain_root_path(node) else { return false };
+        let path = path.trim_start_matches("::");
+        match path.split_once("::") {
+            None => namespaces.iter().any(|ns| ns.rsplit("::").next() == Some(path)),
+            Some((first, _)) => {
+                namespaces.contains(path) || !namespaces.iter().any(|ns| ns.split("::").next() == Some(first))
+            }
+        }
     }
 
     fn alias_closure(tainted: &mut std::collections::HashSet<String>, aliases: &[(String, String)]) {
@@ -1645,6 +1791,9 @@ impl ConstTaint {
     /// `x = MODES` (or `@x`, `@@x`, `$x`, or `MODES.to_a`): the variable
     /// may mutate the constant later, out of this pass's sight.
     fn escape(&mut self, value: &Node<'_>) {
+        if self.names_boot_namespace(value) {
+            return;
+        }
         if let Some(root) = chain_root(value) {
             self.tainted.insert(root);
         }
@@ -1713,9 +1862,14 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
     // `MODES.first << "x"`, whose receivers may be the constant itself
     // or one of its elements.
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        // `Catalog.const_set(:KINDS, …)`, or a receiverless one in the
+        // owner's body: either replaces that name.
+        if let Some(name) = named_constant_write(node).or_else(|| dispatched_named_constant_write(node)) {
+            self.named_writes.insert(name);
+        }
         if let Some(recv) = node.receiver() {
             let method = constant_id_str(&node.name());
-            if !READ_ONLY_CONST_METHODS.contains(&method.as_ref()) {
+            if !READ_ONLY_CONST_METHODS.contains(&method.as_ref()) && !self.names_boot_namespace(&recv) {
                 if let Some(root) = chain_root(&recv) {
                     self.tainted.insert(root);
                 }
@@ -1837,8 +1991,6 @@ pub(super) struct ClassConsts {
     /// of one other folded regex constant — `(pattern, flags)`. Used to
     /// resolve `validates …, format: { with: NAME }` (#985 follow-up).
     regexes: std::collections::HashMap<String, (String, String)>,
-    /// The class body calls `default_scope` (bare or on `self`).
-    default_scoped: bool,
     /// `NAME = %w[…]` / `%i[…]` / `[…]` of literals, `.freeze`d or an
     /// alias of another folded list: the literals with their kind kept
     /// (a Symbol is not a String), for `inclusion: { in: NAME }`.
@@ -1855,11 +2007,11 @@ pub(super) struct ClassConsts {
     /// Names any app source defines below the top level
     /// (`EnumConstants::nested_names`): what an ancestor of the class
     /// (its superclass chain, an included module) could define.
-    app_nested_names: std::collections::HashSet<String>,
+    app_nested_names: std::rc::Rc<std::collections::HashSet<String>>,
     /// First segments of every name the app defines or reopens
     /// (`EnumConstants::top_level_names`): a top-level namespace the app
     /// touches, whose standard-library contents it may have replaced.
-    app_top_level_names: std::collections::HashSet<String>,
+    app_top_level_names: std::rc::Rc<std::collections::HashSet<String>>,
     /// `NAME = 3`, `NAME = (2**31) - 1`, `NAME = 4 * (OTHER + 1)`: every
     /// Integer the class body folds, at the width Ruby computes it (an
     /// `i128`, so `2**63` is kept exactly; `scalars` holds the ones that
@@ -1877,6 +2029,12 @@ pub(super) struct ClassConsts {
     /// are never read. For `inclusion: { in: NAME.keys }` and
     /// `inclusion: { in: NAME }` (`Hash#include?` is `key?`).
     hash_keys: std::collections::HashMap<String, Vec<Literal>>,
+    /// An enum the class body declared so far, by the class method Rails
+    /// names after it (`enum :status` → `statuses`): its labels, which
+    /// `statuses.keys` answers. Only an enum whose every label is also the
+    /// String it stores (`{ password: "password" }`): a lowered check
+    /// reads the stored value, and only there do the two agree.
+    enum_labels: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// The operators [`ClassConsts::int_expr`] folds.
@@ -1885,12 +2043,6 @@ const INTEGER_OPERATORS: &[&str] = &["+", "-", "*", "**", "-@"];
 impl ClassConsts {
     pub(super) fn collect(stmts: &[Node<'_>], file: &str) -> Self {
         let mut out = ClassConsts::default();
-        out.default_scoped = stmts.iter().any(|stmt| {
-            stmt.as_call_node().is_some_and(|call| {
-                call.receiver().is_none_or(|r| r.as_self_node().is_some())
-                    && constant_id_str(&call.name()) == "default_scope"
-            })
-        });
         // A constant folds only when its one write is a plain top-level
         // `NAME = …` and nothing else in the body, at any depth (method
         // bodies included), writes it or calls a method on it that may
@@ -1965,8 +2117,9 @@ impl ClassConsts {
 
     /// A list of literals the class body can fold: an array literal
     /// (`%w[…]`, `%i[…]`, `[…]`) whose every element is a String, Symbol,
-    /// Integer, Float, `true`/`false` or `nil` literal, `.freeze`d or not,
-    /// or another folded list constant.
+    /// Integer, Float, `true`/`false` or `nil` literal, or a Duration
+    /// literal (`1.week.seconds`, folded to its Integer seconds), `.freeze`d
+    /// or not, or another folded list constant.
     pub(super) fn list(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
         if let Some(inner) = single_parenthesized(node) {
             return self.list(&inner);
@@ -1984,7 +2137,13 @@ impl ClassConsts {
         if let Some(key) = const_key(node) {
             return self.lists.get(&key).cloned();
         }
-        node.as_array_node()?.elements().iter().map(|el| list_atom(&el)).collect()
+        node.as_array_node()?
+            .elements()
+            .iter()
+            .map(|el| {
+                list_atom(&el).or_else(|| super::util::duration_seconds(&el).map(|value| Literal::Int { value }))
+            })
+            .collect()
     }
 
     /// The keys of a Hash the class body can fold: a Hash literal whose
@@ -1992,6 +2151,11 @@ impl ClassConsts {
     /// not, or another folded Hash constant. Each key keeps its kind, in
     /// the order `Hash#keys` gives (a repeated key keeps its first
     /// place).
+    /// Record an enum the class body declares, for `<plural>.keys` below.
+    pub(super) fn note_enum_labels(&mut self, column: &str, labels: Vec<String>) {
+        self.enum_labels.insert(crate::naming::pluralize_snake(column), labels);
+    }
+
     pub(super) fn hash_keys_of(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
         if let Some(inner) = single_parenthesized(node) {
             return self.hash_keys_of(&inner);
@@ -1999,6 +2163,15 @@ impl ClassConsts {
         if let Some(call) = node.as_call_node() {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() && call.block().is_none() {
                 return self.hash_keys_of(&call.receiver()?);
+            }
+            // `statuses` (or `self.statuses`): an enum this body declared
+            // above, whose mapping's keys are its labels as Strings.
+            if call.arguments().is_none()
+                && call.block().is_none()
+                && call.receiver().is_none_or(|r| r.as_self_node().is_some())
+            {
+                let labels = self.enum_labels.get(constant_id_str(&call.name()))?;
+                return Some(labels.iter().map(|l| Literal::Str { value: l.clone() }).collect());
             }
             return None;
         }
@@ -2021,8 +2194,8 @@ impl ClassConsts {
     pub(super) fn set_lexical_scope(
         &mut self,
         top_level: bool,
-        app_nested_names: std::collections::HashSet<String>,
-        app_top_level_names: std::collections::HashSet<String>,
+        app_nested_names: std::rc::Rc<std::collections::HashSet<String>>,
+        app_top_level_names: std::rc::Rc<std::collections::HashSet<String>>,
     ) {
         self.top_level = top_level;
         self.app_nested_names = app_nested_names;
@@ -2131,7 +2304,7 @@ impl ClassConsts {
     /// folded constants join this table's. A name both bodies write is
     /// refused by [`enum_constants::EnumConstants::owner_constant`]'s
     /// write count, whichever value this keeps.
-    fn merge(&mut self, other: ClassConsts) {
+    pub(super) fn merge(&mut self, other: ClassConsts) {
         self.scalars.extend(other.scalars);
         self.mappings.extend(other.mappings);
         self.labels.extend(other.labels);
@@ -2215,8 +2388,8 @@ impl ClassConsts {
     /// leaves the whole constant unresolved.
     fn interpolated_regex(&self, node: &Node<'_>) -> Option<(String, String)> {
         let ir = node.as_interpolated_regular_expression_node()?;
-        if ir.is_once()
-            || ir.is_euc_jp()
+        // Not refused for `/o`: every part below folds to a constant, which evaluating once or each time reads the same
+        if ir.is_euc_jp()
             || ir.is_windows_31j()
             || ir.is_utf_8()
             || ir.is_ascii_8bit()
@@ -2318,10 +2491,6 @@ impl ClassConsts {
         None
     }
 
-    /// Does the class body declare a `default_scope`?
-    pub(super) fn default_scoped(&self) -> bool {
-        self.default_scoped
-    }
 
     /// Integer arithmetic the class body can fold, as Ruby computes it:
     /// an Integer literal, a folded Integer constant, a parenthesized
@@ -2995,6 +3164,9 @@ fn parse_callback(
         "after_destroy_commit" => CallbackHook::AfterCommit,
         "after_save_commit" => CallbackHook::AfterSaveCommit,
         "after_rollback" => CallbackHook::AfterRollback,
+        // Only the block form was recognized; the symbol form fell
+        // through to a "not lowered" Unknown and the method never ran.
+        "after_initialize" => CallbackHook::AfterInitialize,
         _ => return None,
     };
     // The lifecycle the sugar spelling pins, which `push_symbol_callback`
@@ -3100,6 +3272,11 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
         return callback_condition(&inner, file);
     }
     if let Some(lambda) = value.as_lambda_node() {
+        // Rails calls a one-parameter condition with the record, which the spliced guard reads as `self`
+        if let Some(record) = record_parameter(lambda.parameters()) {
+            let body = simple_condition_body_with(None, lambda.body(), Some(&record))?;
+            return record_as_self(ingest_expr(&body, file).ok()?, &record);
+        }
         let body = simple_condition_body(lambda.parameters(), lambda.body())?;
         return ingest_expr(&body, file).ok();
     }
@@ -3178,6 +3355,53 @@ fn symbol_operator_value(node: &ruby_prism::Node<'_>) -> Option<String> {
 fn simple_condition_body<'pr>(
     params: Option<ruby_prism::Node<'pr>>,
     body: Option<ruby_prism::Node<'pr>>,
+) -> Option<ruby_prism::Node<'pr>> {
+    simple_condition_body_with(params, body, None)
+}
+
+/// `->(record) { … }`: the lambda's one required parameter, when it has
+/// no other.
+fn record_parameter(params: Option<ruby_prism::Node<'_>>) -> Option<String> {
+    let bp = params?.as_block_parameters_node()?;
+    if bp.locals().iter().next().is_some() {
+        return None;
+    }
+    let pn = bp.parameters()?;
+    let requireds: Vec<_> = pn.requireds().iter().collect();
+    let [only] = requireds.as_slice() else { return None };
+    if pn.optionals().iter().next().is_some()
+        || pn.rest().is_some()
+        || pn.posts().iter().next().is_some()
+        || pn.keywords().iter().next().is_some()
+        || pn.keyword_rest().is_some()
+        || pn.block().is_some()
+    {
+        return None;
+    }
+    Some(constant_id_str(&only.as_required_parameter_node()?.name()).to_string())
+}
+
+/// The guard with each read of the record parameter as `self`; `None`
+/// when a nested block or lambda binds that name again.
+fn record_as_self(mut expr: Expr, record: &str) -> Option<Expr> {
+    fn swap(e: &mut Expr, record: &str) {
+        if matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == record) {
+            *e.node = ExprNode::SelfRef;
+            return;
+        }
+        e.node.for_each_child_mut(&mut |c| swap(c, record));
+    }
+    if crate::lower::rebinds_local(&expr, record) {
+        return None;
+    }
+    swap(&mut expr, record);
+    Some(expr)
+}
+
+fn simple_condition_body_with<'pr>(
+    params: Option<ruby_prism::Node<'pr>>,
+    body: Option<ruby_prism::Node<'pr>>,
+    record: Option<&str>,
 ) -> Option<ruby_prism::Node<'pr>> {
     if let Some(p) = params {
         let bp = p.as_block_parameters_node()?;
@@ -3307,7 +3531,7 @@ fn simple_condition_body<'pr>(
             self.bad = true;
         }
     }
-    let mut v = Escapes { bad: false, bound: Vec::new() };
+    let mut v = Escapes { bad: false, bound: record.map(|r| vec![r.to_string()]).unwrap_or_default() };
     ruby_prism::Visit::visit(&mut v, &only);
     if v.bad { None } else { Some(only) }
 }
@@ -3589,7 +3813,14 @@ fn parse_association(
                 "dependent" => {
                     dependent = symbol_value(&value).and_then(|s| dependent_from_sym(&s))
                 }
-                "optional" => optional = bool_value(&value),
+                // Rails reads `optional:` for its truth: a lambda or a
+                // Symbol is optional, whatever it would return. Only a
+                // `false` or `nil` literal, parenthesized or not, keeps
+                // the association required.
+                "optional" => {
+                    let value = single_parenthesized(&value).unwrap_or(value);
+                    optional = Some(bool_value(&value).unwrap_or_else(|| value.as_nil_node().is_none()))
+                }
                 // `touch: true` / `touch: :last_message_at`. A `false`
                 // is Rails' explicit opt-out and reads as no touch,
                 // which is what `None` already means.
@@ -3621,6 +3852,24 @@ fn parse_association(
                         })
                         .and_then(|l| l.body())
                         .and_then(|b| ingest_expr(&b, file).ok());
+                }
+                // Options that change what Rails does and that nothing here
+                // models: reported rather than dropped silently.
+                "index_errors" | "counter_cache" | "validate" | "required" | "before_add" | "after_add"
+                | "before_remove" | "after_remove" | "ensuring_owner_was" => {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: el.location().start_offset() as u32,
+                        end: el.location().end_offset() as u32,
+                    };
+                    let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                        span,
+                        None,
+                        format!("{method} :{name_str}, {key}:"),
+                        "this association option is not modelled and is ignored",
+                    );
+                    diagnostic.severity = crate::diagnostic::Severity::Warning;
+                    super::prism::push(diagnostic);
                 }
                 _ => {}
             }
@@ -3948,9 +4197,17 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
 /// — validations and analysis both need to see that. The primary key
 /// is excluded (the INSERT assigns it and every hydration path treats
 /// it as present). Twin of `lower::model_to_library::ty_of_column_slot`;
-/// keep them in sync, same as the `ty_of_column` pair below.
-fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
-    let base = ty_of_column(&col.col_type);
+/// keep them in sync, same as the `ty_of_column` pair below. A
+/// PostgreSQL array column (`array: true`) is typed `Array[<element>]`
+/// only where the target stores the Array (`Column::array_stored`, set by
+/// `lower::array_columns`). Elsewhere it stays its element: the analysis
+/// feeds the lowered targets' method dispatch, and their storage holds one
+/// element (`project::report_array_columns`).
+pub(crate) fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
+    let mut base = ty_of_column(&col.col_type);
+    if col.array_stored {
+        base = Ty::Array { elem: base.into() };
+    }
     if col.nullable && !col.primary_key {
         Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
@@ -3980,7 +4237,7 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // Array, Hash, scalar, or nil, so neither String nor one fixed
         // container type is honest. The emitted model keeps serialized
         // text in its DB slot and decodes/encodes at the public accessor
-        // boundary (`JsonColumn`); analysis uses the deliberate gradual
+        // boundary (`RoundhouseJsonColumn`); analysis uses the deliberate gradual
         // type. A `has_json` declaration adds its stronger per-key schema
         // separately in `lower::has_json`.
         ColumnType::Json | ColumnType::Jsonb => Ty::Untyped,

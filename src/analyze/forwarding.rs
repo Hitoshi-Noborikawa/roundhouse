@@ -756,19 +756,48 @@ fn has_source_packet(args: &[Expr]) -> bool {
     })
 }
 
+/// A constant's written name: `::Shop::Refund` is `Shop::Refund` (the leading
+/// `::` is an empty first segment, not part of the name).
+fn constant_spelling(expr: &Expr) -> Option<String> {
+    let ExprNode::Const { path } = &*expr.node else {
+        return None;
+    };
+    Some(
+        path.iter()
+            .map(|p| p.as_str())
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join("::"),
+    )
+}
+
+/// Whether a constant spells `class` or a `::`-suffix of it: its written
+/// name (`constant_spelling`) is the whole class name, or what follows a
+/// `::` in it. Matched from the end, so nothing is built per class asked.
 fn constant_names_class(expr: &Expr, class: &ClassId) -> bool {
     let ExprNode::Const { path } = &*expr.node else {
         return false;
     };
-    // `::Shop::Refund` names `Shop::Refund`: the leading `::` is an empty
-    // first segment, not part of the name.
-    let spelling = path
+    let mut rest = class.0.as_str();
+    let mut segments = path
         .iter()
         .map(|p| p.as_str())
         .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join("::");
-    class.0.as_str() == spelling || class.0.as_str().ends_with(&format!("::{spelling}"))
+        .rev()
+        .peekable();
+    while let Some(segment) = segments.next() {
+        let Some(before) = rest.strip_suffix(segment) else {
+            return false;
+        };
+        rest = before;
+        if segments.peek().is_some() {
+            let Some(before) = rest.strip_suffix("::") else {
+                return false;
+            };
+            rest = before;
+        }
+    }
+    rest.is_empty() || rest.ends_with("::")
 }
 
 /// Narrow source-side provenance: a built-in constructor, or its single
@@ -855,6 +884,13 @@ struct SourceContractIndex<'a> {
     modules: HashSet<ClassId>,
     data_factories: HashSet<ClassId>,
     unmodeled_constructor_lookup: HashSet<ClassId>,
+    /// The owners whose class-side `new` itself may be replaced: the part
+    /// of `unmodeled_constructor_lookup` an own `initialize` cannot
+    /// shadow (`constructor::index_unmodeled_lookup_mutations`).
+    unmodeled_new_lookup: HashSet<ClassId>,
+    /// Owners whose own plain `initialize` shadows any a mixin supplies
+    /// (`constructor::shadows_supplied_initialize`).
+    shadowing_initializers: HashSet<ClassId>,
     fragments: HashMap<ClassId, usize>,
     instance: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     class: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
@@ -879,6 +915,8 @@ impl<'a> SourceContractIndex<'a> {
             modules: HashSet::new(),
             data_factories: HashSet::new(),
             unmodeled_constructor_lookup: HashSet::new(),
+            unmodeled_new_lookup: HashSet::new(),
+            shadowing_initializers: HashSet::new(),
             fragments: HashMap::new(),
             instance: HashMap::new(),
             class: HashMap::new(),

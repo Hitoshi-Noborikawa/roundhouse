@@ -20,6 +20,7 @@ use crate::dialect::{
 };
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
+use crate::span::Span;
 use crate::schema::Schema;
 use crate::ty::Ty;
 
@@ -61,6 +62,17 @@ pub struct ConcernGuardedItem {
 
 /// The top-level IR: a Rails application as data. This is the serializable
 /// deliverable — the thing ingesters produce and emitters consume.
+
+/// A `validates` call kept for its custom keys (`ingest::each_validator`):
+/// the model, the call's span and source text, and each key with the app
+/// `EachValidator` class it names.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EachValidatorCall {
+    pub model: ClassId,
+    pub span: Span,
+    pub text: String,
+    pub keys: Vec<(String, String)>,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct App {
@@ -286,6 +298,11 @@ pub struct App {
     /// the fallback when it names no URL. Other keys are not read.
     #[serde(default, skip_serializing_if = "SidekiqRedisConfig::is_empty")]
     pub sidekiq_redis: SidekiqRedisConfig,
+    /// The worker's defaults from `config/sidekiq.yml` (concurrency,
+    /// timeout, queues), read at ingest by `ingest::sidekiq_yml`. The
+    /// worker's own `-c`, `-t` and `-q` win over them.
+    #[serde(default, skip_serializing_if = "SidekiqWorkerDefaults::is_empty")]
+    pub sidekiq_worker: SidekiqWorkerDefaults,
     /// Model names whose attachment sgid the app resolves even when
     /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
     /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
@@ -418,6 +435,16 @@ pub struct App {
     /// kept mixin supplies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_filters: Vec<InitializerFilter>,
+    /// The names a host initializer `def`s at its top level: methods on
+    /// Object, which the emitted app does not define.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initializer_defs: Vec<crate::ident::Symbol>,
+    /// Installed gems compiled from source because the app's code needs
+    /// them and nothing models or ports them (`ingest::auto_source_gems`).
+    /// The Spinel tree carries their code; the ruby family loads the real
+    /// gem instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_source_gems: Vec<String>,
     /// `X.after_action(only: …) { response.set_header(k, v) }` from a
     /// `config/initializers/` file, bare or inside `ActiveSupport.on_load`:
     /// campfire marks the disk service's file responses cacheable this
@@ -567,6 +594,13 @@ pub struct App {
     /// this is the only record that an includer's reader `x` is replaced.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_included_redefs: HashMap<ClassId, Vec<Symbol>>,
+    /// `validates_with` calls an STI subclass declares, moved onto its
+    /// model ancestor's body (`ingest::sti_validations`): each call's
+    /// position and the subclass, whose `is_a?` guards the `validate` the
+    /// call expands into. A list, not a map keyed by the position: JSON
+    /// takes only string keys, and the ingested App round-trips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validates_with_guards: Vec<ValidatesWithGuard>,
     /// Classes that were `ActiveSupport::CurrentAttributes` subclasses
     /// before `ingest::current_attributes` flattened them. Recorded
     /// because that pass CLEARS the parent — nothing downstream could
@@ -611,6 +645,17 @@ pub struct App {
     /// Read by `lower::controller_to_library::params_wrapper`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wrap_parameters_by_default: bool,
+    /// The target's runtime defines `ActiveModel::Validator`
+    /// (`runtime/ruby/active_model_validator.rb`, the ruby family), so a
+    /// `validates_with` class keeps its base instead of being dropped as
+    /// an unported Rails subclass. Set by `session::analyze_and_lower_for`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ports_active_model_validator: bool,
+    /// The `validates` calls whose custom keys each name an app
+    /// `EachValidator` (`ingest::each_validator`), which each target
+    /// expands or reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub each_validator_calls: Vec<EachValidatorCall>,
     /// Rubydex answers for `sources`, resolved while ingest finished.
     /// The analyzer resolves the sources itself when this is absent.
     #[serde(skip)]
@@ -1024,6 +1069,12 @@ impl App {
             .map(|(m, set)| (m, set.into_iter().next().unwrap()))
             .collect()
     }
+    /// The path a span's file was read from (`sources[n - 1]`), for an app
+    /// whose ingest has finished; `None` for the synthetic `FileId(0)`.
+    pub fn source_path(&self, file: crate::span::FileId) -> Option<&str> {
+        (file.0 as usize).checked_sub(1).and_then(|i| self.sources.get(i)).map(|s| s.path.as_str())
+    }
+
     pub const SCHEMA_VERSION: u32 = 1;
 
     pub fn new() -> Self {
@@ -1065,6 +1116,7 @@ impl App {
             job_plans: Vec::new(),
             queue_adapter: None,
             sidekiq_redis: SidekiqRedisConfig::default(),
+            sidekiq_worker: SidekiqWorkerDefaults::default(),
             attachable_unsigned_models: Vec::new(),
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
@@ -1079,6 +1131,8 @@ impl App {
             rake_tasks_source: None,
             rake_task_gaps: Vec::new(),
             initializer_filters: Vec::new(),
+            initializer_defs: Vec::new(),
+            auto_source_gems: Vec::new(),
             initializer_response_headers: Vec::new(),
             collection_cache_store: None,
             app_requires: Vec::new(),
@@ -1096,12 +1150,15 @@ impl App {
             concern_model_items: HashMap::new(),
             concern_guarded_items: HashMap::new(),
             concern_included_redefs: HashMap::new(),
+            validates_with_guards: Vec::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),
             view_feeders: HashMap::new(),
             controller_resolutions: HashMap::new(),
             sources: Vec::new(),
             wrap_parameters_by_default: false,
+            ports_active_model_validator: false,
+            each_validator_calls: Vec::new(),
             const_resolver: Default::default(),
             source_index_required: false,
             root: String::new(),
@@ -1161,6 +1218,22 @@ impl SidekiqRedisConfig {
     }
 }
 
+/// `config/sidekiq.yml`'s literal worker settings: each `None` (or the
+/// queues empty) when the file doesn't give it in a form ingest reads.
+/// A queue's weight is 0 when it has none.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SidekiqWorkerDefaults {
+    pub concurrency: Option<i64>,
+    pub timeout: Option<i64>,
+    pub queues: Vec<(String, i64)>,
+}
+
+impl SidekiqWorkerDefaults {
+    pub fn is_empty(&self) -> bool {
+        self.concurrency.is_none() && self.timeout.is_none() && self.queues.is_empty()
+    }
+}
+
 /// A Redis setting's value, in the forms ingest reads: a String literal,
 /// `ENV["NAME"]`, or `ENV.fetch("NAME")` with or without a String
 /// default. The emitted runtime reads the variable when it first pushes.
@@ -1169,4 +1242,13 @@ pub enum RedisSetting {
     Literal(String),
     Env(String),
     EnvFetch { name: String, default: Option<String> },
+}
+
+/// A `validates_with` an STI subclass declares, by its call's position
+/// (file id and start offset), and that subclass (`App::validates_with_guards`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatesWithGuard {
+    pub file: u32,
+    pub start: u32,
+    pub class: String,
 }

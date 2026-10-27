@@ -7,16 +7,49 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+#[path = "support/pundit_app.rs"]
+mod pundit_app;
 #[path = "emit_and_run/session_cookie_key.rs"]
 mod session_cookie_key;
+#[path = "emit_and_run/inertia_runtime_props.rs"]
+mod inertia_runtime_props;
+#[path = "emit_and_run/form_builder_fields.rs"]
+mod form_builder_fields;
+#[path = "emit_and_run/multiparameter_params.rs"]
+mod multiparameter_params;
+#[path = "emit_and_run/session_options_key.rs"]
+mod session_options_key;
+#[path = "emit_and_run/httpdate_from_now.rs"]
+mod httpdate_from_now;
+#[path = "emit_and_run/cookie_jar_each.rs"]
+mod cookie_jar_each;
+#[path = "emit_and_run/create_block.rs"]
+mod create_block;
+#[path = "emit_and_run/active_model_attribute_alias.rs"]
+mod active_model_attribute_alias;
 #[path = "emit_and_run/active_model_attributes.rs"]
 mod active_model_attributes;
+#[path = "emit_and_run/active_model_attributes_form.rs"]
+mod active_model_attributes_form;
+#[path = "emit_and_run/association_query_arguments.rs"]
+mod association_query_arguments;
+#[path = "emit_and_run/active_model_superclass.rs"]
+mod active_model_superclass;
 #[path = "emit_and_run/arel_nodes.rs"]
 mod arel_nodes;
+#[path = "emit_and_run/permit_private_writer.rs"]
+mod permit_private_writer;
 #[path = "emit_and_run/database_tasks.rs"]
 mod database_tasks;
 #[path = "emit_and_run/framework_exceptions.rs"]
 mod framework_exceptions;
+#[path = "emit_and_run/active_storage_exceptions.rs"]
+mod active_storage_exceptions;
+#[path = "emit_and_run/rescue_surface.rs"]
+mod rescue_surface;
 #[path = "emit_and_run/preloader_runtime.rs"]
 mod preloader_runtime;
 #[path = "emit_and_run/framework_surface_rest.rs"]
@@ -29,22 +62,42 @@ mod interval_columns;
 mod branch_local_join;
 #[path = "emit_and_run/utc_zone_time.rs"]
 mod utc_zone_time;
+#[path = "emit_and_run/rspec_specs.rs"]
+mod rspec_specs;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
+#[path = "emit_and_run/callback_abort.rs"]
+mod callback_abort;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
+#[path = "emit_and_run/constantize_by_name.rs"]
+mod constantize_by_name;
 #[path = "emit_and_run/ancestry_source.rs"]
 mod ancestry_source;
+#[path = "emit_and_run/acts_as_follower_source.rs"]
+mod acts_as_follower_source;
+#[path = "emit_and_run/hook_macro_source.rs"]
+mod hook_macro_source;
+#[path = "emit_and_run/model_callbacks.rs"]
+mod model_callbacks;
 #[path = "emit_and_run/gem_class_macros.rs"]
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "support/auto_source_gem.rs"]
+mod auto_source_gem_contract;
+#[path = "emit_and_run/auto_source_gem.rs"]
+mod auto_source_gem;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]
 mod net_http_patch;
+#[path = "emit_and_run/stdlib_psych_rexml_erb.rs"]
+mod stdlib_psych_rexml_erb;
 #[path = "emit_and_run/temporal_index_assign.rs"]
 mod temporal_index_assign;
+#[path = "emit_and_run/file_mtime_time.rs"]
+mod file_mtime_time;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/string_truncate.rs"]
@@ -89,6 +142,14 @@ mod helper_translate;
 mod helper_escape;
 #[path = "emit_and_run/helper_escape_args.rs"]
 mod helper_escape_args;
+#[path = "emit_and_run/controller_view_assigns.rs"]
+mod controller_view_assigns;
+#[path = "emit_and_run/controller_test_case.rs"]
+mod controller_test_case;
+#[path = "emit_and_run/assert_recognizes.rs"]
+mod assert_recognizes;
+#[path = "emit_and_run/assert_routing.rs"]
+mod assert_routing;
 #[path = "emit_and_run/class_new_constants.rs"]
 mod class_new_constants;
 #[path = "emit_and_run/i18n_subtree.rs"]
@@ -125,12 +186,26 @@ mod stdlib_rnp_contract;
 mod stdlib_rnp;
 #[path = "support/erb_template.rs"]
 mod erb_template_contract;
+#[path = "support/bare_permit.rs"]
+mod bare_permit_contract;
+#[path = "support/data_paths.rs"]
+mod data_paths_contract;
+#[path = "support/eager_load_filter.rs"]
+mod eager_load_filter_contract;
+#[path = "emit_and_run/data_paths.rs"]
+mod data_paths;
+#[path = "emit_and_run/bare_permit.rs"]
+mod bare_permit;
 #[path = "emit_and_run/erb_template.rs"]
 mod erb_template;
 #[path = "support/representable_decorator.rs"]
 mod representable_decorator;
 #[path = "emit_and_run/representable.rs"]
 mod representable;
+#[path = "support/active_model_serializer.rs"]
+mod active_model_serializer_app;
+#[path = "emit_and_run/active_model_serializer.rs"]
+mod active_model_serializer;
 #[path = "emit_and_run/instance_extend.rs"]
 mod instance_extend;
 
@@ -164,6 +239,10 @@ mod cable_actions_contract;
 mod cable_actions;
 #[path = "support/cable_broadcast_json.rs"]
 mod cable_broadcast_json_contract;
+#[path = "support/cable_transmit.rs"]
+mod cable_transmit_contract;
+#[path = "emit_and_run/cable_transmit.rs"]
+mod cable_transmit;
 #[path = "emit_and_run/cable_broadcast_json.rs"]
 mod cable_broadcast_json;
 #[path = "support/index_with.rs"]
@@ -204,6 +283,8 @@ mod relation_projections;
 mod pluck_projection_semantics;
 #[path = "emit_and_run/response_redirect.rs"]
 mod response_redirect;
+#[path = "emit_and_run/api_response_fidelity.rs"]
+mod api_response_fidelity;
 #[path = "emit_and_run/constructor_unrelated_mutations.rs"]
 mod constructor_unrelated_mutations;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
@@ -262,6 +343,8 @@ mod inline_filter_guard;
 mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
+#[path = "emit_and_run/global_id_app.rs"]
+mod global_id_app;
 #[path = "support/campfire_caches.rs"]
 mod campfire_caches_contract;
 #[path = "emit_and_run/campfire_caches.rs"]
@@ -270,6 +353,8 @@ mod campfire_caches;
 mod action_text_markdown;
 #[path = "emit_and_run/ordinalize.rs"]
 mod ordinalize;
+#[path = "emit_and_run/float_round_digits.rs"]
+mod float_round_digits;
 #[path = "emit_and_run/autoload_once_paths.rs"]
 mod autoload_once_paths;
 #[path = "emit_and_run/config_require_relative.rs"]
@@ -288,6 +373,14 @@ mod validates_options;
 mod validates_uniqueness;
 #[path = "emit_and_run/validates_inclusion_constants.rs"]
 mod validates_inclusion_constants;
+#[path = "emit_and_run/uniqueness_default_scoped.rs"]
+mod uniqueness_default_scoped;
+#[path = "emit_and_run/uniqueness_association_attribute.rs"]
+mod uniqueness_association_attribute;
+#[path = "emit_and_run/default_scope_static.rs"]
+mod default_scope_static;
+#[path = "emit_and_run/default_scope_dynamic.rs"]
+mod default_scope_dynamic;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]
@@ -310,6 +403,10 @@ mod validates_rule_on;
 mod validates_presence_allow_nil;
 #[path = "emit_and_run/validates_custom_message.rs"]
 mod validates_custom_message;
+#[path = "emit_and_run/presence_rails_blank.rs"]
+mod presence_rails_blank;
+#[path = "emit_and_run/allow_blank_unicode_space.rs"]
+mod allow_blank_unicode_space;
 #[path = "emit_and_run/regex_string_interpolation.rs"]
 mod regex_string_interpolation;
 #[path = "emit_and_run/format_allow_nil_blank.rs"]
@@ -320,6 +417,16 @@ mod format_value_to_s;
 mod validates_acceptance;
 #[path = "emit_and_run/attribute_api_boolean_cast.rs"]
 mod attribute_api_boolean_cast;
+#[path = "emit_and_run/hash_fetch_one_arg.rs"]
+mod hash_fetch_one_arg;
+#[path = "emit_and_run/numericality_unknown_option.rs"]
+mod numericality_unknown_option;
+#[path = "emit_and_run/belongs_to_nil_writer.rs"]
+mod belongs_to_nil_writer;
+#[path = "emit_and_run/inclusion_duration_literals.rs"]
+mod inclusion_duration_literals;
+#[path = "emit_and_run/validates_constant_splat.rs"]
+mod validates_constant_splat;
 #[path = "emit_and_run/cross_class_constants.rs"]
 mod cross_class_constants;
 #[path = "emit_and_run/regex_literal_hash_guard.rs"]
@@ -5642,6 +5749,198 @@ end
         .assert_passes();
 }
 
+/// The positional `Result = Struct.new(:a, :b)` in a class body is the
+/// class it defines too: members in order, a missing one nil, writers,
+/// and the methods its block adds. Expected values are Ruby's own.
+#[test]
+fn a_positional_struct_constant_runs_as_its_class() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            r#"class PhoneCheck
+  Normalized = Struct.new(:number, :valid, :error)
+  Point = Struct.new(:x, :y) do
+    def sum
+      x + y
+    end
+  end
+
+  def self.call(raw)
+    return Normalized.new(nil, false, "blank") if raw.empty?
+    Normalized.new(raw.delete("-"), true)
+  end
+
+  def self.point
+    Point.new(1, 2)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"ok = PhoneCheck.call("912-345")
+raise ok.to_s unless ok.number == "912345" && ok.valid == true && ok.error.nil?
+bad = PhoneCheck.call("")
+raise bad.to_s unless bad.number.nil? && bad.valid == false && bad.error == "blank"
+point = PhoneCheck.point
+point.y = 40
+raise point.sum.to_s unless point.sum == 41"#,
+        )
+        .assert_passes();
+}
+
+/// `CONST.each do |k[, v]| define_method(…) { … } end` over a literal
+/// constant is the `def`s it makes: an Array's names, a Hash's names and
+/// values (read back from the constant), instance and class side, and a
+/// literal Array written in place. Expected values are Ruby's own.
+#[test]
+fn define_method_loops_over_literal_constants_run() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/labels.rb",
+            r##"class Labels
+  KINDS = %i[draft live].freeze
+  PREFIXES = { short: "S", long: "L" }.freeze
+
+  KINDS.each do |kind|
+    define_method(:"#{kind}?") do
+      @kind == kind
+    end
+  end
+
+  %w[red blue].each do |color|
+    define_method("#{color}_label") do |text|
+      "#{color}:#{text}"
+    end
+  end
+
+  class << self
+    PREFIXES.each do |slug, prefix|
+      define_method(:"#{slug}_prefix") do
+        "#{prefix}-#{slug}"
+      end
+    end
+  end
+
+  def initialize(kind)
+    @kind = kind
+  end
+end
+"##,
+        )
+        .run_ruby(
+            r##"draft = Labels.new(:draft)
+raise "draft?" unless draft.draft? && !draft.live?
+raise draft.red_label("x") unless draft.red_label("x") == "red:x" && draft.blue_label(1) == "blue:1"
+raise Labels.short_prefix unless Labels.short_prefix == "S-short" && Labels.long_prefix == "L-long""##,
+        )
+        .assert_passes();
+}
+
+/// Since Ruby 3.2 a positional Struct also takes keywords, by member name,
+/// which the emitted positional constructor would bind to its first
+/// member: refused. A block defining its own `initialize` is not read as
+/// the class at all: its `super` reaches the Struct parent in Ruby, which
+/// the synthesized class does not have.
+#[test]
+fn a_positional_struct_constant_refuses_keyword_construction() {
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid)\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
+
+    // `keyword_init: false` written out: Ruby passes the keywords as one Hash
+    // to the first member, which inference does not model: refused too.
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid, keyword_init: false)\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
+
+    // A subclass with a class-side `new` of its own decides what `new` takes.
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid)\n\n  class Named < Normalized\n    def self.new(number:, valid:)\n      super(number, valid)\n    end\n  end\n\n  def self.call(raw)\n    Named.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(!errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
+
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid) do\n    def initialize(number:, valid:)\n      super(number, valid)\n    end\n  end\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(!errors.is_empty(), "a Struct block with its own initialize checked clean");
+}
+
+/// The same loop in a concern's `included do class << self … end` is the
+/// includer's class methods, beside the block's plain `def`s.
+#[test]
+fn define_method_loops_in_an_included_class_body_reach_the_includer() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/lookups.rb",
+            r##"module Lookups
+  extend ActiveSupport::Concern
+
+  MAP = { short: "S", long: "L" }.freeze
+
+  included do
+    class << self
+      MAP.each do |slug, value|
+        define_method(:"#{slug}_code") do
+          "#{value}#{value}"
+        end
+      end
+
+      def plain
+        "p"
+      end
+    end
+  end
+end
+"##,
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Lookups\n")
+        .run_ruby(r##"raise [Article.short_code, Article.long_code, Article.plain].inspect unless [Article.short_code, Article.long_code, Article.plain] == ["SS", "LL", "p"]"##)
+        .assert_passes();
+}
+
+/// A loop whose body the substitution cannot keep is not unrolled: no
+/// `def` is invented for it.
+#[test]
+fn define_method_loops_the_substitution_cannot_keep_are_not_unrolled() {
+    for body in [
+        // writes the loop parameter
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind = :other\n      kind\n    end\n  end",
+        // reads a local outside the loop
+        "suffix = \"!\"\n  KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      suffix\n    end\n  end",
+        // yields the defining method's block
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      yield\n    end\n  end",
+        // a constant whose value is not a literal
+        "LIST.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind\n    end\n  end",
+        // `next` at the block's own level does not parse inside a `def`
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      next false if kind == :draft\n      true\n    end\n  end",
+        // a named visibility marker sets a generated method's visibility
+        "def draft?\n    true\n  end\n\n  KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind\n    end\n  end\n  private :draft?",
+    ] {
+        let (emitted, _errors) = emit_and_run::real_blog()
+            .write(
+                "app/services/labels.rb",
+                &format!("class Labels\n  KINDS = %i[draft live].freeze\n  LIST = KINDS.map(&:itself)\n\n  {body}\nend\n"),
+            )
+            .emit(roundhouse::project::BuildTarget::Ruby);
+        let labels = std::fs::read_to_string(emitted.join("app/models/labels.rb")).expect("labels.rb");
+        assert!(!labels.contains("def live?"), "{body}:\n{labels}");
+    }
+}
+
 /// `Float#to_d` / `Integer#to_d` build a BigDecimal without
 /// `bigdecimal/util`, and the decimal arithmetic after them runs:
 /// Float and Integer operands, comparison, `round`, and `floor`/`ceil`
@@ -7506,6 +7805,53 @@ puts "sanitize_sql_array passed"
         .assert_passes();
 }
 
+/// `sanitize_sql_for_order` on a String is the fragment as written, and
+/// orders a relation through `Arel.sql`.
+#[test]
+fn sanitize_sql_for_order_is_supported() {
+    sanitize_sql_array_app()
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.quoted(value)
+    ActiveRecord::Base.sanitize_sql_array(["SELECT ? AS v", value])
+  end
+
+  def self.by_fragment
+    order(Arel.sql(ActiveRecord::Base.sanitize_sql_for_order("length(name) DESC"))).map(&:name)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+%w[bb a ccc].each { |n| Widget.create!(name: n) }
+raise Widget.by_fragment.inspect unless Widget.by_fragment == %w[ccc bb a]
+"#,
+        )
+        .assert_passes();
+}
+
+/// Rails' Array form of `sanitize_sql_for_order` is not modeled: Rails 8.1
+/// raises for a `?` fragment there. It keeps a refusal at check.
+#[test]
+fn sanitize_sql_for_order_refuses_the_array_form() {
+    // On Base, and on a model through implicit self.
+    for receiver in ["ActiveRecord::Base.", ""] {
+        let errors = sanitize_sql_array_app()
+            .edit(
+                "app/models/widget.rb",
+                "class Widget < ApplicationRecord\n",
+                &format!("class Widget < ApplicationRecord\n  def self.first_named(name)\n    order(Arel.sql({receiver}sanitize_sql_for_order([\"CASE WHEN name = ? THEN 0 ELSE 1 END\", name])))\n  end\n"),
+            )
+            .check_errors();
+        assert!(
+            errors.iter().any(|e| e.contains("sanitize_sql_for_order is modeled on a String only")),
+            "{receiver:?}: {errors:?}"
+        );
+    }
+}
+
 /// Relation#ids must preserve uuid / named string keys (#310).
 fn relation_ids_uuid_app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
@@ -9177,6 +9523,153 @@ fn a_concern_included_from_an_included_block_reaches_the_model() {
         .assert_passes();
 }
 
+/// real-blog with `ApplicationController` including the `Outer` concern
+/// (`outer`), the extra concern files in `modules`, and a
+/// `StampedController` (`body`) at `/stamped/:id` and `/stamped/:id/plain`.
+fn controller_concern_app(outer: &str, modules: &[(&str, &str)], body: &str, test: &str) -> emit_and_run::Overlay {
+    let mut app = emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/stamped/:id\", to: \"stamped#show\"\n  get \"/stamped/:id/plain\", to: \"stamped#plain\"\n",
+        )
+        .write("app/controllers/concerns/outer.rb", outer)
+        .edit(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n",
+            "class ApplicationController < ActionController::Base\n  include Outer\n",
+        )
+        .write("app/controllers/stamped_controller.rb", body)
+        .write(
+            "test/controllers/stamped_controller_test.rb",
+            &format!("require \"test_helper\"\n\nclass StampedControllerTest < ActionDispatch::IntegrationTest\n{test}end\n"),
+        );
+    for (path, source) in modules {
+        app = app.write(path, source);
+    }
+    app
+}
+
+/// `Outer`'s `included do` includes `Guard`, the way action_policy's setup
+/// includes `ActionPolicy::Controller`. The controller gets `Guard`'s
+/// method, and `Guard`'s `class_methods` filter macro runs.
+#[test]
+fn a_concern_included_from_an_included_block_reaches_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/guard.rb",
+            "module Guard\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"guarded\"\n  end\n\n  def stamp\n    @stamp = \"stamped\"\n  end\n\n  class_methods do\n    def stamp_before(**options)\n      before_action :stamp, options\n    end\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  stamp_before only: :show\n\n  def show\n    render plain: \"#{guarded_title} #{@stamp}\"\n  end\n\n  def plain\n    render plain: \"#{guarded_title} #{@stamp.inspect}\"\n  end\nend\n",
+        "  test \"Guard's method and filter macro reach the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"guarded stamped\", response.body\n    get \"/stamped/2/plain\"\n    assert_equal \"guarded nil\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `Guard` sits ahead of `Outer`, so its `guarded_title` wins, as in Ruby.
+#[test]
+fn an_include_from_an_included_block_takes_precedence_on_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\n\n  def guarded_title\n    \"outer\"\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/guard.rb",
+            "module Guard\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"guard\"\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"Guard's method wins over Outer's\" do\n    get \"/stamped/1\"\n    assert_equal \"guard\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `include First, Second` in an `included do` block puts `First` ahead
+/// of `Second`, as Ruby does, so `First`'s `guarded_title` wins.
+#[test]
+fn a_multi_module_include_in_an_included_block_keeps_its_order_on_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include First, Second\n  end\nend\n",
+        &[
+            (
+                "app/controllers/concerns/first.rb",
+                "module First\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"first\"\n  end\nend\n",
+            ),
+            (
+                "app/controllers/concerns/second.rb",
+                "module Second\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"second\"\n  end\nend\n",
+            ),
+        ],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"First's method wins over Second's\" do\n    get \"/stamped/1\"\n    assert_equal \"first\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `include Guard` written inside `module Outer` names `Outer::Guard`, as
+/// Ruby's lexical lookup finds it.
+#[test]
+fn an_included_block_include_resolves_in_its_concerns_namespace() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/outer/guard.rb",
+            "module Outer\n  module Guard\n    extend ActiveSupport::Concern\n\n    def guarded_title\n      \"namespaced\"\n    end\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"Outer::Guard's method reaches the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"namespaced\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// On a model too, `include Codes` written inside `module Signing` names
+/// `Signing::Codes`.
+#[test]
+fn an_included_block_include_resolves_in_its_concerns_namespace_on_the_model() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Codes\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  def shout\n    title.upcase\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"HI\"",
+        )
+        .assert_passes();
+}
+
+/// `Guard`'s own `included do` include, `Deep`, reaches the controller too.
+#[test]
+fn an_include_two_included_blocks_deep_reaches_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[
+            (
+                "app/controllers/concerns/guard.rb",
+                "module Guard\n  extend ActiveSupport::Concern\n\n  included do\n    include Deep\n  end\nend\n",
+            ),
+            (
+                "app/controllers/concerns/deep.rb",
+                "module Deep\n  extend ActiveSupport::Concern\n\n  def deep_title\n    \"deep\"\n  end\nend\n",
+            ),
+        ],
+        "class StampedController < ApplicationController\n  def show\n    render plain: deep_title\n  end\n\n  def plain\n    render plain: deep_title\n  end\nend\n",
+        "  test \"Deep's method reaches the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"deep\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
 /// Ruby's lookup order for a module included from `included do`: the
 /// block runs on the includer after the outer module is appended, so
 /// the inner module sits AHEAD of the outer one and its method wins.
@@ -9276,7 +9769,8 @@ fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
     for concern in [
         "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    def shout\n      \"block\"\n    end\n  end\n\n  def shout\n    \"module\"\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include Comparable\n    def shout\n      \"block\"\n    end\n  end\nend\n",
-        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { yield } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      private\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  class_methods do\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    def self.loud\n      \"block\"\n    end\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  module ClassMethods\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    class << self\n      def loud\n        \"block\"\n      end\n    end\n  end\nend\n",
     ] {
@@ -9851,6 +10345,78 @@ puts "ok"
         .assert_passes();
 }
 
+#[test]
+fn an_app_tag_helper_override_owns_helper_and_view_calls() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/tag_defaults.rb",
+            r#"module TagDefaults
+  def content_tag(name, text)
+    "default tag"
+  end
+
+  def safe_join(parts, separator)
+    separator
+  end
+end
+"#,
+        )
+        .write(
+            "app/helpers/application_helper.rb",
+            r#"module ApplicationHelper
+  include TagDefaults
+
+  def content_tag(name, text)
+    37
+  end
+
+  def override_value
+    content_tag(:span, "ignored") + 3
+  end
+end
+"#,
+        )
+        .write(
+            "app/views/articles/_custom_tag.html.erb",
+            "<%= content_tag(:span, \"ignored\").div(2) %>|<%= \"nested #{content_tag(:i, 'ignored') + 5}\" %>|<%= override_value %>|<%= safe_join([\"a\", \"b\"], 11).div(2) %>",
+        )
+        .run_ruby(
+            r#"raise "helper override lost" unless ApplicationHelper.override_value == 40
+raise "view override lost" unless Views::Articles.custom_tag(nil) == "18|nested 42|40|5"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn promoted_module_helpers_and_controller_helpers_keep_their_view_dispatch() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/bare_helper.rb",
+            "module BareHelper\n  module_function\n  def bare_value\n    17\n  end\nend\n",
+        )
+        .write(
+            "app/helpers/named_helper.rb",
+            "module NamedHelper\n  def named_value\n    19\n  end\n  module_function :named_value\nend\n",
+        )
+        .write(
+            "app/helpers/extended_helper.rb",
+            "module ExtendedHelper\n  extend self\n  def extended_value\n    23\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  helper_method :content_tag\n  def content_tag(name, text)\n    37\n  end\nend\n",
+        )
+        .write(
+            "app/views/articles/_helper_channels.html.erb",
+            "<%= bare_value.div(2) %>|<%= named_value.div(2) %>|<%= extended_value.div(2) %>|<%= content_tag(:span, \"ignored\").div(2) %>",
+        )
+        .run_ruby(
+            "raise \"helper dispatch lost\" unless Views::Articles.helper_channels(nil) == \"8|9|11|18\"\n",
+        )
+        .assert_passes();
+}
+
 /// #139 typed `Model.human_attribute_name` as a String, but no runtime
 /// defined it, so every page rendering the form raised `undefined method
 /// 'human_attribute_name' for class Article` (#147). A literal attribute
@@ -10111,6 +10677,37 @@ fn on_the_index(overlay: emit_and_run::Overlay, calls: &str, assertions: &str) -
         .edit(INDEX_VIEW, INDEX_HEADING, &format!("{INDEX_HEADING}\n{calls}"))
         .edit(CONTROLLER_TEST, INDEX_ASSERTION, &format!("{INDEX_ASSERTION}{assertions}"))
         .run_test(CONTROLLER_TEST)
+}
+
+/// A `tag.*` attribute whose value is a method call runs the call once,
+/// as Rails does: campfire's layout passes `href: fresh_account_logo_path`,
+/// which reads `Current.account` (a query) and formats a timestamp, and
+/// the emit's nil guard spelled the value twice, so each tag ran it twice.
+/// A value that answers nil still leaves the attribute out.
+#[test]
+fn a_tag_attribute_value_is_evaluated_once() {
+    let run = on_the_index(
+        emit_and_run::real_blog().write(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  \
+               CALLS = []\n\n  \
+               def counted_logo_path\n    \
+                 CALLS << 1\n    \
+                 \"/logo.png?v=1\"\n  \
+               end\n\n  \
+               def missing_logo_path\n    \
+                 CALLS << 1\n    \
+                 nil\n  \
+               end\n\
+             end\n",
+        ),
+        "<i id=\"once\"><%= tag.link rel: \"icon\", href: counted_logo_path %></i>\n\
+         <i id=\"nil\"><%= tag.link rel: \"apple-touch-icon\", href: missing_logo_path %></i>\n",
+        "    assert_match(/<i id=\"once\"><link rel=\"icon\" href=\"\\/logo.png\\?v=1\"><\\/i>/, response.body)\n    \
+             assert_match(/<i id=\"nil\"><link rel=\"apple-touch-icon\"><\\/i>/, response.body)\n    \
+             assert_equal 2, ApplicationHelper::CALLS.length\n",
+    );
+    run.assert_passes();
 }
 
 /// B1 in NEXUS_BUGS.md: a helper keyword named `class`, read with the
@@ -11768,6 +12365,180 @@ end
         .assert_passes();
 }
 
+/// #293: `classify`, `camelize` and `dasherize` were typed as Strings and
+/// emitted onto a String no runtime reopens, so the action answered 500.
+/// The request is the issue's own; `issue_inflections` repeats it outside
+/// a controller, `namespaced_inflections` adds the aliases, namespaces,
+/// a schema prefix and the remaining Inflector bodies, and
+/// `nullable_inflections` reads them on a `String | nil` receiver.
+fn string_inflections_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/widgets\", to: \"widgets#index\"\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  def index
+    kind = "gear_boxes"
+    render plain: [kind.classify, kind.camelize, kind.singularize, kind.humanize, kind.dasherize].join(" ")
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.issue_inflections
+    kind = "gear_boxes"
+    [kind.classify, kind.camelize, kind.singularize, kind.humanize, kind.dasherize].join(" ")
+  end
+
+  def self.namespaced_inflections
+    path = "admin/gear_boxes"
+    name = "Admin::GearBox"
+    [path.camelcase, path.classify, "shop.gear_boxes".classify, "gear_boxes".titlecase, path.dasherize,
+     name.deconstantize, name.foreign_key, "Admin::APIKey".foreign_key].join("|")
+  end
+
+  def self.nullable_path(flag)
+    flag ? "admin/gear_boxes" : nil
+  end
+
+  def self.nullable_name(flag)
+    flag ? "Admin::GearBox" : nil
+  end
+
+  def self.nullable_inflections
+    path = nullable_path(true)
+    name = nullable_name(true)
+    [path.camelize, path.classify, path.dasherize, name.deconstantize, name.foreign_key].join("|")
+  end
+
+  def self.nil_camelize
+    nullable_path(false).camelize
+  end
+
+  def self.nil_classify
+    nullable_path(false).classify
+  end
+
+  def self.nil_dasherize
+    nullable_path(false).dasherize
+  end
+
+  def self.nil_deconstantize
+    nullable_name(false).deconstantize
+  end
+
+  def self.nil_foreign_key
+    nullable_name(false).foreign_key
+  end
+
+  def self.nil_camelcase
+    nullable_path(false).camelcase
+  end
+
+  def self.nil_titlecase
+    nullable_path(false).titlecase
+  end"#,
+        )
+}
+
+/// Rails 8.1's answers (ActiveSupport 8.1.4).
+const ISSUE_INFLECTIONS: &str = "GearBox GearBoxes gear_box Gear boxes gear-boxes";
+const NAMESPACED_INFLECTIONS: &str =
+    "Admin::GearBoxes|Admin::GearBox|GearBox|Gear Boxes|admin/gear-boxes|Admin|gear_box_id|api_key_id";
+/// A `String | nil` receiver: the String arm answers, nil raises as in Rails.
+const NULLABLE_INFLECTIONS: &str = "Admin::GearBoxes|Admin::GearBox|admin/gear-boxes|Admin|gear_box_id";
+
+#[test]
+fn string_inflections_with_an_inflector_body_run() {
+    string_inflections_app()
+        .write(
+            "test/controllers/widgets_controller_test.rb",
+            &format!(
+                r#"require "test_helper"
+
+class WidgetsControllerTest < ActionDispatch::IntegrationTest
+  test "the inflections answer as ActiveSupport does" do
+    get "/widgets"
+    assert_equal "{ISSUE_INFLECTIONS}", response.body
+    assert_equal "{ISSUE_INFLECTIONS}", Article.issue_inflections
+    assert_equal "{NAMESPACED_INFLECTIONS}", Article.namespaced_inflections
+    assert_equal "{NULLABLE_INFLECTIONS}", Article.nullable_inflections
+    assert_equal "undefined method 'camelize' for nil", assert_raises(NoMethodError) {{ Article.nil_camelize }}.message
+    assert_equal "undefined method 'classify' for nil", assert_raises(NoMethodError) {{ Article.nil_classify }}.message
+    assert_equal "undefined method 'dasherize' for nil", assert_raises(NoMethodError) {{ Article.nil_dasherize }}.message
+    assert_equal "undefined method 'deconstantize' for nil", assert_raises(NoMethodError) {{ Article.nil_deconstantize }}.message
+    assert_equal "undefined method 'foreign_key' for nil", assert_raises(NoMethodError) {{ Article.nil_foreign_key }}.message
+    assert_equal "undefined method 'camelcase' for nil", assert_raises(NoMethodError) {{ Article.nil_camelcase }}.message
+    assert_equal "undefined method 'titlecase' for nil", assert_raises(NoMethodError) {{ Article.nil_titlecase }}.message
+  end
+end
+"#
+            ),
+        )
+        .run_test("test/controllers/widgets_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn string_inflections_with_an_inflector_body_run_on_spinel() {
+    let run = string_inflections_app().run_spinel(&format!(
+        r#"raise "issue: " + Article.issue_inflections unless Article.issue_inflections == "{ISSUE_INFLECTIONS}"
+raise "namespaced: " + Article.namespaced_inflections unless Article.namespaced_inflections == "{NAMESPACED_INFLECTIONS}"
+raise "nullable: " + Article.nullable_inflections unless Article.nullable_inflections == "{NULLABLE_INFLECTIONS}"
+def nil_message
+  yield
+  "nothing raised"
+rescue NoMethodError => e
+  e.message
+end
+raise "nil camelize" unless nil_message {{ Article.nil_camelize }} == "undefined method 'camelize' for nil"
+raise "nil classify" unless nil_message {{ Article.nil_classify }} == "undefined method 'classify' for nil"
+raise "nil dasherize" unless nil_message {{ Article.nil_dasherize }} == "undefined method 'dasherize' for nil"
+raise "nil deconstantize" unless nil_message {{ Article.nil_deconstantize }} == "undefined method 'deconstantize' for nil"
+raise "nil foreign_key" unless nil_message {{ Article.nil_foreign_key }} == "undefined method 'foreign_key' for nil"
+raise "nil camelcase" unless nil_message {{ Article.nil_camelcase }} == "undefined method 'camelcase' for nil"
+raise "nil titlecase" unless nil_message {{ Article.nil_titlecase }} == "undefined method 'titlecase' for nil"
+puts "string inflections passed"
+"#
+    ));
+    run.assert_passes();
+    assert!(run.stdout.contains("string inflections passed"), "{}", run.stdout);
+}
+
+/// #293: `tableize` needs Rails' plural rules, which the runtime does not
+/// carry (its `pluralize_word` keeps a word that ends in "s", where Rails
+/// answers "statuses"), and `strip_heredoc` has no runtime body. Both are
+/// refused at check time, not emitted onto a String no runtime reopens.
+#[test]
+fn string_extensions_without_a_runtime_body_are_refused() {
+    for (call, method) in [
+        (r#""Status".tableize"#, "tableize"),
+        (r#""  gear\n  boxes\n".strip_heredoc"#, "strip_heredoc"),
+    ] {
+        let errors = emit_and_run::real_blog()
+            .edit(
+                "app/models/article.rb",
+                "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+                &format!(
+                    "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n\n  def self.probe\n    {call}\n  end"
+                ),
+            )
+            .check_errors();
+        let gap = format!("{method} lacks a shared runtime/lowering implementation");
+        assert!(errors.iter().any(|e| e.contains(&gap)), "{method}: {errors:?}");
+    }
+}
+
 /// The exact inclusion bridge and its carrier can be in different
 /// reopenings. Consuming the bridge must follow the carrier's identity,
 /// not whether both declarations happened to share a source file.
@@ -11870,6 +12641,118 @@ raise "qualified bridge: #{Reading.label_text.inspect}" unless Reading.label_tex
 raise "hook body: #{Tracking::INCLUDERS.inspect}" unless Tracking::INCLUDERS == ["Reading"]
 "#)
         .assert_passes();
+}
+
+/// The same `included` hooks written inside the module's own
+/// `class << self`, as action_policy's policy modules do. Ruby runs
+/// `def included(base)` there exactly like `def self.included(base)`, so
+/// each includer gets the carrier's methods and the rest of the hook
+/// still runs.
+#[test]
+fn an_included_hook_in_class_self_that_extends_its_carrier_runs() {
+    emit_and_run::real_blog()
+        .write("app/services/factory.rb", r#"module Factory
+  class << self
+    def included(base)
+      base.extend ClassMethods
+    end
+  end
+
+  module ClassMethods
+    def build_label
+      "built " + name
+    end
+  end
+end
+"#)
+        .write("app/services/tracking.rb", r#"module Tracking
+  INCLUDERS = []
+
+  class << self
+    def included(base)
+      base.extend ClassMethods
+      INCLUDERS << base.name
+    end
+  end
+
+  module ClassMethods
+    def tracked_label
+      "tracked " + name
+    end
+  end
+end
+"#)
+        .write("app/services/reading.rb", r#"class Reading
+  include Factory
+  include Tracking
+end
+"#)
+        .run_ruby(r#"
+raise "bridge: #{Reading.build_label.inspect}" unless Reading.build_label == "built Reading"
+raise "carrier method: #{Reading.tracked_label.inspect}" unless Reading.tracked_label == "tracked Reading"
+raise "hook body: #{Tracking::INCLUDERS.inspect}" unless Tracking::INCLUDERS == ["Reading"]
+"#)
+        .assert_passes();
+}
+
+/// A `class << self` hook that opens `class << base` instead of extending
+/// a carrier, the same shape `included_hook_class_methods_run` covers for
+/// `def self.included`.
+#[test]
+fn an_included_hook_in_class_self_that_opens_the_includer_singleton_runs() {
+    emit_and_run::real_blog()
+        .write("app/services/factory.rb", r#"module Factory
+  class << self
+    def included(base)
+      class << base
+        def build_label
+          "built " + name
+        end
+      end
+    end
+  end
+end
+"#)
+        .write("app/services/reading.rb", "class Reading\n  include Factory\nend\n")
+        .write("app/services/reading_label.rb", "class ReadingLabel\n  def self.text = Reading.build_label.upcase\nend\n")
+        .run_ruby(r#"
+raise "includer method: #{Reading.build_label.inspect}" unless Reading.build_label == "built Reading"
+raise "typed caller: #{ReadingLabel.text.inspect}" unless ReadingLabel.text == "BUILT READING"
+"#)
+        .assert_passes();
+}
+
+/// The `class << self` bridge and its `ClassMethods` carrier in different
+/// reopenings, in either file order.
+#[test]
+fn a_class_self_included_bridge_runs_with_its_carrier_in_another_file() {
+    for (bridge, carrier) in [
+        ("app/services/factory.rb", "app/services/factory_extension.rb"),
+        ("app/services/factory_bridge.rb", "app/services/factory.rb"),
+    ] {
+        emit_and_run::real_blog()
+            .write(bridge, r#"module Factory
+  class << self
+    def included(base)
+      base.extend ClassMethods
+    end
+  end
+end
+"#)
+            .write(carrier, r#"module Factory
+  module ClassMethods
+    def build_label
+      "built " + name
+    end
+  end
+end
+"#)
+            .write("app/services/reading.rb", "class Reading\n  include Factory\nend\n")
+            .run_ruby(r#"
+raise "split bridge: #{Reading.build_label.inspect}" unless Reading.build_label == "built Reading"
+"#)
+            .assert_passes();
+    }
 }
 
 /// `resources :x, only: [] do … end` nests routes under a parent with no
@@ -13736,6 +14619,59 @@ raise "random_bytes: #{byte.inspect}" unless byte.is_a?(String) && byte.bytesize
 "##,
         );
     run.assert_passes();
+}
+
+/// `URI::RFC2396_PARSER.escape(url)` (lobsters' webmention job) and its
+/// siblings are the uri library's parsers: they run on the ruby family,
+/// and a strict target, with no uri runtime, reports the call.
+fn uri_parser_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/linker.rb",
+            r#"class Linker
+  def self.rfc2396(url)
+    URI::RFC2396_PARSER.escape(url.to_s)
+  end
+
+  def self.rfc3986(url)
+    URI::RFC3986_PARSER.unescape(url.to_s)
+  end
+
+  def self.default(url)
+    URI::DEFAULT_PARSER.escape(url.to_s)
+  end
+end
+"#,
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+}
+
+#[test]
+fn uri_parser_constants_escape_on_the_ruby_family() {
+    uri_parser_app()
+        .run_ruby(
+            r##"raise "rfc2396" unless Linker.rfc2396("a b/é") == "a%20b/%C3%A9"
+raise "rfc3986" unless Linker.rfc3986("a%20b") == "a b"
+raise "default" unless Linker.default("a b") == "a%20b"
+"##,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn uri_parser_calls_are_reported_on_a_strict_target() {
+    let (_emitted, errors) = uri_parser_app().emit(roundhouse::project::BuildTarget::Rust);
+    for call in ["URI::RFC2396_Parser#escape", "URI::RFC3986_Parser#unescape", "URI::RFC3986_Parser#escape"] {
+        assert!(errors.iter().any(|e| e.contains(&format!("{call} not supported (rust)"))), "{call}: {errors:#?}");
+    }
+    assert!(!errors.iter().any(|e| e.contains("constant not supported")), "{errors:#?}");
 }
 
 /// `module_function :name` promotes the def to the module, and ingest
@@ -18962,6 +19898,44 @@ mod class_side_relations;
 mod dynamic_where_forms;
 #[path = "emit_and_run/enum_cross_class_mapping.rs"]
 mod enum_cross_class_mapping;
+#[path = "emit_and_run/jbuilder_record_values.rs"]
+mod jbuilder_record_values;
+#[path = "emit_and_run/nil_operand.rs"]
+mod nil_operand;
+#[path = "emit_and_run/descendant_ivar.rs"]
+mod descendant_ivar;
+#[path = "emit_and_run/initializer_top_level_def.rs"]
+mod initializer_top_level_def;
+#[path = "emit_and_run/unknown_gem_namespace.rs"]
+mod unknown_gem_namespace;
+#[path = "emit_and_run/record_rebinding.rs"]
+mod record_rebinding;
+#[path = "emit_and_run/eager_load_filter.rs"]
+mod eager_load_filter;
+#[path = "emit_and_run/url_helpers_include.rs"]
+mod url_helpers_include;
+#[path = "emit_and_run/length_is_in_within.rs"]
+mod length_is_in_within;
+#[path = "emit_and_run/bigdecimal_clamp.rs"]
+mod bigdecimal_clamp;
+#[path = "emit_and_run/partial_binop.rs"]
+mod partial_binop;
+#[path = "emit_and_run/union_block_params.rs"]
+mod union_block_params;
+#[path = "emit_and_run/format_once.rs"]
+mod format_once;
+#[path = "emit_and_run/condition_lambda_record.rs"]
+mod condition_lambda_record;
+#[path = "emit_and_run/where_time_range.rs"]
+mod where_time_range;
+#[path = "emit_and_run/route_record_to_param.rs"]
+mod route_record_to_param;
+#[path = "emit_and_run/module_factory.rs"]
+mod module_factory;
+#[path = "emit_and_run/spinel_unknown_gem.rs"]
+mod spinel_unknown_gem;
+#[path = "emit_and_run/json_column_name.rs"]
+mod json_column_name;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

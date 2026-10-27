@@ -30,8 +30,56 @@ module ActiveRecord
   # stamping) survive to the render. A chain method answers a relation
   # without the receiver's cache (or, for `order`, a sorted copy of it),
   # and the receiver keeps its own.
+  # Not a Range: Spinel keeps a Range's bounds in integer slots, so a `where` value's non-numeric range (`7.days.ago..`) is lowered to these ends
+  class Bounds
+    attr_reader :lower, :upper
+
+    def initialize(lower, upper, exclusive)
+      @lower = lower
+      @upper = upper
+      @exclusive = exclusive
+    end
+
+    def exclusive?
+      @exclusive
+    end
+  end
+
+  # What an eager-loaded association keeps: Rails loads `includes(:tags)
+  # .where(tags: …).order(tags: …)` in one JOIN, so each record's `tags`
+  # holds only the matching rows, in that order. The preload arm reads
+  # the same conditions and order against the association's table.
+  class EagerFilter
+    def initialize(conditions, negations, orders, nested)
+      @conditions = conditions
+      @negations = negations
+      @orders = orders
+      @nested = nested
+    end
+
+    def nested
+      @nested
+    end
+
+    def conditions
+      @conditions
+    end
+
+    def negations
+      @negations
+    end
+
+    def orders
+      @orders
+    end
+  end
+
   class Relation
-    def initialize(model)
+    # `scoped` false is `Model.unscoped`: no default scope. Otherwise the
+    # model's `default_scope { where(…) }` is added here, when the
+    # relation is built, as Rails evaluates it — every query root on a
+    # model is a `Relation.new`, so this is the one place it applies.
+    def initialize(model, scoped = true)
       @model = model
       @table = model._table_sql
       @wheres = []
@@ -64,6 +112,27 @@ module ActiveRecord
       @ctes = []
       @shared_lists = false
       @friendly = false
+      apply_default_scope! if scoped
+    end
+
+    # Rails' `default_scope`: the model's conditions (`{}` for a model
+    # with none), skipped inside the model's `unscoped { … }` block.
+    # Added with `where!`, so they are attributed to their columns:
+    # `unscope(where: :col)` and `rewhere` lift them, and a record built
+    # through the relation starts with them.
+    def apply_default_scope!
+      return if Relation.unscoped_tables.include?(@table)
+      conditions = @model._default_scope_where
+      where!(conditions) unless conditions.empty?
+      nil
+    end
+
+    # The tables whose model is inside `Model.unscoped { … }`, innermost
+    # last. Per thread, as Rails' scope registry is: a request served on
+    # another thread meanwhile keeps the scope. Held by the Db shim, as
+    # the transaction state is, so the list is typed `Array[String]`.
+    def self.unscoped_tables
+      Db._unscoped_tables
     end
 
     # Drop the loaded-records memo. A null relation keeps `[]` so a later
@@ -290,7 +359,7 @@ module ActiveRecord
     def merge_seedable_scope(hash)
       own_lists
       hash.each do |key, val|
-        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range)
+        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range) || val.is_a?(Bounds)
         name = key.is_a?(Symbol) ? key.to_s : key.to_s
         next if name.include?(".")
         @scope_attributes = @scope_attributes.merge({ name.to_sym => val })
@@ -2339,10 +2408,10 @@ module ActiveRecord
       ensure
         @select_sql = prior
       end
-      return rows.map { |row| row["v0"] } if columns.length == 1
+      return rows.map { |row| @model.decode_plucked(columns[0], row["v0"]) } if columns.length == 1
       rows.map do |row|
         values = []
-        columns.each_with_index { |_col, index| values << row["v#{index}"] }
+        columns.each_with_index { |col, index| values << @model.decode_plucked(col, row["v#{index}"]) }
         values
       end
     end
@@ -2665,12 +2734,12 @@ module ActiveRecord
     # .scope_attributes)`). Ledgered in docs/pipeline/runtime.md.
 
     # `first_or_initialize` — the first matching row, or a new unsaved
-    # record when there is none. The caller assigns the remaining
-    # attributes before `save` (the write path this serves), so the built
-    # record starts blank rather than pre-filled from the where-conditions.
+    # record carrying the relation's equality conditions, as Rails builds
+    # it (`Domain.where(domain: name).first_or_initialize` is a Domain
+    # named `name`; lobsters saves it with the story that names it).
     def first_or_initialize
       record = first
-      record.nil? ? @model.new : record
+      record.nil? ? @model.new(scope_attributes) : record
     end
 
     # Rails' `find_or_create_by` — the first row matching `conditions`,
@@ -2713,6 +2782,10 @@ module ActiveRecord
     def find_or_initialize_by(conditions)
       record = find_by(conditions)
       return record if !record.nil?
+      @model.new(scope_attributes.merge(conditions))
+    end
+
+    def build(conditions)
       @model.new(scope_attributes.merge(conditions))
     end
 
@@ -2961,13 +3034,15 @@ module ActiveRecord
         ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
         if ids.empty?
           "1=0"
-        elsif ids.any? { |x| x.is_a?(Range) }
+        elsif ids.any? { |x| x.is_a?(Range) || x.is_a?(Bounds) }
           array_with_ranges_predicate(qcol, ids)
         else
           "#{qcol} IN (#{escape_list(ids)})"
         end
       elsif val.is_a?(Range)
         range_predicate(qcol, val)
+      elsif val.is_a?(Bounds)
+        bounds_predicate(qcol, val.lower, val.upper, val.exclusive?)
       elsif val.nil?
         "#{qcol} IS NULL"
       elsif val.is_a?(Base)
@@ -2990,9 +3065,13 @@ module ActiveRecord
     # pair; `>= AND <=` is the same predicate and what the lowered
     # call sites already write. The bounds bind like a scalar's value.
     def range_predicate(qcol, range)
-      op = range.exclude_end? ? "<" : "<="
-      lo = range_bound_sql(range.begin)
-      hi = range_bound_sql(range.end)
+      bounds_predicate(qcol, range.begin, range.end, range.exclude_end?)
+    end
+
+    def bounds_predicate(qcol, lower, upper, exclusive)
+      op = exclusive ? "<" : "<="
+      lo = range_bound_sql(lower)
+      hi = range_bound_sql(upper)
       if lo.nil?
         return "1=1" if hi.nil?
         return "#{qcol} #{op} #{hi}"
@@ -3023,6 +3102,8 @@ module ActiveRecord
           has_nil = true
         elsif x.is_a?(Range)
           range_arms << range_predicate(qcol, x)
+        elsif x.is_a?(Bounds)
+          range_arms << bounds_predicate(qcol, x.lower, x.upper, x.exclusive?)
         else
           scalars << x
         end

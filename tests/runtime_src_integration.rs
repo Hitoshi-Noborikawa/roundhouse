@@ -1190,7 +1190,48 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 865 on 2026-10-22: `ActiveSupport::JSON.encode_without_escape`
     // (Rails' `encode(value, escape: false)`) hands its value to
     // `jsonable` untyped, as `encode` does (+1 in active_support_ext.rb).
-    const CEILING: usize = 865;
+    // MEASURED 866 on 2026-10-22 (rebased onto 865): `ActiveRecord::Base.unscoped { … }`
+    // returns its block's value, which is untyped (+1 in
+    // active_record/connection.rb).
+    // MEASURED 868 on 2026-10-22 (default_scope static, on 866): `unscoped { … }`
+    // pops the model's table in an `ensure`, so the block's untyped value
+    // is held in a local before it is returned (+2 in
+    // active_record/connection.rb).
+    // MEASURED 870 on 2026-10-23 (merged onto 868): `ActionDispatch::Http::Parameters::
+    // ParseError#initialize` takes the message the caller passed (or
+    // nil) and forwards it through `super`, the same two gradual sites
+    // `RecordNotDestroyed#initialize` carries (+2 in
+    // action_dispatch/exceptions.rb, 868 -> 870).
+    // MEASURED 875 on 2026-10-23 (on 870): `_run_save_callbacks` and its
+    // create/update/destroy/validation twins answer the value of the block
+    // `run_callbacks(:save) { … }` passes, whatever its type, held in a
+    // local around the after hook (+5 in active_record/connection.rb).
+    // MEASURED 876 on 2026-10-24 (on 875): `_halted_by_abort` yields to
+    // the before_* hook it guards and discards its value (+1 in
+    // active_record/connection.rb).
+    // MEASURED 877 on 2026-10-24 (on 876): the typed writers' casts name
+    // `ActiveSupport::Duration` (its seconds, as Rails casts one); the
+    // class is declared by the spinel and CRuby overlays, not by the
+    // ruby-family signatures, so the branch's `to_i`/`to_f` read one
+    // gradual site (+1 in active_support_ext.rb, 876 -> 877).
+    // MEASURED 878 on 2026-10-24 (on 877): `Base.decode_plucked`'s identity
+    // default hands back the plucked value as the row held it, whatever its
+    // type; a model with a stored array column overrides it to decode
+    // (+1 in active_record/connection.rb).
+    // MEASURED 880 on 2026-10-25 (on 878): `ViewHelpers.tag_attr` renders a
+    // `tag.*` attribute whose value is whatever the template passes (nil
+    // omits it), so its `nil?` and `to_s` read that value untyped, as
+    // `h` does; one call so the value expression runs once (+2 in
+    // action_view/view_helpers.rb, 878 -> 880).
+    // MEASURED 884 on 2026-10-26 (on 880): `ViewHelpers.url_for_options`
+    // reads a class's own `default_url_options`, a `Hash[Symbol, untyped]`
+    // as Rails' is, for its host, port and protocol (+4 in
+    // action_view/view_helpers_ext.rb, 880 -> 884).
+    // MEASURED 886 on 2026-10-26 (on 884): a condition Array can hold an
+    // `ActiveRecord::Bounds` element (`where(created_at: [nil, 7.days.ago..])`),
+    // and the element read off the untyped Array reaches `bounds_predicate`
+    // through it (+2 in active_record/relation.rb, 884 -> 886).
+    const CEILING: usize = 886;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

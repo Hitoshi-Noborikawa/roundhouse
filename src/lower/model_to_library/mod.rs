@@ -348,6 +348,11 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     // `from_params` body's `p.<field>` Send dispatches to the
     // `<Resource>Params` attr_reader signature.
     for spec in params_specs.iter() {
+        if spec.value_map() {
+            classes.insert(spec.class_id.clone(),
+                crate::lower::controller_to_library::params::spec_class_info(spec));
+            continue;
+        }
         let class_id = spec.class_id.clone();
         let mut info = crate::analyze::ClassInfo::default();
         // MUST match what `build_params_class` actually synthesizes. A
@@ -369,12 +374,23 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                 .insert(setter_name, crate::dialect::AccessorKind::AttributeWriter);
         };
         for field in &spec.fields {
-            register(field.clone(), Ty::Str);
+            let ty = if spec.nested_fields.contains_key(field) {
+                crate::lower::controller_to_library::params::field_ty(spec, field)
+            } else {
+                Ty::Str
+            };
+            register(field.clone(), ty);
             register(
                 crate::lower::controller_to_library::params::provided_field(field),
                 Ty::Bool,
             );
         }
+        // The multiparameter record the model's guard reads.
+        register(
+            crate::lower::controller_to_library::params::multiparameter_fields_field(),
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+        );
+        register(crate::lower::controller_to_library::params::multiparameter_unsupported_field(), Ty::Bool);
         info.class_methods.insert(
             Symbol::from("from_raw"),
             fn_sig(
@@ -879,12 +895,19 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
             continue;
         }
         // `serialize :col, coder: JSON` (and legacy positional `JSON`) —
-        // claimed by lower::serialize; accessors go through JsonColumn.
+        // claimed by lower::serialize; accessors go through RoundhouseJsonColumn.
         if name == "serialize"
             && crate::lower::serialize::serialize_decls(model)
                 .iter()
                 .any(|d| d.span == expr.span)
         {
+            continue;
+        }
+        // `default_scope { where(…) }`, static or read at build time —
+        // claimed by lower::default_scope (the runtime Relation applies
+        // it; a target without one reports it per target). Other shapes
+        // keep warning.
+        if name == "default_scope" && crate::lower::default_scope::default_scope(model).is_some() {
             continue;
         }
         // Bare `has_rich_text :body` — claimed by lower::rich_text.
@@ -912,13 +935,67 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         {
             continue;
         }
+        // `normalizes :attr, with: ->(v) { … }` over columns — claimed by
+        // `lower::normalizes` (the `_normalize_<attr>` class method the
+        // column writer and finders call). Another `with:`, or an
+        // attribute that isn't a column, stays unclaimed and warns.
+        if name == "normalizes"
+            && crate::lower::normalizes::lowers_call(expr, |attr| {
+                schema.tables.get(&model.table.0).is_some_and(|t| t.columns.iter().any(|c| c.name == *attr))
+            })
+        {
+            continue;
+        }
         // 2-arg `attribute :name, :type` — claimed by
         // markers::push_attribute_api_methods (typed virtual
-        // attributes). Other arities (default:-carrying) stay
-        // unclaimed and warn.
+        // attributes), as is a 3-arg one whose `default:` it reads. A
+        // default over an existing column (Rails makes it the column's
+        // default; the column's reader is kept here, so it would be
+        // dropped) or beside the model's own writer
+        // (`markers::default_beside_source_writer`) stays unclaimed and
+        // warns, as other arities do.
         if name == "attribute" {
             if let ExprNode::Send { args, .. } = &*expr.node {
-                if args.len() == 2 {
+                let default_over_column = args.len() == 3
+                    && matches!(
+                        &*args[0].node,
+                        ExprNode::Lit { value: Literal::Sym { value: attr } }
+                            if schema.tables.get(&model.table.0).is_some_and(|t| t.columns.iter().any(|c| c.name == *attr))
+                    );
+                if args.len() == 2
+                    || (args.len() == 3
+                        && self::markers::attribute_api_default(&args[2]).is_some()
+                        && !default_over_column
+                        && !self::markers::default_beside_source_writer(&model.body, args))
+                {
+                    // Over a column of another type, the column's cast,
+                    // reader and storage are kept
+                    // (`markers::attribute_matches_column`): reported.
+                    if let (
+                        ExprNode::Lit { value: Literal::Sym { value: attr } },
+                        ExprNode::Lit { value: Literal::Sym { value: ty } },
+                    ) = (&*args[0].node, &*args[1].node)
+                        && !model.enums.contains_key(attr)
+                        && let Some(col) = schema
+                            .tables
+                            .get(&model.table.0)
+                            .and_then(|t| t.columns.iter().find(|c| c.name == *attr))
+                        && !self::markers::attribute_matches_column(ty.as_str(), col)
+                    {
+                        let mut d = Diagnostic::unsupported(
+                            expr.span,
+                            None,
+                            name,
+                            format!(
+                                "`attribute :{attr}, :{ty}` over a {}{} column on `{}`: the column's type is kept (its reader and storage don't follow the declared type)",
+                                column_type_word(&col.col_type),
+                                if col.array { " array" } else { "" },
+                                model.name.0.as_str()
+                            ),
+                        );
+                        d.severity = Severity::Warning;
+                        crate::emit::diagnostics::push(d);
+                    }
                     continue;
                 }
             }
@@ -980,6 +1057,22 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
     }
 }
 
+/// The schema word for a column type, for a diagnostic.
+fn column_type_word(t: &crate::schema::ColumnType) -> String {
+    use crate::schema::ColumnType;
+    match t {
+        ColumnType::String { .. } => "string".into(),
+        ColumnType::Text => "text".into(),
+        ColumnType::Integer => "integer".into(),
+        ColumnType::BigInt => "bigint".into(),
+        ColumnType::Float => "float".into(),
+        ColumnType::Decimal { .. } => "decimal".into(),
+        ColumnType::Boolean => "boolean".into(),
+        ColumnType::DateTime => "datetime".into(),
+        other => format!("{other:?}").to_lowercase(),
+    }
+}
+
 /// Filter a controller's permitted-fields list down to the names this
 /// model can actually assign — the union of every writer source the
 /// synthesizers and the model body jointly provide: table columns,
@@ -1009,26 +1102,39 @@ fn writable_permit_fields(
     fields
         .iter()
         .filter(|field| {
-            if writable.contains(*field) || model_defines_writer(model, field) {
+            if writable.contains(*field) || model_defines_public_writer(model, field) {
                 return true;
             }
+            let private = model_defines_writer(model, field);
             let kind = DiagnosticKind::LowerResidue {
                 pass: Symbol::from("permit_writer_filter"),
                 construct: Symbol::from("permit"),
-                reason: Symbol::from("no writer"),
+                reason: Symbol::from(if private { "private writer" } else { "no writer" }),
             };
-            let d = Diagnostic {
-                span: model.span,
-                severity: Diagnostic::default_severity(&kind),
-                kind,
-                message: format!(
+            let message = if private {
+                format!(
+                    "permitted field `{field}` has only a private or protected writer on \
+                     `{model_name}` — dropped from the synthesized update/from_params; \
+                     Rails assigns through public_send and would raise \
+                     UnknownAttributeError if a request submitted it",
+                    field = field.as_str(),
+                    model_name = model.name.0.as_str(),
+                )
+            } else {
+                format!(
                     "permitted field `{field}` has no writer on `{model_name}` (not a \
                      column, attr_writer, belongs_to, typed_store, has_secure_password, \
                      or `def {field}=`) — dropped from the synthesized update/from_params; \
                      Rails would raise UnknownAttributeError if a request submitted it",
                     field = field.as_str(),
                     model_name = model.name.0.as_str(),
-                ),
+                )
+            };
+            let d = Diagnostic {
+                span: model.span,
+                severity: Diagnostic::default_severity(&kind),
+                kind,
+                message,
             };
             crate::emit::diagnostics::push(d);
             false
@@ -1126,6 +1232,20 @@ pub fn writable_field_set(
 pub(crate) fn model_defines_writer(model: &Model, field: &crate::ident::Symbol) -> bool {
     let writer = crate::ident::Symbol::from(format!("{}=", field.as_str()));
     model_defines_instance_method(model, &writer)
+}
+
+/// `model_defines_writer` for mass assignment: Rails assigns permitted
+/// params through `public_send`, so a private or protected `def <field>=`
+/// is not a key it accepts (`UnknownAttributeError`). Hydration keeps
+/// `model_defines_writer`, which any visibility satisfies.
+pub(crate) fn model_defines_public_writer(model: &Model, field: &crate::ident::Symbol) -> bool {
+    let writer = crate::ident::Symbol::from(format!("{}=", field.as_str()));
+    model.body.iter().any(|item| {
+        matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+            if method.name == writer
+                && method.receiver == MethodReceiver::Instance
+                && method.visibility == crate::dialect::MethodVisibility::Public)
+    })
 }
 
 /// Survey the same untyped synthesis used by emission. Source lookup stays
@@ -1244,7 +1364,7 @@ fn build_methods_with_finder_inputs(
         let writable_fields =
             permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
         let permitted_fields = writable_fields.as_deref();
-        push_schema_methods(&mut methods, model, models, table, &through_joins);
+        push_schema_methods(&mut methods, model, models, table, &through_joins, runtime_relation);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
@@ -1254,6 +1374,15 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
         push_adapter_methods(&mut methods, model, table, schema, param_binds);
+        match crate::lower::default_scope::default_scope(model) {
+            Some(crate::lower::default_scope::DefaultScope::Static(scope)) => {
+                methods.push(crate::lower::default_scope::synth_default_scope_where(model, &scope));
+            }
+            Some(crate::lower::default_scope::DefaultScope::Dynamic(scope)) => {
+                methods.push(crate::lower::default_scope::synth_dynamic_default_scope_where(model, &scope));
+            }
+            None => {}
+        }
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
@@ -1329,7 +1458,7 @@ fn build_methods_with_finder_inputs(
         })
         .unwrap_or_else(|| Symbol::from("id"));
     push_validate_method(&mut methods, model, errors_readers, runtime_relation, &primary_key);
-    push_association_methods(&mut methods, model, models, &through_joins);
+    push_association_methods(&mut methods, model, models, &through_joins, runtime_relation);
     push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
@@ -1578,10 +1707,13 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &Hash
 ///   - `belongs_to` / `has_one` reader: resolves — Rails defines the
 ///     reader when the macro runs, same as a `def`.
 ///   - `attr_accessor` / `attr_reader` / `attr_writer`: resolves.
-///   - ActiveModel::Attributes `attribute`: resolves in Rails, but
-///     roundhouse doesn't synthesize a method for it yet (separate,
-///     undone work) — so there's nothing in `methods` to find, and it
-///     stays a gap, unchanged from today.
+///   - ActiveModel::Attributes `attribute` on a tableless model:
+///     resolves, against the synthesized reader, from the `attribute`
+///     line on (activemodel 8.1.4 defines it right there: an alias
+///     before it raises `NameError`, and a later `def` doesn't change
+///     what an alias after it copied). On an ActiveRecord model
+///     `attribute` is lazy like a column, so Rails raises `NameError`
+///     and this refuses with the same `alias_attribute` hint.
 ///   - a plain AR column reader: Rails itself raises `NameError`
 ///     here — ActiveRecord generates attribute methods lazily, which
 ///     is why `alias_attribute` exists. Refused with a gap that names
@@ -1610,6 +1742,9 @@ fn resolve_model_aliases(
     }
 
     let table = schema.tables.get(&model.table.0);
+    // `attribute` defines its reader eagerly only through
+    // ActiveModel::Attributes; ActiveRecord's is lazy.
+    let eager_attributes = includes_active_model_attributes(model);
     // Every name declared SOMEWHERE in the body via a category this
     // function can see — a hand-written `def` / enum method, a
     // `belongs_to`/`has_one` reader, or an `attr_accessor`/`attr_reader`/
@@ -1630,6 +1765,9 @@ fn resolve_model_aliases(
             }
             ModelBodyItem::Unknown { expr, .. } => {
                 declared_anywhere.extend(attr_accessor_arg_names(expr));
+                if eager_attributes {
+                    declared_anywhere.extend(attribute_api_arg_name(expr));
+                }
             }
             _ => {}
         }
@@ -1660,7 +1798,8 @@ fn resolve_model_aliases(
                 }
             }
             ModelBodyItem::Unknown { expr, .. } => {
-                for name in attr_accessor_arg_names(expr) {
+                let attribute = attribute_api_arg_name(expr).filter(|_| eager_attributes);
+                for name in attr_accessor_arg_names(expr).into_iter().chain(attribute) {
                     if let Some(m) = pre_user_methods
                         .iter()
                         .find(|m| m.name == name && m.receiver == MethodReceiver::Instance)
@@ -1678,7 +1817,9 @@ fn resolve_model_aliases(
                     // break snapshot semantics, so this is a refusal
                     // (the `None` arm below), not a fallback.
                     None
-                } else if table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old)) {
+                } else if table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old))
+                    || (!eager_attributes && attribute_api_names(model).contains(old))
+                {
                     // A plain AR column reader — Rails itself raises
                     // NameError here (attribute methods are generated
                     // lazily), so this never resolves; the `None` arm
@@ -1722,7 +1863,8 @@ fn resolve_model_aliases(
                         live.insert(new.clone(), copy);
                     }
                     None => {
-                        push_alias_target_unresolved_gap(*span, model, old, new, table);
+                        let lazy_attribute = !eager_attributes && attribute_api_names(model).contains(old);
+                        push_alias_target_unresolved_gap(*span, model, old, new, table, lazy_attribute);
                     }
                 }
             }
@@ -1750,6 +1892,40 @@ fn attr_accessor_arg_names(expr: &Expr) -> Vec<Symbol> {
             _ => None,
         })
         .collect()
+}
+
+/// The name an `attribute :name, …` call declares, when `expr` is one.
+fn attribute_api_arg_name(expr: &Expr) -> Option<Symbol> {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "attribute" {
+        return None;
+    }
+    match args.first().map(|a| &*a.node) {
+        Some(ExprNode::Lit { value: Literal::Sym { value } }) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn attribute_api_names(model: &Model) -> HashSet<Symbol> {
+    model.body.iter().filter_map(|item| match item {
+        crate::dialect::ModelBodyItem::Unknown { expr, .. } => attribute_api_arg_name(expr),
+        _ => None,
+    }).collect()
+}
+
+/// `include ActiveModel::Attributes` in the class body.
+fn includes_active_model_attributes(model: &Model) -> bool {
+    model.body.iter().any(|item| {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return false };
+        method.as_str() == "include"
+            && args.iter().any(|a| matches!(&*a.node,
+                ExprNode::Const { path } if path.len() == 2
+                    && path[0].as_str() == "ActiveModel"
+                    && path[1].as_str() == "Attributes"))
+    })
 }
 
 /// A forwarder for `old` when it's a known ActiveRecord::Base instance
@@ -1799,9 +1975,15 @@ fn push_alias_target_unresolved_gap(
     old: &Symbol,
     new: &Symbol,
     table: Option<&Table>,
+    lazy_attribute: bool,
 ) {
     let is_column = table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old));
-    let detail = if is_column {
+    let detail = if lazy_attribute {
+        format!(
+            "alias {new} {old} names an ActiveRecord `attribute` — Rails raises NameError here too \
+             (attribute methods are generated lazily); use `alias_attribute :{new}, :{old}` instead"
+        )
+    } else if is_column {
         format!(
             "alias {new} {old} names a column — Rails raises NameError here too \
              (attribute methods are generated lazily); use `alias_attribute :{new}, :{old}` instead"
@@ -1809,7 +1991,8 @@ fn push_alias_target_unresolved_gap(
     } else {
         format!(
             "alias {new} {old} on {}: {old} is not defined (not a hand-written method, \
-             enum method, association, attr_accessor, or inherited ActiveRecord method)",
+             enum method, association, attr_accessor, ActiveModel attribute declared above it, \
+             or inherited ActiveRecord method)",
             model.name.0
         )
     };
@@ -2197,6 +2380,7 @@ fn build_class_info_with_finder_inputs(
 ) -> crate::analyze::ClassInfo {
     let mut info = crate::analyze::ClassInfo::default();
     info.table = Some(model.table.clone());
+    info.default_scoped = crate::lower::default_scope::default_scope(model).is_some();
     info.parent = model.parent.clone();
     // The analyzer's registry is not this map. Arel's `ids` / `pluck`
     // and the source-method decline read these two fields, so they have
@@ -2817,6 +3001,15 @@ fn type_method_body(
         // A `def` from the model's source carries no enclosing class; `self` in it is still the model.
         ctx.self_ty = Some(Ty::Class { id: model.name.clone(), args: vec![].into() });
         ctx.instance_body = true;
+    } else if let Some(model) = model.filter(|_| method.receiver == MethodReceiver::Class) {
+        // A source `def self.x`: names resolve in the model's namespace, so
+        // its own constant reads find the model's constants (#1223), and
+        // `self` is the class, as the analyzer types a class body: an
+        // implicit-self call (`tag().upcase`) types against the model's
+        // class methods (#1236).
+        ctx.lexical_self = Some(Ty::Class { id: model.name.clone(), args: vec![].into() });
+        ctx.self_ty = Some(Ty::Class { id: model.name.clone(), args: vec![].into() });
+        ctx.class_side = true;
     }
     // Seed ivar_bindings from schema columns so bare `@title` reads
     // resolve to the column type. Same source the synthesizers used
@@ -2855,6 +3048,14 @@ fn type_method_body(
             }
         }
     }
+    // The model's own constants, as the analyzer seeds them
+    // (`extract_const_assignments`): this pass re-types the body from
+    // scratch, and the read the analyzer qualified to `Widget::WEIGHTS`
+    // otherwise fell back to a phantom `Ty::Class` (#1223), so the
+    // emitters saw no Hash or Array behind it.
+    if let Some(m) = model {
+        ctx.constants = crate::analyze::ConstScope::default().with_own(crate::analyze::extract_const_assignments(&m.body));
+    }
     // Opt-in to `recv: Some(SelfRef)` rewriting on bare Sends —
     // matches the pattern view_to_library uses.
     ctx.annotate_self_dispatch = true;
@@ -2866,18 +3067,18 @@ fn type_method_body(
 }
 
 /// Backfill a signature for a user-defined method whose body types to a
-/// concrete scalar. User methods carry `signature: None`, so the
+/// concrete scalar or Time. User methods carry `signature: None`, so the
 /// emitted `.rbs` says `-> untyped` even when the body is trivially
 /// typed — and under spinel AOT an untyped return turns every chained
 /// call into a whole-program poly dispatch (lobsters:
 /// `User.username_regex_s[1...-1]` became a 26-class `[]` switch that
-/// doesn't C-compile). Scalars only, and only when the body has no
+/// doesn't C-compile). Scalars and Time only, and only when the body has no
 /// explicit `return` (an early return of another type would make the
 /// trailing-expression type a lie — in Ruby a `return` inside a block
 /// exits the method, so the walk counts those too). If/Case bodies
 /// union their branches, so divergent shapes fail the scalar gate on
 /// their own. Param types stay untyped — this pins only the return.
-/// A scalar, or a scalar unioned with nil — `String?` and friends.
+/// A scalar or Time, optionally unioned with nil — `String?`, `Time?` and friends.
 ///
 /// The nullable arm matters because a `rescue` contributes one: a body
 /// of `uri.to_s … rescue nil` types `Str | Nil`, and refusing to
@@ -2887,7 +3088,7 @@ fn type_method_body(
 /// costs nothing here — widening to `untyped` does.
 fn scalar_or_nullable_scalar(ty: &Ty) -> bool {
     fn is_scalar(t: &Ty) -> bool {
-        matches!(t, Ty::Str | Ty::Int | Ty::Float | Ty::Bool)
+        matches!(t, Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Time)
     }
     match ty {
         t if is_scalar(t) => true,
@@ -3041,13 +3242,30 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
 /// NOT for the SQL seam — `column_read_method` and the Arel visitor pick
 /// their reader from the underlying column type, which nullability
 /// doesn't change.
+/// An `array: true` column is `Array[<element>]` where the target stores
+/// the Array (`Column::array_stored`, `lower::array_columns`); elsewhere it
+/// stays its element type, the lowered targets' storage, and
+/// `project::report_array_columns` reports it.
 pub fn ty_of_column_slot(col: &Column) -> Ty {
-    let base = ty_of_column(&col.col_type);
+    let mut base = ty_of_column(&col.col_type);
+    if col.array_stored {
+        base = Ty::Array { elem: base.into() };
+    }
     if (col.nullable || col.generated.is_some()) && !col.primary_key {
         Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
         base
     }
+}
+
+/// What the database row holds for the column: the slot type, except
+/// that a stored array column (`Column::array_stored`) is its JSON text
+/// until the model's hydration writer decodes it.
+pub fn ty_of_column_stored(col: &Column) -> Ty {
+    if col.array_stored {
+        return Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    }
+    ty_of_column_slot(col)
 }
 
 /// Build a `Ty::Fn` signature from positional (name, type) pairs and a return type.

@@ -593,6 +593,14 @@ impl<'a> BodyTyper<'a> {
             };
             return self.block_params_for(Some(&as_array), method, class_object_receiver);
         }
+        // The controller's cookie jar iterates names and values, both
+        // Strings (runtime/ruby/action_controller/cookies.rb, `each` over
+        // `to_h`).
+        if matches!(recv_ty, Ty::Class { id, .. } if id.0.as_str() == "ActionDispatch::Cookies::CookieJar")
+            && method.as_str() == "each"
+        {
+            return Some(vec![Ty::Str, Ty::Str]);
+        }
         match recv_ty {
             Ty::Str if method.as_str() == "bytes" => Some(vec![Ty::Int]),
             Ty::Array { elem } => match method.as_str() {
@@ -752,23 +760,36 @@ impl<'a> BodyTyper<'a> {
                 None
             }
             // Union receivers (typically `T | Nil` from RBS optionals or
-            // flow-sensitive ivar reads). Unwrap to the first concrete
-            // container variant and recurse — `(Hash[K,V] | Nil).each
-            // { |k, v| ... }` should yield `[K, V]` to the block, not
-            // give up because the union confused dispatch. Skip Nil/Var
-            // variants; they don't carry block-shape information.
+            // flow-sensitive ivar reads): each concrete variant the block
+            // runs on yields its own element — `(Hash[K,V] | Nil).each
+            // { |k, v| ... }` yields `[K, V]`. Skip Nil/Var variants; they
+            // don't carry block-shape information.
+            // Not the first variant alone: lobsters' search results are a
+            // Story or Comment relation or a hydrator yielding Comments,
+            // and the block runs on each.
             Ty::Union { variants } => {
+                let mut out: Option<Vec<Ty>> = None;
                 for v in variants {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    if let Some(params) =
-                        self.block_params_for(Some(v), method, class_object_receiver)
-                    {
-                        return Some(params);
-                    }
+                    let Some(params) = self.block_params_for(Some(v), method, class_object_receiver) else { continue };
+                    out = Some(match out {
+                        None => params,
+                        Some(prev) => {
+                            let len = prev.len().max(params.len());
+                            (0..len)
+                                .map(|i| match (prev.get(i), params.get(i)) {
+                                    (Some(a), Some(b)) if a == b => a.clone(),
+                                    (Some(a), Some(b)) => union_of(a.clone(), b.clone()),
+                                    (Some(a), None) | (None, Some(a)) => a.clone(),
+                                    (None, None) => Ty::Untyped,
+                                })
+                                .collect()
+                        }
+                    });
                 }
-                None
+                out
             }
             // RBS-declared `untyped` receiver: a method call like
             // `untyped.each { |x| ... }` passes through with the block
@@ -1149,6 +1170,13 @@ impl<'a> BodyTyper<'a> {
                 return param_value_method(method, block_ret).unwrap_or_else(|| str_method(method));
             }
         }
+        // Retain the nominal ancestry of class values derived from an
+        // exception owner, so a later/aliased constructor cannot erase its refusal.
+        if !instance_receiver
+            && let Some(ty) = self.derived_storage_class_value(recv_ty, method, args)
+        {
+            return ty;
+        }
         // `obj.class` is receiver-aware: our type system flattens the
         // class object and instances onto the same `Ty::Class { id }`,
         // so `instance_of_Base.class` returns `Ty::Class { Base }`
@@ -1299,6 +1327,13 @@ impl<'a> BodyTyper<'a> {
             && !self.owns_operator(recv_ty, method, !instance_receiver)
         {
             return block_ret.cloned().unwrap_or(Ty::Untyped);
+        }
+        // Not the block's value alone: a `throw` without a value leaves Kernel#catch answering nil.
+        if method.as_str() == "catch"
+            && (recv_ty.is_none() || !self.owns_operator(recv_ty, method, !instance_receiver))
+            && let Some(block) = block_ret
+        {
+            return union_of(block.clone(), Ty::Nil);
         }
         // `Model.transaction { … }` / `ActiveRecord::Base.transaction
         // { … }` returns its block's value (commit) — the registered
@@ -1838,6 +1873,7 @@ impl<'a> BodyTyper<'a> {
                         // none. campfire's `Webhook#extract_text_from`
                         // is the shape.
                         "String" => return Ty::Str,
+                        "Time" => return Ty::Time,
                         _ => {}
                     }
                     return Ty::Class { id: id.clone(), args: args.clone() };
@@ -1897,7 +1933,14 @@ impl<'a> BodyTyper<'a> {
                     return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::Untyped);
                 }
                 if id.0.as_str() == "Time" {
-                    if let Some(ty) = time_method(method) {
+                    let ty = if instance_receiver && matches!(method.as_str(), "now" | "at") {
+                        Some(Ty::Time)
+                    } else if instance_receiver {
+                        time_method(method)
+                    } else {
+                        time_class_method(method)
+                    };
+                    if let Some(ty) = ty {
                         return ty;
                     }
                 }
@@ -2206,6 +2249,12 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
+                // `a[start, length]` and `a[range]` answer a slice (nil past the end), not an element
+                if matches!(method.as_str(), "[]" | "slice")
+                    && (args.len() == 2 || args.first().is_some_and(|a| matches!(a.ty, Some(Ty::Class { ref id, .. }) if id.0.as_str() == "Range") || matches!(&*a.node, crate::expr::ExprNode::Range { .. })))
+                {
+                    return Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(elem.clone()) }, Ty::Nil].into() };
+                }
                 array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope
@@ -2385,7 +2434,7 @@ impl<'a> BodyTyper<'a> {
                 bigdecimal()
             }
             Some(Ty::Int) => int_method(method),
-            Some(Ty::Float) => float_method(method),
+            Some(Ty::Float) => float_method(method, args),
             Some(Ty::Bool) => bool_method(method),
             // Union dispatch: try each concrete (non-Nil, non-Var) variant
             // and union the resolved results. Covers the common
@@ -2641,20 +2690,27 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
     Some(ty)
 }
 
+fn time_class_method(method: &Symbol) -> Option<Ty> {
+    match method.as_str() {
+        "now" | "current" | "at" | "utc" | "gm" | "local" | "mktime"
+        | "iso8601" | "xmlschema" | "httpdate" | "rfc2822" | "rfc822" | "strptime" => Some(Ty::Time),
+        _ => None,
+    }
+}
+
 /// Methods on a `Time` value — modeled as the first-class `Ty::Time`
 /// variant. AR datetime columns type as `Ty::Time` (see
 /// `ingest::model::ty_of_column`), so this is the surface a column read
-/// like `story.created_at.strftime(...)` dispatches against. The `Time`
-/// class constant (`Ty::Class{"Time"}`, the receiver of `Time.now`)
-/// flattens onto the same table, so the class-side constructors live
-/// here too. DateTime/time-of-day columns also use `Ty::Time`;
+/// like `story.created_at.strftime(...)` dispatches against. Class-side
+/// constructors and parsers use `time_class_method` instead.
+/// DateTime/time-of-day columns also use `Ty::Time`;
 /// date-only columns have their own table. Returns `None` for unmodeled methods so dispatch falls
 /// through to the parent-chain walk.
 pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
     let time = || Ty::Time;
     let ty = match method.as_str() {
-        // Constructors, coercions, and Time-returning transforms.
-        "now" | "current" | "utc" | "local" | "at" | "today"
+        // Coercions and Time-returning transforms.
+        "utc" | "local" | "today"
         | "to_time" | "in_time_zone" | "localtime" | "getlocal" | "getutc"
         | "beginning_of_day" | "end_of_day" | "beginning_of_hour" | "end_of_hour"
         | "beginning_of_week" | "end_of_week" | "beginning_of_month" | "end_of_month"
@@ -2681,7 +2737,7 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
             args: vec![time()].into(),
         },
         // String renderings.
-        "iso8601" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
+        "iso8601" | "xmlschema" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
         | "strftime" | "httpdate" | "rfc822" | "ctime" | "asctime" | "inspect"
         | "zone" => Ty::Str,
         // Integer components / epoch seconds / spaceship.
@@ -3355,12 +3411,15 @@ pub(super) fn hash_method(
         // non-nil form as `.get(k).cloned().unwrap_or(default)` — a
         // `V`, not an `Option` (`emit/rust/expr/send/index.rs:414`).
         //
-        // The one-arg form raises `KeyError` rather than answering
-        // nil, so `value` alone would be right; it stays `value | Nil`
-        // because the extra arm only costs a nil-check and every
-        // target's one-arg path is written against it.
-        "fetch" => match args.get(1).and_then(|a| a.ty.clone()) {
-            Some(default) if !default.is_open() => union_of(value.clone(), default),
+        // The one-arg form answers the value or raises `KeyError`, never
+        // nil, so it is `value`, as `Array#fetch(i)` is its element (#1014:
+        // a `value | Nil` made `RANKS.fetch(k) + 1` an incompatible_binop).
+        // Each strict target's one-arg path raises on a missing key. A
+        // block answers a miss with its value.
+        "fetch" => match (args.len(), args.get(1).and_then(|a| a.ty.clone()), block_ret) {
+            (1, _, None) => value.clone(),
+            (1, _, Some(missed)) if !missed.is_open() => union_of(value.clone(), missed.clone()),
+            (_, Some(default), _) if !default.is_open() => union_of(value.clone(), default),
             _ => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         },
         "merge" => Ty::Hash {
@@ -3604,9 +3663,13 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "chars" | "lines" | "split" | "scan" | "each_char" => Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         // `String#count(chars)` — how many of the given characters occur.
         "count" => Ty::Int,
-        // `String#ascii_only?` and ActiveSupport's `exclude?` (the
-        // negation of `include?`).
-        "ascii_only?" | "exclude?" => Ty::Bool,
+        // `String#ascii_only?`, `valid_encoding?` and
+        // `unicode_normalized?`, and ActiveSupport's `exclude?` (the
+        // negation of `include?`). A real String predicate must be known
+        // here: the inquiry fold reads an unknown one as a StringInquirer
+        // label, and `value.valid_encoding?` became
+        // `value == "valid_encoding"`.
+        "ascii_only?" | "valid_encoding?" | "unicode_normalized?" | "exclude?" => Ty::Bool,
         // `String#insert(index, str)` mutates and answers the receiver;
         // `to_str` is the implicit-conversion spelling of itself;
         // `encode` re-encodes; ActiveSupport's `first(n)` / `last(n)`
@@ -3649,12 +3712,14 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // ActiveSupport String extensions. Pluralization/inflection
         // methods all return Str; comparison-style return Bool. Match
         // the surface of `ActiveSupport::Inflector` that real Rails
-        // code reaches for in views and helpers.
+        // code reaches for in views and helpers. `tableize` and
+        // `strip_heredoc` are not here: no runtime answers them, so
+        // they stay unknown and read as a `String extension` gap.
         "pluralize" | "singularize" | "camelize" | "camelcase"
         | "underscore" | "dasherize" | "titleize" | "titlecase"
         | "humanize" | "demodulize" | "deconstantize" | "classify"
-        | "tableize" | "foreign_key" | "parameterize" | "truncate"
-        | "squish" | "remove" | "indent" | "strip_heredoc"
+        | "foreign_key" | "parameterize" | "truncate"
+        | "squish" | "remove" | "indent"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),
         // JSON encoding is provided by the Ruby runtime; the other
@@ -3781,6 +3846,13 @@ fn bigdecimal_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> 
         ("<=>", [a]) if numeric(a) => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         ("-@" | "+@" | "abs" | "to_d", []) => bigdecimal(),
         ("zero?" | "negative?" | "positive?", []) => Ty::Bool,
+        // Comparable's: `clamp` answers the receiver or the bound it fell past, which keeps that bound's own class
+        ("between?", [lo, hi]) if numeric(lo) && numeric(hi) => Ty::Bool,
+        ("clamp", [lo, hi]) if numeric(lo) && numeric(hi) => clamp_ty([lo, hi]),
+        ("clamp", [range]) => match &*range.node {
+            crate::expr::ExprNode::Range { begin: Some(lo), end: Some(hi), .. } if numeric(lo) && numeric(hi) => clamp_ty([lo, hi]),
+            _ => return None,
+        },
         ("to_f", []) => Ty::Float,
         ("to_i" | "to_int", []) => Ty::Int,
         ("to_s" | "inspect", []) => Ty::Str,
@@ -3796,14 +3868,19 @@ fn bigdecimal_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> 
     })
 }
 
-pub(super) fn float_method(method: &Symbol) -> Ty {
+fn clamp_ty(bounds: [&crate::expr::Expr; 2]) -> Ty {
+    bounds.iter().fold(bigdecimal(), |acc, b| match b.ty.clone() {
+        Some(t) if !t.is_open() => super::union_of(acc, t),
+        _ => acc,
+    })
+}
+
+pub(super) fn float_method(method: &Symbol, args: &[crate::expr::Expr]) -> Ty {
     match method.as_str() {
         "to_s" | "inspect" => Ty::Str,
         "to_d" => bigdecimal(),
-        // No-arg rounding returns Int (the common shape); with a digits
-        // arg it returns Float, but we don't see args here — Int is the
-        // safer default for the bare call.
-        "to_i" | "to_int" | "round" | "ceil" | "floor" | "truncate" => Ty::Int,
+        "round" | "ceil" | "floor" | "truncate" => float_rounding(args),
+        "to_i" | "to_int" => Ty::Int,
         "to_f" | "abs" | "fdiv" | "clamp" | "modulo" => Ty::Float,
         "div" => Ty::Int,
         "divmod" => Ty::Array { elem: std::sync::Arc::new(Ty::Float) },
@@ -3814,6 +3891,70 @@ pub(super) fn float_method(method: &Symbol) -> Ty {
         "+" | "-" | "*" | "/" | "%" | "**" => Ty::Float,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
         _ => unknown(),
+    }
+}
+
+/// CRuby picks `Float#round`/`floor`/`ceil`/`truncate`'s class from the digits value: Integer for none or <= 0, Float above.
+fn float_rounding(args: &[crate::expr::Expr]) -> Ty {
+    use crate::expr::{ExprNode, Literal};
+    // A trailing `half:` keyword hash is the tie-break mode, not a digit count.
+    let digits = match args {
+        [rest @ .., last] if matches!(&*last.node, ExprNode::Hash { kwargs: true, .. }) => rest,
+        all => all,
+    };
+    match digits {
+        [] => Ty::Int,
+        [n] => match &*n.node {
+            ExprNode::Lit { value: Literal::Int { value } } if *value > 0 => Ty::Float,
+            ExprNode::Lit { value: Literal::Int { .. } } => Ty::Int,
+            _ => Ty::Union { variants: vec![Ty::Int, Ty::Float].into() },
+        },
+        _ => unknown(),
+    }
+}
+
+#[cfg(test)]
+mod float_rounding_tests {
+    use super::*;
+
+    // Types `src` with `x` bound to a Float and `n` to an Integer.
+    fn ty_of(src: &str) -> Ty {
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let program = parsed.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let mut expr = crate::ingest::expr::ingest_expr(&stmt, "probe.rb").unwrap();
+        let classes = std::collections::HashMap::new();
+        let mut ctx = super::super::Ctx::default();
+        ctx.local_bindings.insert(Symbol::from("x"), Ty::Float);
+        ctx.local_bindings.insert(Symbol::from("n"), Ty::Int);
+        super::super::BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx)
+    }
+
+    #[test]
+    fn digits_literal_picks_float_or_integer_like_cruby() {
+        for m in ["round", "floor", "ceil", "truncate"] {
+            assert_eq!(ty_of(&format!("x.{m}")), Ty::Int, "{m}");
+            assert_eq!(ty_of(&format!("x.{m}(0)")), Ty::Int, "{m}(0)");
+            assert_eq!(ty_of(&format!("x.{m}(-1)")), Ty::Int, "{m}(-1)");
+            assert_eq!(ty_of(&format!("x.{m}(2)")), Ty::Float, "{m}(2)");
+        }
+    }
+
+    #[test]
+    fn half_keyword_is_not_a_digit_count() {
+        assert_eq!(ty_of("x.round(half: :even)"), Ty::Int);
+        assert_eq!(ty_of("x.round(1, half: :even)"), Ty::Float);
+        assert_eq!(ty_of("x.round(0, half: :up)"), Ty::Int);
+    }
+
+    #[test]
+    fn non_literal_digits_is_either_class() {
+        let either = Ty::Union { variants: vec![Ty::Int, Ty::Float].into() };
+        assert_eq!(ty_of("x.round(n)"), either);
+        assert_eq!(ty_of("x.round(n, half: :even)"), either);
+        // Integer#round never answers a Float, whatever the digits.
+        assert_eq!(ty_of("n.round(2)"), Ty::Int);
+        assert_eq!(ty_of("n.round(-1)"), Ty::Int);
     }
 }
 

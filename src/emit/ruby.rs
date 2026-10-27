@@ -108,6 +108,10 @@ pub fn emit_method(m: &MethodDef) -> String {
         // parameter list.
         if matches!(&*default.node, crate::expr::ExprNode::Raise { .. }) {
             format!("({src})")
+        } else if matches!(&*default.node, crate::expr::ExprNode::Seq { .. } | crate::expr::ExprNode::Assign { .. }) {
+            // `name = (marker = true; nil)`: the statements, or an
+            // assignment, stay one parenthesized expression.
+            format!("({})", src.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; "))
         } else {
             src
         }
@@ -219,6 +223,9 @@ fn materialize_models_with_param_binds(
     // A permitted `has_one_attached` field is a FILE on the params
     // class; the model's `from_params` reads it as one.
     params_specs.mark_file_fields(&app.models);
+    // The ruby family carries non-scalar permitted keys; the controller
+    // side ledgers the ones it can't (`carry_nested`).
+    params_specs.carry_nested(true, false);
 
     // Bulk lower so per-resource synthesized siblings (`<Model>Row`)
     // ride alongside the model class. Each returned `LibraryClass`
@@ -317,7 +324,7 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // through-assoc resolves).
     library::apply_through_assoc_lowering(&mut lcs, app);
     // belongs_to autosave: an unsaved target assigned through the
-    // writer is saved at before_validation and its id taken (no-op for
+    // writer is saved before validation and its id taken (no-op for
     // models with no belongs_to). Ruby-family only — see the pass.
     library::apply_belongs_to_autosave(&mut lcs, app);
     // An STI row hydrates as its subclass (no-op for apps with no STI).
@@ -367,6 +374,9 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // Boolean-column readers/predicates cast SQLite's 0/1 Integers
     // (0 is truthy in Ruby).
     library::apply_boolean_lowering(&mut lcs, app);
+    // Typed-column writers cast what they are given (#1158).
+    library::apply_typed_writer_cast_lowering(&mut lcs, app);
+    library::parse_untyped_numericality_input(&mut lcs, app);
     // NULL fidelity: nullable columns hydrate to nil (not 0/"") and fk
     // 0-sentinel guards widen to accept nil (no-op for schemas with no
     // nullable columns). A string `blank?` already carries `(r || "")`
@@ -659,6 +669,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_
         model_extras,
         crate::lower::controller_to_library::LowerControllerOptions {
             ruby_read_values: true,
+            carry_nested_params: true,
             param_binds,
             schema: Some(&app.schema),
             views: &app.views,

@@ -118,6 +118,22 @@ pub const RESOLVED_MIXIN: u64 = 1 << 22;
 /// can ask; `project::report_unsupported_bundled_constants` reports it elsewhere.
 pub const MODULE_QUERY: u64 = 1 << 23;
 
+/// The call an `alias new builtin` delegates to (`ingest::library_class::
+/// OBJECT_BUILTINS`): a method every Ruby object answers, which only the
+/// ruby family has; `project::report_builtin_aliases` refuses it elsewhere.
+pub const BUILTIN_ALIAS: u64 = 1 << 26;
+
+/// The owner read an association build captures into its temp
+/// (`rh_build_owner_N = @article`): it stands in for the receiver of the
+/// `@article.x` the build replaced, which read the owner unconditionally.
+pub const BUILD_OWNER: u64 = 1 << 24;
+
+/// A constant path whose parent is a value (`self.class::KINDS`), ingested
+/// as the analysis' `const_get(:KINDS)`. The ruby family writes it back as
+/// the path: `const_get` also finds a top-level constant, which `::` does
+/// not (`Base::String` raises).
+pub const CONST_PATH: u64 = 1 << 25;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

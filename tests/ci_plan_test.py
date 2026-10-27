@@ -687,6 +687,22 @@ class Routing(unittest.TestCase):
         self.assertEqual(shared["spinel_tests"], ci.SPINEL_TESTS)
         self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
 
+    def test_array_column_storage_spinel_owns_its_pass_and_runtime_inputs(self):
+        suite = "array_column_storage_spinel"
+        paths = [
+            "tests/array_column_storage_spinel.rs",
+            "src/lower/array_columns.rs",
+            "runtime/spinel/array_column.rb",
+            "runtime/spinel/array_column.rbs",
+            "src/lower/model_to_library/adapter_emit/mod.rs",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn(suite, plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+        self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
+
     def test_generated_columns_spinel_owns_schema_support_and_lowering_inputs(self):
         suite = "generated_columns_spinel"
         paths = [
@@ -818,28 +834,35 @@ class Routing(unittest.TestCase):
                 "rails_compat_vectors_spinel",
                 "active_job_payload",
                 "sidekiq_push",
+                "sidekiq_worker",
             ],
-            # The payload and Sidekiq push gates' drivers load these beside them.
+            # The payload, Sidekiq push and worker gates' drivers load these beside them.
             "runtime/ruby/active_job.rb": [
                 "framework_tests_spinel",
                 "active_job_payload",
                 "sidekiq_push",
+                "sidekiq_worker",
             ],
             "runtime/spinel/active_job_serialization.rb": [
                 "framework_tests_spinel",
                 "active_job_payload",
                 "sidekiq_push",
+                "sidekiq_worker",
             ],
             "runtime/spinel/global_id_locator.rb": [
                 "framework_tests_spinel",
                 "active_job_payload",
                 "sidekiq_push",
+                "sidekiq_worker",
             ],
-            "runtime/spinel/sidekiq_push.rb": ["framework_tests_spinel", "sidekiq_push"],
+            "runtime/spinel/sidekiq_push.rb": ["framework_tests_spinel", "sidekiq_push", "sidekiq_worker"],
+            "runtime/spinel/sidekiq_envelope.rb": ["framework_tests_spinel", "sidekiq_worker"],
             "tests/active_job_payload/driver.rb": ["active_job_payload"],
             "tests/active_job_payload/rails.json": ["active_job_payload"],
             "tests/sidekiq_push/driver.rb": ["sidekiq_push"],
             "tests/sidekiq_push/sidekiq.json": ["sidekiq_push"],
+            "tests/sidekiq_worker/worker_driver.rb": ["sidekiq_worker"],
+            "tests/sidekiq_worker/sidekiq.json": ["sidekiq_worker"],
             "tests/spinel_db_lease.rb": ["spinel_db_lease"],
             "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
             "tests/support/db_concurrency_spinel.rb": ["db_sqlite_concurrency"],

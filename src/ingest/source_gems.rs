@@ -5,7 +5,14 @@ use std::path::{Path, PathBuf};
 use crate::gems::Lockfile;
 use crate::vfs::Vfs;
 
-pub(super) const MOUNT: &str = ".roundhouse/source_gems";
+pub(crate) const MOUNT: &str = ".roundhouse/source_gems";
+
+/// Is `path` a file of `gem` at `version`, compiled from source? The
+/// file is recorded at its installed path or under the app's mount.
+pub(crate) fn file_of(path: &str, gem: &str, version: &str) -> bool {
+    let dir = format!("{gem}-{version}");
+    path.contains(&format!("/gems/{dir}/")) || path.contains(&format!("{MOUNT}/{dir}/"))
+}
 
 pub(super) struct SourceGem {
     pub mount: PathBuf,
@@ -41,26 +48,66 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
         };
         // Not lexical first: a `..` after a linked app dir resolves through the link, as the OS reads it
         let installed = vfs.canonical(&installed).unwrap_or_else(|| normalize(&installed));
-        let files = required_files(vfs, &installed, name)?;
+        let files = required_files(vfs, &installed, name, lock.gemfile_requires.get(name))?;
         gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
     }
     Ok(gems)
 }
 
-fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BTreeSet<PathBuf>, String> {
+fn required_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    gem: &Path,
+    name: &str,
+    gemfile_requires: Option<&Vec<String>>,
+) -> Result<BTreeSet<PathBuf>, String> {
     let lib = gem.join("lib");
-    let entry = [name.to_string(), name.replace('-', "/")]
-        .into_iter()
-        .map(|feature| lib.join(format!("{feature}.rb")))
-        .find(|path| vfs.exists(path))
-        .ok_or_else(|| format!("source gem {name:?} has no lib/{name}.rb to require"))?;
+    // Not the gem's name when the app's Gemfile says what Bundler requires (svg-graph has no `svg-graph.rb`).
+    let entries: Vec<PathBuf> = match gemfile_requires.filter(|features| !features.is_empty()) {
+        Some(features) => {
+            let mut entries = Vec::new();
+            for feature in features {
+                let path = lib.join(if feature.ends_with(".rb") { feature.clone() } else { format!("{feature}.rb") });
+                if !vfs.exists(&path) {
+                    return Err(format!("source gem {name:?}: the Gemfile requires {feature:?}, which its lib/ does not hold"));
+                }
+                entries.push(path);
+            }
+            entries
+        }
+        None => [name.to_string(), name.replace('-', "/")]
+            .into_iter()
+            .map(|feature| lib.join(format!("{feature}.rb")))
+            .find(|path| vfs.exists(path))
+            .into_iter()
+            .collect(),
+    };
+    if entries.is_empty() {
+        return Err(format!("source gem {name:?} has no lib/{name}.rb to require"));
+    }
     let mut seen = BTreeSet::new();
-    let mut pending = vec![entry];
+    let mut pending = entries;
     while let Some(file) = pending.pop() {
         if !seen.insert(file.strip_prefix(gem).unwrap().to_path_buf()) {
             continue;
         }
         let text = vfs.read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        // Not only what is required: `Zeitwerk::Loader.for_gem` autoloads every file under lib/ by its constant name.
+        if let Some(ignored) = zeitwerk_ignores(&text, file.parent().unwrap()) {
+            let mut dirs = vec![lib.clone()];
+            while let Some(dir) = dirs.pop() {
+                let Ok(entries) = vfs.read_dir(&dir) else { continue };
+                for entry in entries {
+                    if vfs.is_symlink(&entry) || ignored.iter().any(|i| entry.starts_with(i)) {
+                        continue;
+                    }
+                    if vfs.is_dir(&entry) {
+                        dirs.push(entry);
+                    } else if entry.extension().is_some_and(|e| e == "rb") {
+                        pending.push(entry);
+                    }
+                }
+            }
+        }
         for (relative, feature) in requires(&text) {
             let base = if relative { file.parent().unwrap().to_path_buf() } else { lib.clone() };
             let path = base.join(if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") });
@@ -89,6 +136,24 @@ fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BT
         }
     }
     Ok(seen)
+}
+
+// `None` for an ignore written other than `"#{__dir__}/…"`: mounting what it leaves out would ingest code the gem never loads.
+fn zeitwerk_ignores(text: &str, dir: &Path) -> Option<Vec<PathBuf>> {
+    if !text.contains("Zeitwerk::Loader.for_gem") || !text.contains(".setup") {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices(".ignore(") {
+        let rest = &text[at + ".ignore(".len()..];
+        let arg = rest.split(')').next()?.trim();
+        let rel = arg.strip_prefix("\"#{__dir__}/")?.strip_suffix('"')?;
+        if rel.contains('#') || rel.contains('*') {
+            return None;
+        }
+        out.push(normalize(&dir.join(rel)));
+    }
+    Some(out)
 }
 
 fn requires(text: &str) -> Vec<(bool, String)> {
@@ -239,6 +304,35 @@ mod tests {
     }
 
     #[test]
+    fn the_gemfile_require_names_the_entry_files() {
+        let root = std::env::temp_dir().join(format!("rh-source-gems-require-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        write("app/.bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n");
+        let gem = "app/vendor/bundle/ruby/3.4.0/gems/svg-graph-2.2.2";
+        write(&format!("{gem}/lib/SVG/Graph/TimeSeries.rb"), "require_relative \"Plot\"\n");
+        write(&format!("{gem}/lib/SVG/Graph/Plot.rb"), "module SVG; end\n");
+        write(&format!("{gem}/lib/svggraph.rb"), "module SVG; end\n");
+        let lock_with = |requires: &[&str]| {
+            let mut lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    svg-graph (2.2.2)\n\nDEPENDENCIES\n  svg-graph\n");
+            lock.gemfile_requires.insert("svg-graph".to_string(), requires.iter().map(|r| r.to_string()).collect());
+            lock
+        };
+        let vfs = crate::vfs::FsVfs::new();
+        let names = ["svg-graph".to_string()];
+        let gems = resolve(&vfs, &root.join("app"), Some(&lock_with(&["SVG/Graph/TimeSeries", "svggraph.rb"])), &names).unwrap();
+        let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(files, vec!["lib/SVG/Graph/Plot.rb", "lib/SVG/Graph/TimeSeries.rb", "lib/svggraph.rb"]);
+        let err = resolve(&vfs, &root.join("app"), Some(&lock_with(&["SVG/Graph/TimeSeries", "SVG/Missing"])), &names).err().unwrap();
+        assert!(err.contains("\"SVG/Missing\""), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn an_autoloaded_file_is_compiled_with_the_gem() {
         let root = std::env::temp_dir().join(format!("rh-source-gems-autoload-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -259,6 +353,32 @@ mod tests {
         let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
         let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
         assert_eq!(files, vec!["lib/widgets/base.rb", "lib/widgets.rb"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_zeitwerk_gem_brings_every_lib_file_it_does_not_ignore() {
+        let root = std::env::temp_dir().join(format!("rh-source-gems-zeitwerk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        write("app/.bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n");
+        let gem = "app/vendor/bundle/ruby/3.4.0/gems/widgets-1.0";
+        write(
+            &format!("{gem}/lib/widgets.rb"),
+            "require \"zeitwerk\"\nloader = Zeitwerk::Loader.for_gem\nloader.ignore(\"#{__dir__}/widgets/templates\")\nloader.setup\nmodule Widgets; end\n",
+        );
+        write(&format!("{gem}/lib/widgets/part.rb"), "module Widgets; class Part; end; end\n");
+        write(&format!("{gem}/lib/widgets/part/kind.rb"), "module Widgets; class Part; class Kind; end; end; end\n");
+        write(&format!("{gem}/lib/widgets/templates/model.rb"), "class <%= name %>; end\n");
+        write(&format!("{gem}/lib/widgets/notes.txt"), "not ruby\n");
+        let lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.0)\n\nDEPENDENCIES\n  widgets\n");
+        let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
+        let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(files, vec!["lib/widgets/part/kind.rb", "lib/widgets/part.rb", "lib/widgets.rb"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

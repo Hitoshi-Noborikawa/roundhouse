@@ -647,6 +647,9 @@ pub enum ValidationRule {
     Length {
         min: Option<u32>,
         max: Option<u32>,
+        /// `is:` — the one length Rails accepts (`wrong_length`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is: Option<u32>,
         /// `message:` override for the length failure text. Forced by
         /// the Sequel front-end (`validates_min_length 10, :body,
         /// message: "..."`); Rails' `length: { minimum: 10, message:
@@ -720,6 +723,13 @@ pub enum ValidationRule {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         range: Option<InclusionRange>,
     },
+    /// `inclusion: { in: ->(record) { … } }`, `in: -> { … }` or `in: :method`:
+    /// the set Rails asks for at validation time, with the record as
+    /// `self` (a lambda's parameter is `self`). `set.include?(value)`
+    /// decides, so a nil set raises `NoMethodError` as it does in Rails.
+    InclusionCall { set: Expr },
+    /// `exclusion:` with a callable `in:`, as `InclusionCall`.
+    ExclusionCall { set: Expr },
     Custom {
         method: Symbol,
         /// `validate :m, if: :pred` / `unless: :pred` — the instance
@@ -788,6 +798,9 @@ pub enum CallbackHook {
     /// name and fires it in the right two places.
     AfterSaveCommit,
     AfterRollback,
+    /// `after_initialize :set_salt` — runs on construction and on load,
+    /// the same `def after_initialize` the block form lowers to.
+    AfterInitialize,
 }
 
 /// A formal parameter on a `MethodDef`. Carries the parameter name, an
@@ -1224,6 +1237,13 @@ pub enum LibraryClassOrigin {
         declaration_span: Span,
         fields: Vec<RepresentableField>,
     },
+    /// An `ActiveModel::Serializer` expanded by
+    /// `ingest::active_model_serializer`: its attributes, in declaration
+    /// order (each read by `ams_<name>`).
+    ActiveModelSerializer {
+        declaration_span: Span,
+        fields: Vec<Symbol>,
+    },
     /// Per-resource params holder synthesized from a controller's
     /// `permit([:f1, :f2, …])` declaration. `resource` is the singular
     /// model name (e.g. `:article`); `fields` is the permitted column
@@ -1254,6 +1274,11 @@ pub enum LibraryClassOrigin {
     StructConstant {
         members: Vec<Symbol>,
         keyword_init: bool,
+        /// `keyword_init: false` written out: Ruby then passes a keyword
+        /// call as one Hash to the first member, as the positional
+        /// constructor does. Omitted, Ruby binds keywords by member name.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        positional_written: bool,
     },
     /// A `Dry::Struct` class lowered into its readers and constructor
     /// (`ingest::dry_struct`). Carried so a target can tell the coercions
@@ -1958,6 +1983,18 @@ impl ResourceScope {
 /// Surface forms of a routes.rb entry. Preserves source structure so
 /// `resources :articles do ... end` round-trips byte-for-byte; a downstream
 /// target emitter that needs concrete routes expands via [`RouteSpec::expand`].
+/// The `constraints` key of a route's requirement on its `(.:format)`
+/// extension (`constraints: { format: /csv|json/ }`, `format: false`).
+/// Kept apart from `format`, which there is the route's forced response
+/// format (`format: "rss"`, `defaults: { format: :json }`): Rails keeps a
+/// requirement and a default apart, and a requirement forces nothing on
+/// a request that sends no extension. Not a name a path param can take.
+pub const FORMAT_REQUIREMENT: &str = "(.:format)";
+
+/// The `FORMAT_REQUIREMENT` value of `format: false`: no extension is
+/// accepted. Not a regex source; the route lowering knows it by name.
+pub const FORMAT_NONE: &str = "";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteSpec {

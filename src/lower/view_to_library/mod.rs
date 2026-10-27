@@ -232,11 +232,15 @@ pub struct ViewLowerCtx<'a> {
     app: &'a App,
     known_models: Vec<String>,
     closures: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    /// See the ViewCtx field of the same name.
+    view_formats: std::rc::Rc<std::collections::HashSet<(ViewKey, ViewKind, String)>>,
     dyn_pools: std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
     /// Partials whose body renders a `file_field` — see
     /// `ViewCtx::multipart_partials`.
     multipart_partials: std::rc::Rc<std::collections::HashSet<ViewKey>>,
     partial_extras: std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
+    /// See [`request_context_views`].
+    request_context: std::rc::Rc<std::collections::HashSet<String>>,
     locals_keys: std::collections::HashMap<(String, String), Vec<String>>,
     reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
     reference_targets: std::rc::Rc<std::collections::HashMap<String, String>>,
@@ -301,9 +305,11 @@ impl<'a> ViewLowerCtx<'a> {
                 .map(|m| m.name.0.as_str().to_string())
                 .collect(),
             closures: std::rc::Rc::new(view_ivar_closures(&app.views, &app.controllers)),
+            view_formats: std::rc::Rc::new(view_formats(&app.views)),
             dyn_pools: std::rc::Rc::new(dynamic_partial_pools(&app.controllers)),
             multipart_partials: std::rc::Rc::new(multipart_partials(&app.views)),
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
+            request_context: std::rc::Rc::new(request_context_views(&app.views)),
             locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
@@ -442,7 +448,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // Flash rename → ivar rewrite → extras collect, one pipeline shared
     // with the call-site contracts (see `extra_params::rewritten_extras`).
     let (rewritten, extra_params) =
-        rewritten_extras(view, &ivar_locals, &arg_name, keys.map(Vec::as_slice));
+        rewritten_extras(view, &ivar_locals, &arg_name, keys.map(Vec::as_slice), lx.request_context.contains(view.name.as_str()));
 
     // Rewrite `defined?(name)` marker Sends to `!name.nil?` checks.
     // Runs AFTER collect_extra_params so the inner Var name has been
@@ -718,6 +724,25 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
                 kind: ParamKind::Keyword { required: p.default.is_none() },
             });
         }
+        // Keywords, not positional extras: a strict partial's callers bind by name, and an omitted one stays nil.
+        if lx.request_context.contains(view.name.as_str()) {
+            for name in ["action_name", "controller_name", "path_parameters"] {
+                if declared.contains(name) {
+                    continue;
+                }
+                new_params.push(Param::keyword(Symbol::from(name), Some(nil_lit())));
+                let ty = if name == "path_parameters" {
+                    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }
+                } else {
+                    Ty::Str
+                };
+                sig_params.push(TyParam {
+                    name: Symbol::from(name),
+                    ty: Ty::Union { variants: vec![ty, Ty::Nil].into() }.into(),
+                    kind: ParamKind::Keyword { required: false },
+                });
+            }
+        }
         params = new_params;
         // Nullable-for-predicates: nil-defaulted keyword locals PLUS any
         // Untyped record/closure param. Built BEFORE sig_params is moved
@@ -748,6 +773,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         locals = std::iter::once(record_name.clone())
             .chain(closure.iter().cloned())
             .chain(kw_locals.iter().map(|p| p.name.as_str().to_string()))
+            .chain(
+                ["action_name", "controller_name", "path_parameters"]
+                    .into_iter()
+                    .filter(|n| lx.request_context.contains(view.name.as_str()) && !declared.contains(n))
+                    .map(str::to_string),
+            )
             .collect();
     }
 
@@ -777,11 +808,16 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
         partial_ivars: closures.clone(),
+        formats: std::iter::once(view.format.as_str())
+            .chain((view.format.as_str() != "html").then_some("html"))
+            .map(str::to_string)
+            .collect(),
+        view_formats: lx.view_formats.clone(),
         dyn_pools: dyn_pools.clone(),
         multipart_partials: lx.multipart_partials.clone(),
         partial_extras: lx.partial_extras.clone(),
         strict_locals: lx.strict_locals.clone(),
-        view_name: view.name.as_str().to_string(),
+        view_name: crate::lower::view::fragment_template_path(view.name.as_str(), view.format.as_str()),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
         ivar_locals: std::rc::Rc::new(ivar_locals),
@@ -940,11 +976,46 @@ pub fn insert_params_stub(
     info.class_methods.insert(
         Symbol::from("provided"),
         fn_sig(
-            vec![(Symbol::from("sub"), hash), (Symbol::from("key"), Ty::Str)],
+            vec![(Symbol::from("sub"), hash.clone()), (Symbol::from("key"), Ty::Str)],
             Ty::Bool,
         ),
     );
-    for name in ["sub", "str", "provided"] {
+    // The scalar readers `from_raw` calls and the multiparameter record
+    // it keeps — Rails' cast on the Ruby family, pass-throughs on the
+    // other targets (each target's `params` runtime).
+    let strs = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+    info.class_methods.insert(
+        Symbol::from("scalar_provided"),
+        fn_sig(vec![(Symbol::from("sub"), hash.clone()), (Symbol::from("key"), Ty::Str)], Ty::Bool),
+    );
+    info.class_methods.insert(
+        Symbol::from("scalar"),
+        fn_sig(vec![(Symbol::from("sub"), hash.clone()), (Symbol::from("key"), Ty::Str)], Ty::Str),
+    );
+    info.class_methods.insert(Symbol::from("no_fields"), fn_sig(vec![], strs.clone()));
+    info.class_methods.insert(
+        Symbol::from("multiparameter_fields"),
+        fn_sig(vec![(Symbol::from("sub"), hash.clone()), (Symbol::from("keys"), strs.clone())], strs.clone()),
+    );
+    info.class_methods.insert(
+        Symbol::from("multiparameter_unsupported"),
+        fn_sig(vec![(Symbol::from("sub"), hash), (Symbol::from("keys"), strs.clone())], Ty::Bool),
+    );
+    info.class_methods.insert(
+        Symbol::from("any_of"),
+        fn_sig(vec![(Symbol::from("list"), strs.clone()), (Symbol::from("names"), strs)], Ty::Bool),
+    );
+    for name in [
+        "sub",
+        "str",
+        "provided",
+        "scalar_provided",
+        "scalar",
+        "no_fields",
+        "multiparameter_fields",
+        "multiparameter_unsupported",
+        "any_of",
+    ] {
         info.class_method_kinds
             .insert(Symbol::from(name), crate::dialect::AccessorKind::Method);
     }
@@ -1201,6 +1272,13 @@ pub fn insert_db_stub(
                 }),
             },
         ),
+    );
+    // The tables inside a `Model.unscoped` block on this thread
+    // (relation.rb's `Relation.unscoped_tables`), boxed per thread like
+    // the transaction state above.
+    db_info.class_methods.insert(
+        Symbol::from("_unscoped_tables"),
+        fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
     );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 
@@ -2020,7 +2098,7 @@ pub(crate) fn build_view_signature(
     for n in extra_params {
         sig_params.push(TyParam {
             name: crate::ident::Symbol::from(n.as_str()),
-            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }.into(),
+            ty: extra_param_ty(n).into(),
             kind: ParamKind::Optional,
         });
     }
@@ -2598,6 +2676,7 @@ pub(crate) fn partial_call_contracts(
     // Same record derivation as `build_library_class` / `partial_extras_map`
     // so `flash_locals` sees one handed name across def and callers.
     let (collection_locals, _) = collection_element_locals_from_views(views);
+    let request_context = request_context_views(views);
     let mut out = std::collections::HashMap::new();
     for view in views {
         let (dir, base) = split_view_name(view.name.as_str());
@@ -2635,7 +2714,7 @@ pub(crate) fn partial_call_contracts(
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
         let keys = keys_map.get(&key).map(Vec::as_slice);
-        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys);
+        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys, request_context.contains(view.name.as_str()));
         // The def side names each closure param by `ivar_locals` and
         // skips the one the record covers. The caller passes `@<ivar>`
         // for the rest, so the contract keeps the RAW ivar name: the
@@ -2670,6 +2749,7 @@ pub(crate) fn action_view_ivar_map(
     // view itself doesn't read it.
     let closures = view_ivar_closures(views, controllers);
     let json_closures = crate::lower::jbuilder_to_library::jbuilder_ivar_closures(views, models);
+    let request_context = request_context_views(views);
     let mut out = std::collections::HashMap::new();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
@@ -2741,9 +2821,9 @@ pub(crate) fn action_view_ivar_map(
             key,
             ViewArgs {
                 ivars,
-                uses_action_name: view_uses_bare_name(&v.body, "action_name"),
-                uses_controller_name: view_uses_bare_name(&v.body, "controller_name"),
-                uses_path_parameters: view_uses_url_options_hash(&v.body),
+                uses_action_name: view_uses_bare_name(&v.body, "action_name") || request_context.contains(v.name.as_str()),
+                uses_controller_name: view_uses_bare_name(&v.body, "controller_name") || request_context.contains(v.name.as_str()),
+                uses_path_parameters: view_uses_url_options_hash(&v.body) || request_context.contains(v.name.as_str()),
             },
         );
     }
@@ -2762,6 +2842,85 @@ pub(crate) fn view_uses_url_options_hash(body: &Expr) -> bool {
     let mut sets = Vec::new();
     crate::lower::routes_to_library::collect_url_option_key_sets(body, &mut sets);
     !sets.is_empty()
+}
+
+/// A URL a view builds from a Hash known only at run time (`link_to
+/// "Page 2", @moderation_params.merge(page: 2)`): not a literal Hash,
+/// which `emit_url_options_hash` resolves, but a value the analyzer
+/// typed as a Hash.
+pub(crate) fn dynamic_url_hash(url: &Expr) -> bool {
+    // Not only a Hash: `url_for` reads request parameters (`params.merge(page: 2)`) the same way.
+    !matches!(&*url.node, ExprNode::Hash { .. })
+        && match url.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+            Some(crate::ty::Ty::Hash { .. }) => true,
+            Some(crate::ty::Ty::Class { id, .. }) => id.0.as_str() == "ActionController::Parameters",
+            _ => false,
+        }
+}
+
+/// Does the view link to a [`dynamic_url_hash`] URL? Such a view reads
+/// the request's controller, action and path parameters.
+pub(crate) fn view_uses_dynamic_url_hash(body: &Expr) -> bool {
+    fn walk(e: &Expr) -> bool {
+        if let ExprNode::Send { recv: None, method, args, block, .. } = &*e.node {
+            let url = if block.is_some() && matches!(method.as_str(), "link_to" | "button_to") {
+                args.first()
+            } else {
+                match crate::lower::view::classify_view_helper(method.as_str(), args) {
+                    Some(crate::lower::view::ViewHelperKind::LinkTo { url, .. })
+                    | Some(crate::lower::view::ViewHelperKind::LinkToIf { url, .. })
+                    | Some(crate::lower::view::ViewHelperKind::ButtonTo { target: url, .. }) => Some(url),
+                    _ => None,
+                }
+            };
+            // A conditional URL resolves branch by branch (`emit_url_arg`).
+            fn any_branch(url: &Expr) -> bool {
+                match &*url.node {
+                    ExprNode::If { then_branch, else_branch, .. } => any_branch(then_branch) || any_branch(else_branch),
+                    _ => dynamic_url_hash(url),
+                }
+            }
+            if url.is_some_and(any_branch) {
+                return true;
+            }
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| found = found || walk(c));
+        found
+    }
+    walk(body)
+}
+
+/// The views that need the request's controller, action and path
+/// parameters for a [`dynamic_url_hash`] URL: those linking to one, and
+/// those rendering a partial that does, so the values reach the partial.
+pub(crate) fn request_context_views(views: &[View]) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = views
+        .iter()
+        .filter(|v| view_uses_dynamic_url_hash(&v.body))
+        .map(|v| v.name.as_str().to_string())
+        .collect();
+    let pools = std::collections::HashMap::new();
+    loop {
+        let needed: std::collections::HashSet<ViewKey> = views
+            .iter()
+            .filter(|v| out.contains(v.name.as_str()) && split_view_name(v.name.as_str()).1.starts_with('_'))
+            .filter_map(view_key_of)
+            .collect();
+        let more: Vec<String> = views
+            .iter()
+            .filter(|v| !out.contains(v.name.as_str()))
+            .filter(|v| {
+                let (dir, _) = split_view_name(v.name.as_str());
+                render_partial_keys(&v.body, dir, &pools).iter().any(|k| needed.contains(k))
+            })
+            .map(|v| v.name.as_str().to_string())
+            .collect();
+        if more.is_empty() {
+            return out;
+        }
+        out.extend(more);
+    }
 }
 
 pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {
@@ -2806,6 +2965,7 @@ pub(super) fn partial_extras_map(
     let closures = view_ivar_closures(&app.views, &app.controllers);
     let keys_map = render_locals_keys(&app.views, &app.controllers, &app.library_classes);
     let collection_locals = collection_element_locals(&app.views, app);
+    let request_context = request_context_views(&app.views);
     let mut out: std::collections::HashMap<(String, String), Vec<String>> =
         std::collections::HashMap::new();
     for view in &app.views {
@@ -2821,7 +2981,7 @@ pub(super) fn partial_extras_map(
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
         let keys = keys_map.get(&key).map(Vec::as_slice);
-        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys);
+        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys, request_context.contains(view.name.as_str()));
         // locals-key params — mirrors the def site's append exactly.
         let closure: Vec<String> =
             closure_raw.iter().map(|s| ivar_local(&ivar_locals, s.as_str())).collect();
@@ -2868,6 +3028,32 @@ fn multipart_partials(views: &[View]) -> std::collections::HashSet<ViewKey> {
             base.starts_with('_') && has_file_field(&v.body)
         })
         .filter_map(view_key_of)
+        .collect()
+}
+
+/// Which of a key's views a render looks up. `view_key_of` drops the
+/// partial's `_`, so `_show.html.erb` and `show.turbo_stream.erb` share
+/// `("Articles", "show")`; Rails resolves `render "show"` among partials
+/// only and `render template:` among templates only.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) enum ViewKind {
+    Partial,
+    Template,
+}
+
+/// Each lowered view's key with its kind and format. The key is
+/// format-blind — `_note.html.erb` and `_note.turbo_stream.erb` share one
+/// ivar closure, which both definitions take and every caller passes — so
+/// the variant a render calls is told apart here (`ViewCtx::render_format`).
+fn view_formats(views: &[View]) -> std::collections::HashSet<(ViewKey, ViewKind, String)> {
+    views
+        .iter()
+        .filter(|v| crate::lower::view::lowers_through_view_path(v))
+        .filter_map(|v| {
+            let (_dir, base) = split_view_name(v.name.as_str());
+            let kind = if base.starts_with('_') { ViewKind::Partial } else { ViewKind::Template };
+            Some((view_key_of(v)?, kind, v.format.as_str().to_string()))
+        })
         .collect()
 }
 
@@ -3315,7 +3501,7 @@ fn collect_ivar_str_assigns(
     >,
 ) {
     if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*e.node {
-        if let Some(entry) = partial_options_from_assign_value(value) {
+        if let Some(entry) = partial_options_from_assign_value(name, value) {
             let slot = acc
                 .entry((dir.to_string(), name.clone()))
                 .or_default()
@@ -3341,7 +3527,15 @@ fn collect_ivar_str_assigns(
 /// a dispatch arm can rebind (`{tag: @tag}` reads as the threaded `tag`
 /// local at the arm); any other value shape is dropped and that local
 /// falls to the partial's header default.
-fn partial_options_from_assign_value(value: &Expr) -> Option<DynPoolEntry> {
+/// The ivar a controller stores a computed `locals:` value in for the
+/// view to read (`@above = {partial: "newest_by_user", locals:
+/// {newest_by_user: by_user}}` stores `by_user` in `@above_newest_by_user`);
+/// `emit::ruby::library`'s collapse of the assignment writes it.
+pub(crate) fn dynamic_local_ivar(ivar: &Symbol, local: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_{}", ivar.as_str(), local.as_str()))
+}
+
+fn partial_options_from_assign_value(ivar: &Symbol, value: &Expr) -> Option<DynPoolEntry> {
     match &*value.node {
         ExprNode::Lit { value: Literal::Str { value: s } } => {
             Some(DynPoolEntry { name: s.as_str().to_string(), locals: Vec::new() })
@@ -3377,11 +3571,13 @@ fn partial_options_from_assign_value(value: &Expr) -> Option<DynPoolEntry> {
                                         }
                                         _ => return None,
                                     };
-                                    matches!(
-                                        &*lv.node,
-                                        ExprNode::Ivar { .. } | ExprNode::Lit { .. }
-                                    )
-                                    .then(|| (lname, lv.clone()))
+                                    // Not dropped when computed (a local, a call): the controller keeps it in an ivar of its own.
+                                    let value = if matches!(&*lv.node, ExprNode::Ivar { .. } | ExprNode::Lit { .. }) {
+                                        lv.clone()
+                                    } else {
+                                        Expr::new(lv.span, ExprNode::Ivar { name: dynamic_local_ivar(ivar, &lname) })
+                                    };
+                                    Some((lname, value))
                                 })
                                 .collect::<Vec<_>>(),
                         ),
@@ -3631,6 +3827,19 @@ pub(crate) fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String])
 /// Build a view method's `Ty::Fn` from its typed primary params (record
 /// arg and/or threaded ivars) followed by the nullable extra params
 /// (notice/alert/action_name/…).
+/// A trailing extra's type: nullable, and a String except for the request's
+/// path parameters (`ActionController::Base#path_parameters`), which the
+/// `url_for` options lowering recalls segments from.
+fn extra_param_ty(name: &str) -> crate::ty::Ty {
+    use crate::ty::Ty;
+    let value = if name == "path_parameters" {
+        Ty::Hash { key: Ty::Str.into(), value: Ty::Str.into() }
+    } else {
+        Ty::Str
+    };
+    Ty::Union { variants: vec![value, Ty::Nil].into() }
+}
+
 pub(crate) fn build_view_signature_from(
     typed: &[(String, crate::ty::Ty)],
     extra_params: &[String],
@@ -3650,7 +3859,7 @@ pub(crate) fn build_view_signature_from(
     for n in extra_params {
         sig_params.push(TyParam {
             name: crate::ident::Symbol::from(n.as_str()),
-            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }.into(),
+            ty: extra_param_ty(n).into(),
             kind: ParamKind::Optional,
         });
     }
@@ -3845,9 +4054,19 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr, locals: &IvarLocals) -> Expr 
             op: *op,
             value: r(value),
         },
-        other => other.clone(),
+        // Not a verbatim clone: `case`/`when` arms (lobsters' search parse tree) read ivars too.
+        other => {
+            let mut node = other.clone();
+            node.for_each_child_mut(&mut |c| *c = r(c));
+            node
+        }
     };
-    Expr::new(expr.span, new_node)
+    let mut out = Expr::new(expr.span, new_node);
+    // `@article.class::STATES` stays a path (`expr::CONST_PATH`).
+    out.decisions |= expr.decisions & crate::expr::CONST_PATH;
+    // Not a fresh, untyped node: the i18n lowering's `[]` names and values are typed `Array[String]`
+    out.ty = expr.ty.clone();
+    out
 }
 
 fn rewrite_lvalue(lv: &LValue, locals: &IvarLocals) -> LValue {
@@ -4379,6 +4598,16 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    /// The formats a render here looks a view up in, in order: this
+    /// view's own, as Rails prepends the rendering template's format to
+    /// the lookup, then html. `formats:` and the `turbo_stream` builder
+    /// replace the list.
+    pub(super) formats: Vec<String>,
+    /// Every lowered view's key, kind and format (`view_formats`), so a
+    /// render can tell which of `formats` its partial or template has a
+    /// variant in.
+    pub(super) view_formats:
+        std::rc::Rc<std::collections::HashSet<(ViewKey, ViewKind, String)>>,
     /// Partials whose body renders a `file_field` (`multipart_partials`).
     /// A `form_with` block that renders one of these is a multipart
     /// form exactly as if the field were in the block itself — Rails'
@@ -4420,7 +4649,9 @@ pub(super) struct ViewCtx {
     /// can key on the SAME record — campfire's `_message` and a
     /// `_message` in a turbo-stream refresh both cache `[message,
     /// "presentation-v2"]` — so the site has to be in the key or one
-    /// would serve the other's markup.
+    /// would serve the other's markup. A non-html variant carries its
+    /// format (`messages/_message.turbo_stream`,
+    /// `fragment_template_path`) for the same reason.
     pub(super) view_name: String,
     pub(super) ivar_models:
         std::rc::Rc<std::collections::HashMap<String, String>>,
@@ -4606,6 +4837,42 @@ impl ViewCtx {
             }
         }
         next
+    }
+
+    /// This scope with renders looking partials up in exactly `formats`.
+    pub(super) fn in_formats(&self, formats: &[&str]) -> Self {
+        Self { formats: formats.iter().map(|f| f.to_string()).collect(), ..self.clone() }
+    }
+
+    /// This scope for a `render` called with `args`: its `formats:`
+    /// option replaces the lookup for that render and all it renders, a
+    /// layout's block included (`ActionView::Base#in_rendering_context`).
+    pub(super) fn for_render(&self, args: &[Expr]) -> Self {
+        match crate::lower::view::render_formats_option(args) {
+            Some(formats) => self.in_formats(&formats),
+            None => self.clone(),
+        }
+    }
+
+    /// The format of the `(module, stem)` variant of `kind` a render here
+    /// reaches: the first of `formats` the view has one in. The html one
+    /// is the fallback a Turbo request leaves in Rails' lookup — its
+    /// `Accept` lists `text/html`, and the `turbo_stream` builder adds
+    /// `:html`. With none, html too: the name every call site had before
+    /// formats were told apart, for a view `view_formats` does not index.
+    pub(super) fn render_format(&self, kind: ViewKind, module: &str, stem: &str) -> &str {
+        let key = (module.to_string(), stem.to_string());
+        self.formats
+            .iter()
+            .find(|f| self.view_formats.contains(&(key.clone(), kind, (*f).clone())))
+            .map_or("html", String::as_str)
+    }
+
+    /// The method a render of the `(module, stem)` view of `kind` calls,
+    /// named as `build_library_class` names the variant `render_format`
+    /// picks.
+    pub(super) fn render_method(&self, kind: ViewKind, module: &str, stem: &str) -> Symbol {
+        crate::lower::view::view_method_name_for(stem, self.render_format(kind, module, stem))
     }
 }
 

@@ -257,6 +257,55 @@ pub struct Lockfile {
     /// The `PLATFORMS` section.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub platforms: Vec<String>,
+    /// The app Gemfile's `require:` per gem (`gem "svg-graph", require:
+    /// "SVG/Graph/TimeSeries"`): what Bundler loads in place of the gem's
+    /// name. An empty list is `require: false`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub gemfile_requires: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// Every `gem "<name>", …, require: <String | [String] | false>` in a
+/// Gemfile, at its top level or inside a block (`group :x do … end`).
+pub fn gemfile_requires(source: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    struct Gems(std::collections::BTreeMap<String, Vec<String>>);
+    fn string(node: &ruby_prism::Node<'_>) -> Option<String> {
+        node.as_string_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned())
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Gems {
+        fn visit_call_node(&mut self, call: &ruby_prism::CallNode<'pr>) {
+            if call.receiver().is_none() && call.name().as_slice() == b"gem" {
+                let args: Vec<ruby_prism::Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                if let Some(name) = args.first().and_then(string) {
+                    for arg in &args[1..] {
+                        let Some(hash) = arg.as_keyword_hash_node() else { continue };
+                        for element in hash.elements().iter() {
+                            let Some(pair) = element.as_assoc_node() else { continue };
+                            let is_require = pair.key().as_symbol_node().is_some_and(|k| k.unescaped() == b"require");
+                            if !is_require {
+                                continue;
+                            }
+                            let value = pair.value();
+                            let features = if value.as_false_node().is_some() {
+                                Some(Vec::new())
+                            } else if let Some(one) = string(&value) {
+                                Some(vec![one])
+                            } else {
+                                value.as_array_node().and_then(|a| a.elements().iter().map(|e| string(&e)).collect())
+                            };
+                            if let Some(features) = features {
+                                self.0.insert(name.clone(), features);
+                            }
+                        }
+                    }
+                }
+            }
+            ruby_prism::visit_call_node(self, call);
+        }
+    }
+    let parsed = ruby_prism::parse(source.as_bytes());
+    let mut gems = Gems(std::collections::BTreeMap::new());
+    ruby_prism::Visit::visit(&mut gems, &parsed.node());
+    gems.0
 }
 
 /// One `GIT` source from a Bundler lockfile.
@@ -812,6 +861,10 @@ pub(crate) fn gem_providing_dsl(lock: &Lockfile, dsl: &str) -> Option<&'static s
         .copied()
 }
 
+pub fn claims_surface(gem: &str) -> bool {
+    SURFACES.iter().any(|(name, _)| *name == gem)
+}
+
 /// The gem whose surface a method name belongs to, if any of the
 /// gems in `lock` claim it. `None` when no present gem claims the
 /// name. Modeled gems never claim (their surface resolves).
@@ -1135,34 +1188,62 @@ pub fn rails_dependent_owner<'a>(
     app: &'a crate::App,
     detail: &str,
 ) -> Option<&'a crate::extensions::RailsDependentGem> {
+    let app_owned = AppConstants::of(app);
     app.extensions
         .rails_dependent
         .iter()
-        .find(|row| extension_owns_constant(app, &row.gem, detail))
+        .find(|row| extension_owns_constant(app, &app_owned, &row.gem, detail))
 }
 
-fn extension_owns_constant(app: &crate::App, gem: &str, path: &str) -> bool {
+/// Constants the app itself defines, indexed once so that asking whether a
+/// gem owns a path does not rescan every model, controller and class.
+struct AppConstants {
+    /// Names of models, controllers and library classes.
+    classes: std::collections::HashSet<String>,
+    /// `Owner::NAME` for each constant an app class or model body assigns.
+    values: std::collections::HashSet<String>,
+}
+
+impl AppConstants {
+    fn of(app: &crate::App) -> Self {
+        let mut classes = std::collections::HashSet::new();
+        let mut values = std::collections::HashSet::new();
+        classes.extend(app.models.iter().map(|model| model.name.0.as_str().to_string()));
+        classes.extend(app.controllers.iter().map(|controller| controller.name.0.as_str().to_string()));
+        classes.extend(app.library_classes.iter().map(|class| class.name.0.as_str().to_string()));
+        for class in app.library_classes.iter().chain(app.rails_application.iter()) {
+            for (name, _) in &class.constants {
+                values.insert(format!("{}::{}", class.name.0.as_str(), name.as_str()));
+            }
+        }
+        for model in &app.models {
+            for item in &model.body {
+                if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
+                    if let crate::expr::ExprNode::Assign {
+                        target: crate::expr::LValue::Const { path: assigned }, ..
+                    } = &*expr.node
+                    {
+                        if let [name] = assigned.as_slice() {
+                            values.insert(format!("{}::{}", model.name.0.as_str(), name.as_str()));
+                        }
+                    }
+                }
+            }
+        }
+        AppConstants { classes, values }
+    }
+
+    fn defines(&self, path: &str) -> bool {
+        self.classes.contains(path) || self.values.contains(path)
+    }
+}
+
+fn extension_owns_constant(app: &crate::App, app_owned: &AppConstants, gem: &str, path: &str) -> bool {
     let path = path.trim_start_matches("::");
     if crate::gem_boundary::RUBY_CORE.contains(&path) {
         return false;
     }
-    if app.models.iter().any(|model| model.name.0.as_str() == path)
-        || app.controllers.iter().any(|controller| controller.name.0.as_str() == path)
-        || app.library_classes.iter().any(|class| class.name.0.as_str() == path)
-    {
-        return false;
-    }
-    let owns_value = |owner: &str, name: &str| {
-        path.strip_prefix(owner).and_then(|rest| rest.strip_prefix("::")) == Some(name)
-    };
-    if app.library_classes.iter().chain(app.rails_application.iter()).any(|class| {
-        class.constants.iter().any(|(name, _)| owns_value(class.name.0.as_str(), name.as_str()))
-    }) || app.models.iter().any(|model| model.body.iter().any(|item| {
-        matches!(item, crate::dialect::ModelBodyItem::Unknown { expr, .. }
-            if matches!(&*expr.node, crate::expr::ExprNode::Assign {
-                target: crate::expr::LValue::Const { path: assigned }, ..
-            } if matches!(assigned.as_slice(), [name] if owns_value(model.name.0.as_str(), name.as_str()))))
-    })) {
+    if app_owned.defines(path) {
         return false;
     }
     if app.gem_boundary.classes.get(&crate::ident::ClassId(crate::ident::Symbol::from(path)))
@@ -1176,6 +1257,45 @@ fn extension_owns_constant(app: &crate::App, gem: &str, path: &str) -> bool {
             let namespace = namespace_of(gem);
             path == namespace || path.strip_prefix(&namespace).is_some_and(|rest| rest.starts_with("::"))
         }
+    }
+}
+
+/// What owns a constant path; the same path recurs across many references.
+#[derive(Clone, Copy)]
+enum Owner<'a> {
+    None,
+    RailsDependent(&'a crate::extensions::RailsDependentGem),
+    Native(&'a str),
+}
+
+/// Answers "which gem owns this path" once per distinct path.
+struct Refuser<'a> {
+    app: &'a crate::App,
+    target: Option<&'a str>,
+    app_owned: AppConstants,
+    owners: std::cell::RefCell<std::collections::HashMap<String, Owner<'a>>>,
+}
+
+impl<'a> Refuser<'a> {
+    fn owner(&self, path: &str) -> Owner<'a> {
+        if let Some(owner) = self.owners.borrow().get(path) {
+            return *owner;
+        }
+        let app = self.app;
+        let owner = if let Some(row) = app.extensions.rails_dependent.iter()
+            .find(|row| extension_owns_constant(app, &self.app_owned, &row.gem, path))
+        {
+            Owner::RailsDependent(row)
+        } else if self.target.is_some_and(|target| !matches!(target, "ruby" | "jruby")) {
+            app.extensions.runtime_gems.iter().map(|row| row.gem.as_str())
+                .chain(app.gem_boundary.loaded.iter().map(String::as_str))
+                .find(|gem| extension_owns_constant(app, &self.app_owned, gem, path))
+                .map_or(Owner::None, Owner::Native)
+        } else {
+            Owner::None
+        };
+        self.owners.borrow_mut().insert(path.to_string(), owner);
+        owner
     }
 }
 
@@ -1194,28 +1314,28 @@ pub(crate) fn extension_gem_refusals(app: &crate::App, target: Option<&str>) -> 
     {
         return Vec::new();
     }
-    fn refusal(app: &crate::App, target: Option<&str>, path: &str, span: Span) -> Option<Diagnostic> {
-        if let Some(row) = rails_dependent_owner(app, path) {
-            return Some(Diagnostic::unsupported(
+    fn refusal(refuser: &Refuser, path: &str, span: Span) -> Option<Diagnostic> {
+        match refuser.owner(path) {
+            Owner::RailsDependent(row) => Some(Diagnostic::unsupported(
                 span,
                 None,
                 "gem_requires_rails",
                 format!("{path}: a project extension marks gem {} rails_dependent: {}", row.gem, row.why),
-            ));
+            )),
+            Owner::Native(owner) => {
+                let target = refuser.target?;
+                Some(Diagnostic::unsupported(
+                    span,
+                    Some(crate::ident::Symbol::from(target)),
+                    "native_extension_gem",
+                    format!("{path} is provided by gem {owner}; this target does not load native Ruby gems"),
+                ))
+            }
+            Owner::None => None,
         }
-        let target = target.filter(|target| !matches!(*target, "ruby" | "jruby"))?;
-        let owner = app.extensions.runtime_gems.iter().map(|row| row.gem.as_str())
-            .chain(app.gem_boundary.loaded.iter().map(String::as_str))
-            .find(|gem| extension_owns_constant(app, gem, path))?;
-        Some(Diagnostic::unsupported(
-            span,
-            Some(crate::ident::Symbol::from(target)),
-            "native_extension_gem",
-            format!("{path} is provided by gem {owner}; this target does not load native Ruby gems"),
-        ))
     }
     fn visit(
-        expr: &Expr, app: &crate::App, target: Option<&str>,
+        expr: &Expr, refuser: &Refuser,
         defined: &impl Fn(Span, &[crate::ident::Symbol]) -> bool, out: &mut Vec<Diagnostic>,
     ) {
         if let ExprNode::Const { path } = &*expr.node {
@@ -1223,20 +1343,21 @@ pub(crate) fn extension_gem_refusals(app: &crate::App, target: Option<&str>) -> 
                 return;
             }
             let path = path.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("::");
-            if let Some(diagnostic) = refusal(app, target, &path, expr.span) {
+            if let Some(diagnostic) = refusal(refuser, &path, expr.span) {
                 out.push(diagnostic);
             }
         }
-        expr.node.for_each_child(&mut |child| visit(child, app, target, defined, out));
+        expr.node.for_each_child(&mut |child| visit(child, refuser, defined, out));
     }
+    let refuser = Refuser { app, target, app_owned: AppConstants::of(app), owners: Default::default() };
     let mut out = Vec::new();
     let resolver = app.const_resolver.for_sources(&app.sources);
     let defined = |span, path: &[crate::ident::Symbol]| resolver.has_definition(span, path);
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, app, target, &defined, &mut out));
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, &refuser, &defined, &mut out));
     for model in &app.models {
         for item in &model.body {
             if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
-                visit(expr, app, target, &defined, &mut out);
+                visit(expr, &refuser, &defined, &mut out);
             }
         }
     }
@@ -1246,7 +1367,7 @@ pub(crate) fn extension_gem_refusals(app: &crate::App, target: Option<&str>) -> 
             if defined_names.contains(parent.0.as_str()) {
                 continue;
             }
-            if let Some(diagnostic) = refusal(app, target, parent.0.as_str(), class.parent_span) {
+            if let Some(diagnostic) = refusal(&refuser, parent.0.as_str(), class.parent_span) {
                 out.push(diagnostic);
             }
         }
@@ -1276,6 +1397,57 @@ pub fn detail_names_external_namespace(detail: &str, root: &str) -> bool {
         start = abs + 1;
     }
     false
+}
+
+/// Hash index over external gem namespace roots: answers
+/// `roots.iter().any(|r| detail_names_external_namespace(detail, r))` by
+/// probing the roots a detail could contain instead of scanning every root,
+/// memoized per detail (the same details repeat across an app).
+#[derive(Default)]
+pub struct ExternalRootIndex {
+    roots: std::collections::HashSet<String>,
+    memo: std::collections::HashMap<String, bool>,
+}
+
+impl ExternalRootIndex {
+    pub fn new<'a>(namespaces: impl IntoIterator<Item = &'a String>) -> Self {
+        Self { roots: namespaces.into_iter().cloned().collect(), memo: Default::default() }
+    }
+
+    /// True when some root satisfies `detail_names_external_namespace`.
+    pub fn names_any(&mut self, detail: &str) -> bool {
+        if self.roots.is_empty() {
+            return false;
+        }
+        if let Some(&hit) = self.memo.get(detail) {
+            return hit;
+        }
+        let hit = self.probe(detail);
+        self.memo.insert(detail.to_string(), hit);
+        hit
+    }
+
+    fn probe(&self, detail: &str) -> bool {
+        if self.roots.contains(detail.trim_start_matches("::")) {
+            return true;
+        }
+        let bytes = detail.as_bytes();
+        // Every `::` is where a root-plus-`::` needle could end.
+        let seps: Vec<usize> = (0..bytes.len().saturating_sub(1))
+            .filter(|&i| bytes[i] == b':' && bytes[i + 1] == b':')
+            .collect();
+        for abs in 0..bytes.len() {
+            // The path-start rule of `detail_names_external_namespace`.
+            if !detail.is_char_boundary(abs) || (abs > 0 && is_ruby_ident_byte(bytes[abs - 1])) {
+                continue;
+            }
+            let first = seps.partition_point(|&p| p < abs);
+            if seps[first..].iter().any(|&p| self.roots.contains(&detail[abs..p])) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 fn is_ruby_ident_byte(b: u8) -> bool {
@@ -1433,6 +1605,47 @@ pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemfile_requires_reads_each_spelling() {
+        let found = gemfile_requires(
+            "gem \"svg-graph\", require: \"SVG/Graph/TimeSeries\"\n\
+             gem \"plain\"\n\
+             group :development do\n  gem \"quiet\", require: false\nend\n\
+             gem \"both\", \"~> 1.0\", require: [\"a\", \"b/c\"]\n",
+        );
+        assert_eq!(found.get("svg-graph"), Some(&vec!["SVG/Graph/TimeSeries".to_string()]));
+        assert_eq!(found.get("quiet"), Some(&Vec::new()));
+        assert_eq!(found.get("both"), Some(&vec!["a".to_string(), "b/c".to_string()]));
+        assert!(!found.contains_key("plain"));
+    }
+
+    #[test]
+    fn external_root_index_matches_the_linear_scan() {
+        let roots: std::collections::BTreeSet<String> =
+            ["Rouge", "Outer::Root", "Root", "A", "Foo::Bar::Baz", "Zeitwerk"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        let details = [
+            "Rouge", "::Rouge", "::::Rouge", "Rouge::X", "::Rouge::X", "NotRouge::X",
+            "App::Types::Rouge::X", "App::Rouge", "Outer::Root::X", "::Outer::Root::X",
+            "X::Outer::Root::Y", "XRoot::Y", "Root::Y::Z", "Q::Root::Y", "_Root::Y", "9Root::Y",
+            "Foo::Bar::Baz::Q", "Foo::Bar::Baz", "X::Foo::Bar::Baz::Q", "Bar::Baz::Q", "A::B",
+            "A", "::A", "", "::", ":::", "::::", "Rouge:Rouge::X", " Rouge::X", "(Rouge::X)",
+            "Rouge::Rouge", "Zeitwerk::Loader::Foo", "Zeit::Foo", "Rouge::", "::Rouge::",
+            "É::Rouge::X", "ÉRouge::X", "Foo::Bar::Qux::Baz::Q", "Outer::Outer::Root::X",
+            "Outer:: Root::X", "Root::", "X Root::Y",
+        ];
+        for set in [roots, std::collections::BTreeSet::new(), ["".to_string()].into()] {
+            let mut index = ExternalRootIndex::new(&set);
+            for detail in details {
+                let linear = set.iter().any(|root| detail_names_external_namespace(detail, root));
+                assert_eq!(index.names_any(detail), linear, "{detail:?} against {set:?}");
+                assert_eq!(index.names_any(detail), linear, "memoized {detail:?}");
+            }
+        }
+    }
 
     #[test]
     fn a_release_version_drops_only_a_listed_platform() {
@@ -1756,3 +1969,42 @@ pub const GEM_STYLESHEETS: &[(&str, &[&str])] = &[
     ("action_text-trix", &["trix"]),
     ("lexxy", &["lexxy-content", "lexxy-editor", "lexxy-variables", "lexxy"]),
 ];
+
+/// Every class and module `runtime/spinel/*.rb` declares, by full name: a gem's
+/// constant ported there (`Net::HTTP::Persistent`) runs on the Spinel tree.
+pub(crate) fn spinel_runtime_constants() -> &'static std::collections::HashSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        struct Declared {
+            nesting: Vec<String>,
+            out: std::collections::HashSet<String>,
+        }
+        impl Declared {
+            fn enter(&mut self, path: &ruby_prism::Node<'_>) {
+                let name = String::from_utf8_lossy(path.location().as_slice()).trim_start_matches("::").to_string();
+                self.nesting.push(name);
+                self.out.insert(self.nesting.join("::"));
+            }
+        }
+        impl<'pr> ruby_prism::Visit<'pr> for Declared {
+            fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+                self.enter(&node.constant_path());
+                ruby_prism::visit_module_node(self, node);
+                self.nesting.pop();
+            }
+            fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+                self.enter(&node.constant_path());
+                ruby_prism::visit_class_node(self, node);
+                self.nesting.pop();
+            }
+        }
+        let mut files = Vec::new();
+        let _ = crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files);
+        let mut declared = Declared { nesting: Vec::new(), out: std::collections::HashSet::new() };
+        for (_, source) in &files {
+            let parsed = ruby_prism::parse(source.as_bytes());
+            ruby_prism::Visit::visit(&mut declared, &parsed.node());
+        }
+        declared.out
+    })
+}

@@ -69,9 +69,23 @@ enum SourceFact {
     },
 }
 
+/// What the recorded constants' names add up to, read once per model class
+/// ([`EnumConstants::names`]).
+struct Names {
+    /// Every `::` segment below the first (`EnumConstants::nested_names`).
+    nested: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Every first segment (`EnumConstants::top_level_names`).
+    top_level: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Every segment (`EnumConstants::defines_name`).
+    segments: std::collections::HashSet<String>,
+}
+
 #[derive(Default)]
 pub(in crate::ingest) struct EnumConstants {
     values: std::collections::HashMap<String, EnumConstant>,
+    /// [`Names`] of `values`' keys, with how many keys that was: names are
+    /// only ever added, so the count says whether it is still current.
+    names: std::cell::RefCell<Option<(usize, std::rc::Rc<Names>)>>,
     /// Lexical owners at each class/module open, keyed by (file, start).
     /// Concern `included do` resolution reads the same table models use.
     pub(in crate::ingest) nesting: std::collections::HashMap<(String, usize), Vec<String>>,
@@ -92,6 +106,11 @@ pub(in crate::ingest) struct EnumConstants {
     /// `NAME = …`, mutates, or lets a variable hold ([`super::ConstTaint`]
     /// over the whole file). By name, whatever owner the write names.
     foreign_taint: std::collections::HashSet<String>,
+    /// `ALIAS = KINDS` edges the boot sources write, across all of them:
+    /// closed over `foreign_taint` once they are all recorded, in
+    /// `finish`, so an alias one initializer writes and a later one
+    /// mutates through taints the original.
+    boot_aliases: Vec<(String, String)>,
     /// Owner names a reflective call reaches (`Rule.const_set`,
     /// `Rule.send(:remove_const, …)`, `Kinds.const_get(:ALL) << x`,
     /// `"Kinds".constantize`, a receiverless `const_set` in the owner's
@@ -132,11 +151,8 @@ impl EnumConstants {
     /// constant through a lexical owner or an ancestor (superclass or
     /// included module), so callers that fold a well-known top-level
     /// constant treat it as possibly shadowed.
-    pub(in crate::ingest) fn nested_names(&self) -> std::collections::HashSet<String> {
-        self.values
-            .keys()
-            .flat_map(|key| key.split("::").skip(1).map(str::to_string))
-            .collect()
+    pub(in crate::ingest) fn nested_names(&self) -> std::rc::Rc<std::collections::HashSet<String>> {
+        self.names().nested.clone()
     }
 
     /// The first segment of every name the app's recorded sources define
@@ -144,11 +160,36 @@ impl EnumConstants {
     /// `URI::MailTo::EMAIL_REGEXP = …`). A well-known top-level constant
     /// under one of these may have been replaced by the app, so callers
     /// must not fold it from a built-in table, whichever way it is spelled.
-    pub(in crate::ingest) fn top_level_names(&self) -> std::collections::HashSet<String> {
-        self.values
-            .keys()
-            .filter_map(|key| key.split("::").next().map(str::to_string))
-            .collect()
+    pub(in crate::ingest) fn top_level_names(&self) -> std::rc::Rc<std::collections::HashSet<String>> {
+        self.names().top_level.clone()
+    }
+
+    /// The names of the constants recorded so far. Every model class asks,
+    /// and a tree has tens of thousands of constants, so they are summed
+    /// once and again only when more were recorded.
+    fn names(&self) -> std::rc::Rc<Names> {
+        if let Some((count, names)) = &*self.names.borrow() {
+            if *count == self.values.len() {
+                return names.clone();
+            }
+        }
+        let mut nested = std::collections::HashSet::new();
+        let mut top_level = std::collections::HashSet::new();
+        let mut segments = std::collections::HashSet::new();
+        for key in self.values.keys() {
+            let mut parts = key.split("::");
+            if let Some(first) = parts.next() {
+                top_level.insert(first.to_string());
+                segments.insert(first.to_string());
+            }
+            for part in parts {
+                nested.insert(part.to_string());
+                segments.insert(part.to_string());
+            }
+        }
+        let names = std::rc::Rc::new(Names { nested: nested.into(), top_level: top_level.into(), segments });
+        *self.names.borrow_mut() = Some((self.values.len(), names.clone()));
+        names
     }
 
     /// Only already-consumed original Ruby can add mutation facts here.
@@ -290,7 +331,7 @@ impl EnumConstants {
     /// Whether any recorded source defines a constant, class or module
     /// named `name` at any depth (`Regexp`, `Admin::Regexp`).
     pub(in crate::ingest) fn defines_name(&self, name: &str) -> bool {
-        self.values.keys().any(|key| key.split("::").any(|segment| segment == name))
+        self.names().segments.contains(name)
     }
 
     /// A mapping named by a constant (or a Sorbet enum's `values`), or
@@ -334,5 +375,51 @@ impl EnumConstants {
                 .collect(),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod names_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn record(constants: &mut EnumConstants, names: &[&str]) {
+        for name in names {
+            constants.values.insert(name.to_string(), EnumConstant::Unsupported);
+        }
+    }
+
+    /// The scans the summed names replaced.
+    fn scanned(constants: &EnumConstants, name: &str) -> (HashSet<String>, HashSet<String>, bool) {
+        let keys = || constants.values.keys();
+        (
+            keys().flat_map(|key| key.split("::").skip(1).map(str::to_string)).collect(),
+            keys().filter_map(|key| key.split("::").next().map(str::to_string)).collect(),
+            keys().any(|key| key.split("::").any(|segment| segment == name)),
+        )
+    }
+
+    #[test]
+    fn summed_names_match_a_scan_and_follow_later_constants() {
+        let mut constants = EnumConstants::default();
+        record(&mut constants, &["Admin", "Admin::URI", "URI::MailTo::PATTERN", "Plan"]);
+        for step in 0..2 {
+            for probe in ["URI", "Admin", "Plan", "PATTERN", "Regexp", "MailTo"] {
+                let (nested, top_level, defined) = scanned(&constants, probe);
+                assert_eq!(*constants.nested_names(), nested, "step {step}");
+                assert_eq!(*constants.top_level_names(), top_level, "step {step}");
+                assert_eq!(constants.defines_name(probe), defined, "{probe} at step {step}");
+            }
+            // Recording more constants refreshes the sums.
+            record(&mut constants, &["Billing::Regexp"]);
+        }
+        assert!(constants.defines_name("Regexp"));
+    }
+
+    #[test]
+    fn a_repeated_ask_shares_the_sum() {
+        let mut constants = EnumConstants::default();
+        record(&mut constants, &["A::B"]);
+        assert!(std::rc::Rc::ptr_eq(&constants.nested_names(), &constants.nested_names()));
     }
 }

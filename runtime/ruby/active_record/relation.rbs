@@ -5,6 +5,23 @@ module ActiveRecord
   # first/take) — not per-model. `Relation[T]` is the later refinement.
   # `preloaded` and set-operator operands stay `untyped` for Spinel
   # integer-seed arrays.
+  class Bounds
+    type bound = Time | Date | String | Integer | Float | nil
+    def lower: () -> bound
+    def upper: () -> bound
+    def initialize: (bound lower, bound upper, bool exclusive) -> void
+    def exclusive?: () -> bool
+  end
+
+  class EagerFilter
+    type nested_spec = Symbol | Hash[Symbol, Symbol] | Array[Symbol | Hash[Symbol, Symbol]] | nil
+    def initialize: (Array[Hash[Symbol, untyped]] conditions, Array[Hash[Symbol, untyped]] negations, Array[Hash[Symbol, untyped]] orders, nested_spec nested) -> void
+    def nested: () -> nested_spec
+    def conditions: () -> Array[Hash[Symbol, untyped]]
+    def negations: () -> Array[Hash[Symbol, untyped]]
+    def orders: () -> Array[Hash[Symbol, untyped]]
+  end
+
   class Relation
     # Model handle is `Base` (class object collapsed onto `Ty::Class{Base}`
     # in send.rs). Do not spell `Class` — that leaves `@model` as Ty::Var
@@ -12,7 +29,9 @@ module ActiveRecord
     # `untyped` (`spinel_relation_model_handle`): Spinel treats `Base` as
     # an instance (`sp_ActiveRecord__Base *`), so `Relation.new(User)`
     # would otherwise fail campfire AOT.
-    def initialize: (Base model) -> void
+    def initialize: (Base model, ?bool scoped) -> void
+    def apply_default_scope!: () -> nil
+    def self.unscoped_tables: () -> Array[String]
 
     # Rails' Relation#spawn — copy query state onto a fresh Relation so
     # a scope fork cannot mutate its caller's accumulators.
@@ -28,13 +47,13 @@ module ActiveRecord
         Array[String] groups,
         Array[String] havings,
         Array[String] ctes,
-        Array[Symbol | Hash[Symbol, Symbol]] includes,
+        Array[Symbol | Hash[Symbol, Symbol | EagerFilter]] includes,
         Hash[Symbol, untyped] attrs
       ) -> Relation
     def copy_string_list: (Array[String] xs) -> Array[String]
     def copy_bool_list: (Array[bool] xs) -> Array[bool]
     def copy_cols_list: (Array[Array[String]] xs) -> Array[Array[String]]
-    def copy_symbol_list: (Array[Symbol | Hash[Symbol, Symbol]] xs) -> Array[Symbol | Hash[Symbol, Symbol]]
+    def copy_symbol_list: (Array[Symbol | Hash[Symbol, Symbol | EagerFilter]] xs) -> Array[Symbol | Hash[Symbol, Symbol | EagerFilter]]
     def copy_scope_attributes: (Hash[Symbol, untyped] attrs) -> Hash[Symbol, untyped]
 
     def where: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
@@ -49,7 +68,7 @@ module ActiveRecord
     @limit: Integer?
     @offset: Integer?
     @records: Array[Base]?
-    @includes: Array[Symbol | Hash[Symbol, Symbol]]
+    @includes: Array[Symbol | Hash[Symbol, Symbol | EagerFilter]]
 
     @from: String?
     @ctes: Array[String]
@@ -167,10 +186,10 @@ module ActiveRecord
     def distinct: (?(bool | Symbol | String) value) -> Relation
     def distinct!: (?(bool | Symbol | String) value) -> Relation
     def all: () -> Relation
-    def includes: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
-    def preload: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
-    def eager_load: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
-    def include_names!: (Array[Symbol | Hash[Symbol, Symbol]] names) -> Relation
+    def includes: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
+    def preload: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
+    def eager_load: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
+    def include_names!: (Array[Symbol | Hash[Symbol, Symbol | EagerFilter]] names) -> Relation
     def skip_preloading!: () -> Relation
     def preload_associations: (Array[Base] records) -> Array[Base]
     def references: (*Symbol names) -> Relation
@@ -334,6 +353,7 @@ module ActiveRecord
     def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
     def find_or_create_by!: (Hash[Symbol, untyped] conditions) -> Base
     def find_or_initialize_by: (Hash[Symbol, untyped] conditions) -> Base
+    def build: (Hash[Symbol, untyped] conditions) -> Base
 
     def to_sql: () -> String
     def bound_sql: () -> String
@@ -347,8 +367,9 @@ module ActiveRecord
     def exists_sql: (Integer n) -> String
     def bound_exists_sql: (Integer n) -> String
     def hash_conditions: (Hash[String | Symbol, untyped] hash) -> String
-    def column_predicate: (String col, Relation | Array[untyped] | Base | String | Integer | Float | bool | nil val) -> String
+    def column_predicate: (String col, Relation | Array[untyped] | Base | Bounds | String | Integer | Float | bool | nil val) -> String
     def range_predicate: (String qcol, untyped range) -> String
+    def bounds_predicate: (String qcol, Time | Date | String | Integer | Float | nil lower, Time | Date | String | Integer | Float | nil upper, bool exclusive) -> String
     def range_bound_sql: (untyped bound) -> String?
     def array_with_ranges_predicate: (String qcol, Array[untyped] vals) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String

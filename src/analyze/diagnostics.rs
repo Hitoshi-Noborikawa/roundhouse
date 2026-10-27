@@ -49,6 +49,75 @@ fn attribute_macro_refusals(app: &App) -> Vec<Diagnostic> {
 }
 
 // One error at each declaration, not one per helper call: the helpers stay typed so their callers still infer
+/// A `FormBuilder` call the form lowering does not expand. The registry
+/// types the whole Rails builder surface (`registry::view`) so a form
+/// body types, but `lower::view_to_library` expands only the methods
+/// `classify_form_builder_method` names; any other survives into the
+/// emit as a literal `form.<method>(…)` with no builder behind it, and
+/// the page fails at render. Typed is not supported (invariant 6), so
+/// each such call is refused here — as is an expanded field given an
+/// option its Rails `render` rewrites and the lowering would pass
+/// through as a plain attribute.
+fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
+    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+            && !expr.span.is_synthetic()
+            && matches!(&r.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionView::Helpers::FormBuilder")
+            && !FORM_BUILDER_HANDLED_ELSEWHERE.contains(&method.as_str())
+        {
+            let m = method.as_str();
+            if crate::lower::classify_form_builder_method(m).is_none() {
+                out.push(Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    "form builder method",
+                    format!(
+                        "`form.{m}` has no lowering (the form lowering expands label, text_field, text_area, password_field, hidden_field, email_field, url_field, number_field, range_field, search_field, telephone_field/phone_field, check_box, radio_button, select, file_field, rich_text_area, button, submit and fields_for), so the call reaches no method at render"
+                    ),
+                ));
+            } else if let Some(opt) = rewritten_option(m, args) {
+                out.push(Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    "form builder option",
+                    format!(
+                        "`form.{m}` with `{opt}:` is not modeled: Rails' field rewrites that option when it renders, and the lowering would write it as a plain attribute"
+                    ),
+                ));
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    /// The option of `method`'s call that Rails' `Tags::*#render`
+    /// rewrites: `NumberField` (and `RangeField`) turn `in:`/`within:`
+    /// into `min`/`max`; `SearchField` expands `autosave:`/`onsearch:`.
+    fn rewritten_option(method: &str, args: &[Expr]) -> Option<&'static str> {
+        let rewritten: &[&'static str] = match method {
+            "number_field" | "range_field" => &["in", "within"],
+            "search_field" => &["autosave", "onsearch"],
+            _ => return None,
+        };
+        let (_, opts) = crate::lower::classify_form_builder_args(args);
+        opts?.iter().find_map(|(k, _)| {
+            let key = match &*k.node {
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.as_str(),
+                ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value.as_str(),
+                _ => return None,
+            };
+            rewritten.iter().find(|o| **o == key).copied()
+        })
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(&view.body, &mut out);
+    }
+    out
+}
+
+/// Builder methods the view lowering serves outside
+/// `classify_form_builder_method`.
+const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
+
 fn devise_refusals(app: &App) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     if app.gem_lock.as_ref().is_some_and(|lock| lock.is_in_repo("devise") || lock.is_source("devise")) {
@@ -90,6 +159,97 @@ fn devise_refusals(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+// Rewritten in place, not added beside: a transpile runs no attribution, so the site's warning would stay its only finding
+fn unshipped_gem_helpers(app: &App, out: &mut Vec<Diagnostic>) {
+    let Some(lock) = &app.gem_lock else { return };
+    let unshipped = |method: &str| {
+        crate::gems::gem_claiming_method(lock, method).filter(|gem| {
+            !lock.is_in_repo(gem)
+                && !lock.is_source(gem)
+                && !app.extensions.runtime_gems.iter().any(|row| row.gem == *gem)
+        })
+    };
+    // Not only a typed app method: one whose body answers no type yet is still the app's, if the call reaches it
+    let controller_defines = |controller: &crate::dialect::Controller, method: &str| {
+        let mut current = Some(controller);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(c) = current {
+            if !seen.insert(c.name.0.as_str()) {
+                break;
+            }
+            if c.actions().any(|a| a.name.as_str() == method) {
+                return true;
+            }
+            current = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| o.name == *p));
+        }
+        false
+    };
+    let view_defines = |method: &str| {
+        let name = Symbol::from(method);
+        app.helper_method_index.contains_key(&name) || app.view_visible_controller_methods.contains(&name)
+    };
+    fn visit<'a>(
+        expr: &'a Expr,
+        unshipped: &impl Fn(&str) -> Option<&'static str>,
+        sites: &mut Vec<(crate::span::Span, &'static str, &'a Symbol)>,
+    ) {
+        if let ExprNode::Send { recv, method, .. } = &*expr.node
+            && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+            && is_unknown_ty(expr.ty.as_ref())
+            && !expr.span.is_synthetic()
+            && let Some(gem) = unshipped(method.as_str())
+        {
+            if !sites.iter().any(|(span, ..)| *span == expr.span) {
+                sites.push((expr.span, gem, method));
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, unshipped, sites));
+    }
+    let mut sites = Vec::new();
+    for controller in &app.controllers {
+        let in_controller = |method: &str| unshipped(method).filter(|_| !controller_defines(controller, method));
+        for action in controller.actions() {
+            for default in action.opt_params.iter().map(|(_, d)| d).chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref())) {
+                visit(default, &in_controller, &mut sites);
+            }
+            visit(&action.body, &in_controller, &mut sites);
+        }
+    }
+    let in_view = |method: &str| unshipped(method).filter(|_| !view_defines(method));
+    for view in &app.views {
+        visit(&view.body, &in_view, &mut sites);
+    }
+    let refusal = |span, gem: &str, method: &Symbol| {
+        Diagnostic::unsupported(
+            span,
+            None,
+            gem,
+            format!(
+                "`{}` is a helper of the `{gem}` gem, which roundhouse does not model and no target ships, so the call reaches no method at run time; `source_gems` compiles a gem from its source",
+                method.as_str()
+            ),
+        )
+    };
+    for d in out.iter_mut() {
+        match &d.kind {
+            DiagnosticKind::UndefinedFilterTarget { target, .. } => {
+                if let Some(gem) = unshipped(target.as_str()) {
+                    let target = target.clone();
+                    *d = refusal(d.span, gem, &target);
+                }
+            }
+            DiagnosticKind::UnresolvedType { .. } | DiagnosticKind::SendDispatchFailed { .. } => {
+                if let Some(i) = sites.iter().position(|(span, ..)| *span == d.span) {
+                    let (span, gem, method) = sites.remove(i);
+                    *d = refusal(span, gem, method);
+                }
+            }
+            _ => {}
+        }
+    }
+    out.extend(sites.into_iter().map(|(span, gem, method)| refusal(span, gem, method)));
+}
+
 /// Walk an analyzed `App` collecting every position where typing failed
 /// in a way that matters for downstream typed emission. Does not modify
 /// the IR — purely a read pass.
@@ -123,6 +283,17 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     out.extend(super::graphql::diagnose(app, diagnose_expr));
     out.extend(super::enum_raw_input::diagnose(app));
     out.extend(super::data::diagnose(app));
+    // Constructor refusals must also reach executable class constants and
+    // parameter defaults, which the ordinary method diagnostic policy omits.
+    fn collect_storage_constructors(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let Some(DiagnosticKind::Unsupported { construct, detail, .. }) = expr.diagnostic()
+            && construct.as_str() == "ActiveStorage constructor"
+        {
+            out.push(Diagnostic::unsupported(expr.span, None, construct.as_str(), detail.clone()));
+        }
+        expr.node.for_each_child(&mut |child| collect_storage_constructors(child, out));
+    }
+    crate::lower::for_each_hook_body_ref(app, &mut |body| collect_storage_constructors(body, &mut out));
     // Rubydex's unresolved constants emit refusal stubs. Collect those
     // annotations from support methods/defaults/constants as well, so
     // an emitted raise cannot be hidden by the library diagnostic policy.
@@ -193,6 +364,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     out.extend(attribute_macro_refusals(app));
+    out.extend(unlowered_form_builder_calls(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));
@@ -256,6 +428,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // ivar channel.
     let (preload_diags, coverage) = preload::missing_preload_report(app);
     out.extend(preload_diags);
+    unshipped_gem_helpers(app, &mut out);
     let refused_gem_sites: std::collections::HashSet<_> = out.iter().filter_map(|diagnostic| {
         matches!(&diagnostic.kind, DiagnosticKind::Unsupported { construct, .. }
             if construct.as_str() == "gem_requires_rails").then_some(diagnostic.span)
@@ -275,6 +448,20 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // walker emits the outer node before recursing, that's the longest,
     // outermost span. Self-correcting: once span preservation gives links
     // distinct starts, they survive on their own again.
+    // Not left a warning: a call only an initializer's top-level `def` answers is a NameError in the emitted app.
+    for d in &mut out {
+        if let DiagnosticKind::UnresolvedType { expr_kind, name: Some(name) } = &d.kind
+            && expr_kind.as_str() == "method call"
+            && app.initializer_defs.contains(name)
+        {
+            *d = Diagnostic::unsupported(
+                d.span,
+                None,
+                "method an initializer defines at top level",
+                format!("`{}` is a method on Object only while the initializer has run, and the emitted app does not replay initializer code", name.as_str()),
+            );
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     out.retain(|d| seen.insert((d.span.file, d.span.start, d.code(), d.message.clone())));
     // A template no request reaches (`ingest::unreachable_views`): its errors stay visible, as warnings.
@@ -369,32 +556,9 @@ pub fn diagnose_helper_modules(app: &App) -> Vec<Diagnostic> {
             diagnose_expr(&method.body, &mut helper_out);
         }
     }
-    // Not errors: the ivar is the rendering view's, which the emitted helper reads as Rails does (only its type is unseeded);
-    // and nullable primitive arithmetic raises where Rails raises, as the library policy already holds.
-    // Only where the value, once not nil, takes the operation: `String? + Integer` fails whatever it holds.
-    fn nil_is_the_only_miss(op: &str, lhs: &Ty, rhs: &Ty) -> bool {
-        let Ty::Union { variants } = lhs else { return false };
-        let numeric = |t: &Ty| matches!(t, Ty::Int | Ty::Float);
-        let present: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
-        variants.iter().any(|v| matches!(v, Ty::Nil))
-            && !present.is_empty()
-            && present.iter().all(|v| match v {
-                Ty::Int | Ty::Float => numeric(rhs) && matches!(op, "+" | "-" | "*" | "/" | "%" | "**" | "<" | ">" | "<=" | ">="),
-                Ty::Str => match op {
-                    "+" | "<" | ">" | "<=" | ">=" => matches!(rhs, Ty::Str),
-                    "*" => matches!(rhs, Ty::Int),
-                    _ => false,
-                },
-                _ => false,
-            })
-    }
+    // Not an error: the ivar is the rendering view's, which the emitted helper reads as Rails does (only its type is unseeded)
     for d in &mut helper_out {
-        let soft = match &d.kind {
-            DiagnosticKind::IvarUnresolved { .. } => true,
-            DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty } => nil_is_the_only_miss(op.as_str(), lhs_ty, rhs_ty),
-            _ => false,
-        };
-        if soft {
+        if matches!(d.kind, DiagnosticKind::IvarUnresolved { .. }) {
             d.severity = crate::diagnostic::Severity::Warning;
         }
     }
@@ -622,18 +786,24 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             DiagnosticKind::GraphqlNullableField { .. } => Diagnostic::stub_text(kind),
             // Produced by `ingest::initializer_ledger` as a returned list.
             DiagnosticKind::UnconsumedInitializer { .. } => Diagnostic::stub_text(kind),
+            // Produced by `ingest::model::validations` as a pushed note.
+            DiagnosticKind::IgnoredValidatorOption { .. } => Diagnostic::stub_text(kind),
         };
         if !matches!(
             kind,
             DiagnosticKind::Unsupported { construct, .. }
                 if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
         ) {
-            out.push(Diagnostic {
-                span: expr.span,
-                kind: kind.clone(),
-                severity: Diagnostic::default_severity(kind),
-                message,
-            });
+            let severity = match kind {
+                // Not an error where some operand arm takes it: Ruby raises for the others, which the ruby family runs as written and a strict target reports or checks (`lower::nil_operand`)
+                DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty }
+                    if crate::analyze::body::some_operands_take_it(op.as_str(), lhs_ty, rhs_ty) =>
+                {
+                    crate::diagnostic::Severity::Warning
+                }
+                _ => Diagnostic::default_severity(kind),
+            };
+            out.push(Diagnostic { span: expr.span, kind: kind.clone(), severity, message });
         }
     }
 

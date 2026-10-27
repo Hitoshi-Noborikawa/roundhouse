@@ -377,12 +377,15 @@ impl Catalog {
                 .map(str::to_string),
         );
         prefixes.push(format!("{scope}.errors.messages."));
-        let entries = self
-            .entries
-            .iter()
-            .filter(|(k, _)| prefixes.iter().any(|p| k.starts_with(p.as_str())))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        // Each prefix names one run of the sorted keys: seek to it rather than
+        // test every key of the catalog (every locale file of every gem) per model.
+        let mut entries = BTreeMap::new();
+        for prefix in &prefixes {
+            let from = (std::ops::Bound::Included(prefix.as_str()), std::ops::Bound::Unbounded);
+            for (k, v) in self.entries.range::<str, _>(from).take_while(|(k, _)| k.starts_with(prefix.as_str())) {
+                entries.insert(k.clone(), v.clone());
+            }
+        }
         Catalog { locale: self.locale.clone(), entries, ..Default::default() }
     }
 
@@ -909,6 +912,35 @@ impl ModelI18n {
     }
 
     /// Each attribute the locale names for this model, with that name.
+    /// The model's own error messages, in Rails' lookup order: under each
+    /// of its keys (its own, then its ancestors'), `<scope>.errors.models.
+    /// <key>.attributes.<attr>.<kind>` as "<attr>.<kind>" and `<scope>.
+    /// errors.models.<key>.<kind>` as "<kind>", with any plural form's
+    /// suffix (".one", ".other", ".zero"). An earlier key's entry wins.
+    pub fn error_overrides(&self) -> Vec<(String, String)> {
+        let scope = self.scope();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for key in &self.keys {
+            let prefix = format!("{scope}.errors.models.{key}.");
+            for (entry, text) in &self.catalog().entries {
+                let Some(rest) = entry.strip_prefix(prefix.as_str()) else { continue };
+                let name = match rest.strip_prefix("attributes.") {
+                    Some(attr_kind) => attr_kind.to_string(),
+                    None => rest.to_string(),
+                };
+                if !out.iter().any(|(k, _)| *k == name) {
+                    out.push((name, text.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// `activerecord`, or `activemodel` for a plain ActiveModel class.
+    pub fn error_scope(&self) -> &str {
+        self.scope()
+    }
+
     pub fn translated_attribute_names(&self) -> Vec<(String, String)> {
         let scope = self.scope();
         let prefixes: Vec<String> =
@@ -1384,5 +1416,36 @@ mod tests {
         )]);
         assert_eq!(c.translate("errors.messages.too_long", Some(5)), Some("is long"));
         assert_eq!(c.lookup("errors.messages.too_long.other"), None);
+    }
+
+    /// `subset_for` seeks each prefix's run of the sorted keys; it keeps what
+    /// a test of every key against every prefix kept, including keys that
+    /// share a leading run with a prefix without matching it.
+    #[test]
+    fn subset_for_seeks_the_same_entries_a_scan_of_every_key_keeps() {
+        let c = catalog(&[(
+            "config/locales/en.yml",
+            "en:\n  attributes:\n    name: Name\n  errors:\n    format: \"%{attribute} %{message}\"\n    messages:\n      blank: blank\n    attributes:\n      base: Base\n    models:\n      user:\n        x: ux\n      user_group:\n        x: gx\n  activerecord:\n    attributes:\n      user:\n        name: User name\n      user_group:\n        name: Group name\n      account:\n        name: Account name\n    errors:\n      messages:\n        taken: taken\n      models:\n        user:\n          attributes:\n            name:\n              blank: no name\n    models:\n      user: User\n      user_group: Group\n      users: Users\n  zz: last\n",
+        )]);
+        let wanted = |scope: &str, keys: &[String]| {
+            let mut prefixes: Vec<String> = keys
+                .iter()
+                .flat_map(|k| {
+                    [format!("{scope}.attributes.{k}."), format!("{scope}.errors.models.{k}."), format!("{scope}.models.{k}")]
+                })
+                .collect();
+            prefixes.extend(["attributes.", "errors.format", "errors.messages.", "errors.attributes."].map(str::to_string));
+            prefixes.push(format!("{scope}.errors.messages."));
+            c.entries
+                .iter()
+                .filter(|(k, _)| prefixes.iter().any(|p| k.starts_with(p.as_str())))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        for keys in [keys(&[]), keys(&["user"]), keys(&["user", "user_group"]), keys(&["account", "absent"])] {
+            assert_eq!(c.subset_for("activerecord", &keys).entries, wanted("activerecord", &keys), "{keys:?}");
+        }
+        assert!(c.subset_for("activerecord", &keys(&["user"])).entries.contains_key("activerecord.models.users"));
+        assert!(!c.subset_for("activerecord", &keys(&["user"])).entries.contains_key("zz"));
     }
 }

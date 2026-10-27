@@ -486,7 +486,99 @@ impl Ty {
         }
     }
 
-    fn holds_record(&self) -> bool {
+    /// A hash that is equal for any two `==` types (a record's fields
+    /// hash order-insensitively, as `IndexMap` equality ignores order).
+    /// Coarse on purpose: it skips what is costly to hash and rarely
+    /// separates (`Fn` params, effects). Lets a large union find an equal
+    /// variant by lookup instead of a scan of `==`.
+    pub(crate) fn eq_fingerprint(&self) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash_eq(&mut h);
+        h.finish()
+    }
+
+    fn hash_eq<H: std::hash::Hasher>(&self, h: &mut H) {
+        use std::hash::Hash;
+        ty_tag(self).hash(h);
+        match self {
+            Ty::Relation { of } => of.hash(h),
+            Ty::Array { elem } => elem.hash_eq(h),
+            Ty::Hash { key, value } => {
+                key.hash_eq(h);
+                value.hash_eq(h);
+            }
+            Ty::Tuple { elems } | Ty::Union { variants: elems } => {
+                elems.len().hash(h);
+                for e in elems.iter() {
+                    e.hash_eq(h);
+                }
+            }
+            Ty::Record { row } => {
+                row.fields.len().hash(h);
+                row.rest.hash(h);
+                let mut sum = 0u64;
+                for (k, v) in row.fields.iter() {
+                    let mut fh = std::collections::hash_map::DefaultHasher::new();
+                    k.hash(&mut fh);
+                    v.hash_eq(&mut fh);
+                    sum = sum.wrapping_add(std::hash::Hasher::finish(&fh));
+                }
+                sum.hash(h);
+            }
+            Ty::Class { id, args } => {
+                id.hash(h);
+                args.len().hash(h);
+                for a in args.iter() {
+                    a.hash_eq(h);
+                }
+            }
+            Ty::Fn { params, ret, .. } => {
+                params.len().hash(h);
+                ret.hash_eq(h);
+            }
+            Ty::Var { var } => var.hash(h),
+            _ => {}
+        }
+    }
+
+    /// Whether this union's variants are already in the form `union_of`
+    /// builds: sorted strictly by the canonical order, no nested union, at
+    /// most one `Hash` and one `Array`, and no record anywhere (two `==`
+    /// records can differ in field order and so sort apart). Re-joining
+    /// such a union with only variants it contains changes nothing.
+    pub(crate) fn is_canonical_union_without_records(variants: &[Ty]) -> bool {
+        let (mut hashes, mut arrays) = (0, 0);
+        for v in variants {
+            match v {
+                Ty::Union { .. } => return false,
+                Ty::Hash { .. } => hashes += 1,
+                Ty::Array { .. } => arrays += 1,
+                _ => {}
+            }
+            if hashes > 1 || arrays > 1 || v.holds_record() {
+                return false;
+            }
+        }
+        variants
+            .windows(2)
+            .all(|w| cmp_ty_nil_last(&w[0], &w[1]) == std::cmp::Ordering::Less)
+    }
+
+    /// The index of a variant `==` to `t` (and not differing from it in
+    /// any record's field order) in a union sorted by the canonical order.
+    pub(crate) fn find_in_sorted_variants(variants: &[Ty], t: &Ty) -> Option<usize> {
+        variants
+            .binary_search_by(|p| cmp_ty_nil_last(p, t))
+            .ok()
+            .filter(|&i| variants[i] == *t)
+    }
+
+    pub(crate) fn cmp_nil_last(a: &Ty, b: &Ty) -> std::cmp::Ordering {
+        cmp_ty_nil_last(a, b)
+    }
+
+    pub(crate) fn holds_record(&self) -> bool {
         match self {
             Ty::Record { .. } => true,
             Ty::Array { elem } => elem.holds_record(),

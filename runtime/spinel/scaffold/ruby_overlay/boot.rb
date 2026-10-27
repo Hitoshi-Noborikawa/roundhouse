@@ -106,6 +106,7 @@ require_relative "runtime/active_support_core_ext"
 # reopen above; it now takes the same lowered call every other
 # ruby-family target does, so the two stay one behaviour.
 require_relative "runtime/active_support_ext"
+require_relative "runtime/active_model_validator"
 # ActiveSupport::JSON.encode straight through the C generator when the
 # value is already JSON-native; the shared walk otherwise.
 require_relative "runtime/active_support_json_cruby"
@@ -239,6 +240,10 @@ require_relative "runtime/sidekiq_redis"
 require_relative "runtime/sidekiq_push"
 # The app's payload jobs (generated), and the drain's payload arm.
 require_relative "runtime/job_registry"
+# The `sidekiq` role: envelope reads and dead records, then the worker
+# (a façade unless the tree is on :sidekiq).
+require_relative "runtime/sidekiq_envelope"
+require_relative "runtime/sidekiq_worker"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"
