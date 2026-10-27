@@ -443,15 +443,14 @@ fn no_arg_send(recv: Expr, method: &str) -> Expr {
 /// parent walk and the inheritance-column check that would drift from
 /// this one.
 pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
-    model_subclasses(app).0
+    model_subclasses(app).typed
 }
 
 /// Every library class whose `parent` chain reaches a Model with a
 /// table, split on that table's inheritance column: STI subclasses
 /// (with one) and plain subclasses (without one) → their base model.
-fn model_subclasses(app: &App) -> (HashMap<ClassId, ClassId>, HashMap<ClassId, ClassId>) {
-    let mut typed = HashMap::default();
-    let mut untyped = HashMap::default();
+fn model_subclasses(app: &App) -> Subclasses {
+    let mut out = Subclasses::default();
     // Name -> the FIRST model / library class of that name, the same
     // element the linear `find`s this replaced answered. Indexed once:
     // a scan per parent hop is |classes|^2 on a large app.
@@ -459,12 +458,16 @@ fn model_subclasses(app: &App) -> (HashMap<ClassId, ClassId>, HashMap<ClassId, C
     for m in &app.models {
         models_by_name.entry(&m.name).or_insert(m);
     }
-    let mut lc_parent: HashMap<&ClassId, &Option<ClassId>> = HashMap::default();
+    let mut lc_named: HashMap<&ClassId, &crate::dialect::LibraryClass> = HashMap::default();
     for other in &app.library_classes {
-        lc_parent.entry(&other.name).or_insert(&other.parent);
+        lc_named.entry(&other.name).or_insert(other);
     }
     let model_named = |id: &ClassId| models_by_name.get(id).copied();
     for lc in &app.library_classes {
+        // The nearest class that sets `inheritance_column`, from the
+        // subclass up, decides: Ruby's class attribute is inherited until
+        // a class assigns it.
+        let mut setting = last_setting(lc.unknown_calls.iter()).map(|value| (value, true));
         let mut cursor = lc.parent.clone();
         let mut hops = 0;
         while let Some(parent) = cursor {
@@ -472,22 +475,105 @@ fn model_subclasses(app: &App) -> (HashMap<ClassId, ClassId>, HashMap<ClassId, C
                 break;
             }
             if let Some(base) = model_named(&parent) {
+                // The model's own setting, else its nearest model parent's
+                // (an abstract `ApplicationRecord` that sets `nil`).
+                let setting = setting.or_else(|| {
+                    let mut model = Some(base);
+                    let mut up = 0;
+                    while let Some(m) = model {
+                        if let Some(value) = sti_setting(m) {
+                            return Some((value, false));
+                        }
+                        if up > 8 {
+                            break;
+                        }
+                        model = m.parent.as_ref().and_then(|p| model_named(p));
+                        up += 1;
+                    }
+                    None
+                });
                 // An abstract base has no table, so its subclasses are
-                // neither.
+                // neither. With STI turned off they're plain subclasses.
                 if let Some(table) = app.schema.tables.get(&base.table.0) {
-                    if table.columns.iter().any(|c| c.name.as_str() == INHERITANCE_COLUMN) {
-                        typed.insert(lc.name.clone(), base.name.clone());
+                    let off = setting.and_then(|(value, own)| value.map(|value| (value, own)));
+                    if off.is_none() && table.columns.iter().any(|c| c.name.as_str() == INHERITANCE_COLUMN) {
+                        out.typed.insert(lc.name.clone(), base.name.clone());
                     } else {
-                        untyped.insert(lc.name.clone(), base.name.clone());
+                        out.untyped.insert(lc.name.clone(), base.name.clone());
+                        if let Some(off) = off {
+                            out.off.insert(lc.name.clone(), off);
+                        }
                     }
                 }
                 break;
             }
-            cursor = lc_parent.get(&parent).and_then(|p| (*p).clone());
+            let class = lc_named.get(&parent);
+            if setting.is_none() {
+                setting = class.and_then(|c| last_setting(c.unknown_calls.iter())).map(|value| (value, true));
+            }
+            cursor = class.and_then(|c| c.parent.clone());
             hops += 1;
         }
     }
-    (typed, untyped)
+    out
+}
+
+/// Library classes whose parent chain reaches a model with a table.
+#[derive(Default)]
+struct Subclasses {
+    /// STI subclass -> its base model.
+    typed: HashMap<ClassId, ClassId>,
+    /// Plain subclass -> the model whose finders it inherits.
+    untyped: HashMap<ClassId, ClassId>,
+    /// An untyped subclass whose STI is turned off -> the value (`nil` /
+    /// `false`), and whether the subclass's chain set it rather than the
+    /// model.
+    off: HashMap<ClassId, (&'static str, bool)>,
+}
+
+/// `self.inheritance_column = nil` (or `false`): activerecord 8.1.4
+/// turns STI off for the model, `type` is a plain attribute, and its
+/// subclasses are plain subclasses (`false` becomes the column name
+/// "false", which no table has). The value as written, `nil` or `false`.
+pub(crate) fn turns_sti_off(expr: &Expr) -> Option<&'static str> {
+    inheritance_setting(expr).flatten()
+}
+
+/// One `self.inheritance_column = …`: `Some(Some(value))` for `nil` or
+/// `false`, `Some(None)` for any other value, `None` for another call.
+fn inheritance_setting(expr: &Expr) -> Option<Option<&'static str>> {
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node else { return None };
+    if !matches!(&*recv.node, ExprNode::SelfRef) || method.as_str() != "inheritance_column=" {
+        return None;
+    }
+    let [arg] = args.as_slice() else { return None };
+    Some(match &*arg.node {
+        ExprNode::Lit { value: Literal::Nil } => Some("nil"),
+        ExprNode::Lit { value: Literal::Bool { value: false } } => Some("false"),
+        _ => None,
+    })
+}
+
+/// A class body's effective setting: its last assignment wins.
+fn last_setting<'e>(calls: impl Iterator<Item = &'e Expr>) -> Option<Option<&'static str>> {
+    calls.filter_map(inheritance_setting).last()
+}
+
+fn sti_setting(model: &crate::dialect::Model) -> Option<Option<&'static str>> {
+    last_setting(model.body.iter().filter_map(|item| match item {
+        crate::dialect::ModelBodyItem::Unknown { expr, .. } => Some(expr),
+        _ => None,
+    }))
+}
+
+/// `call` is a library class's `inheritance_column = nil` / `false` that
+/// [`model_subclasses`] reads, so it isn't a dropped class-body call.
+pub(crate) fn models_class_body_setting(app: &App, lc: &crate::dialect::LibraryClass, call: &Expr) -> bool {
+    if turns_sti_off(call).is_none() {
+        return false;
+    }
+    let subclasses = model_subclasses(app);
+    subclasses.typed.contains_key(&lc.name) || subclasses.untyped.contains_key(&lc.name)
 }
 
 /// The finders that load a subclass's records, or a relation of them.
@@ -537,7 +623,7 @@ const VALUE_METHODS: &[&str] = &[
 /// answers a value), and the bodies walked are the ones the STI
 /// lowering rewrites, tests included.
 pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::Diagnostic> {
-    let (_, untyped) = model_subclasses(app);
+    let Subclasses { untyped, off, .. } = model_subclasses(app);
     if untyped.is_empty() {
         return Vec::new();
     }
@@ -627,11 +713,23 @@ pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::
     sites
         .into_iter()
         .map(|(span, sub, base, method)| {
+            let off = off.get(&sub).copied();
             let (sub, base) = (sub.0.as_str(), base.0.as_str());
+            let construct = match off {
+                Some((value, true)) => format!(
+                    "`{sub}.{}` on a subclass that turns STI off (`inheritance_column = {value}`)",
+                    method.as_str()
+                ),
+                Some((value, false)) => format!(
+                    "`{sub}.{}` on a subclass of a model with STI turned off (`inheritance_column = {value}`)",
+                    method.as_str()
+                ),
+                None => format!("`{sub}.{}` on a subclass of a model whose table has no `type` column", method.as_str()),
+            };
             let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
                 span,
                 None,
-                format!("`{sub}.{}` on a subclass of a model whose table has no `type` column", method.as_str()),
+                construct,
                 format!("Rails loads its records as `{sub}`; this build loads them as `{base}`, whose finder it inherits"),
             );
             diagnostic.severity = crate::diagnostic::Severity::Warning;

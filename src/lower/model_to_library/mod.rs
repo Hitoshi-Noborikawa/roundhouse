@@ -791,6 +791,11 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
             {
                 continue;
             }
+            // `inheritance_column = nil` / `false` turns STI off, which
+            // `lower::sti_scope` models. A column name stays unsupported.
+            if crate::lower::sti_scope::turns_sti_off(expr).is_some() {
+                continue;
+            }
             // Literal table settings are consumed by ingest::model's
             // explicit_class_setting; dynamic values remain unsupported.
             if matches!(name, "table_name=" | "table_name_prefix=")
