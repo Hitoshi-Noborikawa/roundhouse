@@ -94,7 +94,7 @@ fn spinel_gate_pg_db_bound_reads_and_writes() {
         .args([
             "-I",
             &pg_dir,
-            "--require-gate",
+            "--strict-require",
             "--rbs",
             ".",
             "main.rb",

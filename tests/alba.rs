@@ -496,7 +496,7 @@ fn generated_spinel_compiles_and_runs_the_same_literal_contract() {
     )
     .unwrap();
     let output = Command::new(std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into()))
-        .args(["--require-gate", "contract.rb", "-o", "contract"])
+        .args(["--strict-require", "contract.rb", "-o", "contract"])
         .current_dir(&dir)
         .output()
         .unwrap();
