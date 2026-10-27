@@ -74,3 +74,25 @@ fn pg_schema_names_are_identifiers_unique_per_call() {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
     );
 }
+
+/// The lane deadline is enforced by the harness, with no timeout(1).
+#[test]
+#[should_panic(expected = "still running after 1s, killed")]
+fn a_lane_that_hangs_is_killed_at_the_deadline() {
+    db_contract::run_bounded(
+        std::process::Command::new("ruby").args(["-e", "sleep 30"]),
+        std::time::Duration::from_secs(1),
+        "needs ruby",
+    );
+}
+
+/// A program the lane cannot start names what the lane needs.
+#[test]
+#[should_panic(expected = "the lane needs a widget runner")]
+fn a_missing_program_says_what_the_lane_needs() {
+    db_contract::run_bounded(
+        &mut std::process::Command::new("rh-no-such-widget-runner"),
+        db_contract::LANE_DEADLINE,
+        "the lane needs a widget runner",
+    );
+}

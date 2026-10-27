@@ -23,8 +23,10 @@
 //! db_pg_lane.rb shows the one hook it must define.
 #![allow(dead_code)]
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[path = "pg_test_url.rs"]
 pub mod pg_test_url;
@@ -158,6 +160,57 @@ fn run(command: &mut Command) -> String {
     stdout
 }
 
+/// A lane's program may run this long. A lease that leaks, or a lock a
+/// broken case leaves behind, must fail the lane rather than hang the job.
+pub const LANE_DEADLINE: Duration = Duration::from_secs(300);
+
+/// `run`, killed at `deadline`. Enforced here rather than by timeout(1),
+/// which not every host has under that name. `missing` explains a
+/// program that cannot be started.
+pub fn run_bounded(command: &mut Command, deadline: Duration, missing: &str) -> String {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("{command:?}: {e}; {missing}"));
+    // Drained while the child runs, so a full pipe never stalls it.
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = pipe.read_to_end(&mut out);
+            String::from_utf8_lossy(&out).into_owned()
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll the lane") {
+            break Some(status);
+        }
+        if start.elapsed() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let stdout = stdout.join().unwrap();
+    let stderr = stderr.join().unwrap();
+    let Some(status) = status else {
+        panic!(
+            "{command:?}: still running after {}s, killed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}",
+            deadline.as_secs()
+        );
+    };
+    assert!(
+        status.success(),
+        "{command:?}: {status}\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    print!("{stdout}");
+    stdout
+}
+
 /// The count a suite reported, or a failure naming the missing line.
 fn reported(stdout: &str, suite: &str) -> usize {
     let prefix = format!("{suite}: ");
@@ -231,16 +284,14 @@ pub fn run_lane(lane: &Lane) {
     copy(&suite.join(main), &dir.join("main.rb"));
     println!("{} lane tree: {}", lane.name, dir.display());
 
-    // Bounded: a lease that leaks, or a lock a broken case leaves
-    // behind, must fail the lane rather than hang the job.
-    let mut program = Command::new("timeout");
-    program.arg("300");
-    match lane.runtime {
+    let (mut program, missing) = match lane.runtime {
         Runtime::Cruby => {
-            program
-                .arg("ruby")
-                .arg("main.rb")
-                .env("ROUNDHOUSE_ROOT", root());
+            let mut program = Command::new("ruby");
+            program.arg("main.rb").env("ROUNDHOUSE_ROOT", root());
+            (
+                program,
+                "the CRuby lanes need `ruby` (with the sqlite3 gem for SQLite) on PATH",
+            )
         }
         Runtime::Spinel => {
             let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
@@ -254,9 +305,12 @@ pub fn run_lane(lane: &Lane) {
             run(compile
                 .args(["main.rb", "-o", "contract_gate"])
                 .current_dir(&dir));
-            program.arg(dir.join("contract_gate"));
+            (
+                Command::new(dir.join("contract_gate")),
+                "Spinel did not leave the compiled lane behind",
+            )
         }
-    }
+    };
     if lane.backend == Backend::Sqlite {
         program.arg(dir.join("contract.sqlite3"));
     }
@@ -265,10 +319,14 @@ pub fn run_lane(lane: &Lane) {
             .env("ROUNDHOUSE_PG_TEST_URL", &db.url)
             .env("ROUNDHOUSE_PG_TEST_SCHEMA", &db.schema);
     }
-    let stdout = run(program
-        .env_remove("DATABASE_POOL_SIZE")
-        .env_remove("RH_SQL_TRACE")
-        .current_dir(&dir));
+    let stdout = run_bounded(
+        program
+            .env_remove("DATABASE_POOL_SIZE")
+            .env_remove("RH_SQL_TRACE")
+            .current_dir(&dir),
+        LANE_DEADLINE,
+        missing,
+    );
 
     assert_eq!(
         reported(&stdout, "contract"),
