@@ -46,8 +46,10 @@ SidekiqPush.announce if JobRegistry.sidekiq?
 # Register the Cable registry as the broadcasts transport: every
 # `Broadcasts.record` call from model callbacks now also fans out
 # the rendered `<turbo-stream>` to every WS connection subscribed
-# to that stream name.
-Broadcasts.set_transport(Cable::Registry)
+# to that stream name. Under config/cable.yml's `adapter: redis` (a tree
+# on :sidekiq), every broadcast goes through Redis instead, and comes back
+# to these sockets through the subscriber runtime/redis_cable.rb starts.
+Broadcasts.set_transport(RedisCable.enabled? ? RedisCable::Transport.new : Cable::Registry)
 
 # Thruster's response cache, in process (runtime/thruster_cache.rb says
 # why). Outermost, so a stored stylesheet or avatar is answered before

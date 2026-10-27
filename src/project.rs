@@ -3969,6 +3969,26 @@ fn ruby_family_runtime_files(
     } else {
         String::new()
     };
+    // The Redis broadcast transport: redis-rb has no `Redis.pubsub`, and
+    // a plain connection subscribes there; the gem is required at the
+    // first connect, as for the push. Broadcasts' transport on this lane
+    // takes the String or Hash `Cable::Registry` would, so it encodes
+    // here what spinel's `Cable.publish_raw` is handed encoded.
+    let redis_cable = if cable_redis(app).is_some() {
+        let real = crate::runtime_files::read_to_string(REDIS_CABLE)?;
+        const AT_LOAD: &str = "require \"redis\"\n";
+        const SUBSCRIBER: &str = "    Redis.pubsub(url: url)\n";
+        if !real.contains(AT_LOAD) || !real.contains(SUBSCRIBER) {
+            return Err(format!("{REDIS_CABLE}: the require or the subscriber line moved"));
+        }
+        let mut real = real
+            .replacen(AT_LOAD, "# `require \"redis\"` is at the first connect on this lane.\n", 1)
+            .replacen(SUBSCRIBER, "    require \"redis\"\n    Redis.new(url: url)\n", 1);
+        real.push_str(REDIS_CABLE_RUBY_TRANSPORT);
+        real
+    } else {
+        String::new()
+    };
     for (path, content) in files.iter_mut() {
         if path == "runtime/ipaddr.rb" {
             *content = IPADDR_STDLIB.to_string();
@@ -4080,6 +4100,9 @@ fn ruby_family_runtime_files(
         }
         if path == "runtime/sidekiq_worker.rb" && sidekiq {
             *content = sidekiq_worker.clone();
+        }
+        if path == "runtime/redis_cable.rb" && !redis_cable.is_empty() {
+            *content = redis_cable.clone();
         }
         // `TcpSocketStub`: the table as written, and `TCPSocket.open`
         // reopened to consult it — the seam the strict client asks from
@@ -5318,6 +5341,19 @@ pub(crate) fn needs_redis(app: &App) -> bool {
 /// it sees files, not the `App`.
 const SIDEKIQ_REGISTRY_FLAG: &str = "  def self.sidekiq?\n    true\n  end\n";
 
+/// Broadcasts' transport for the Ruby lanes' tree on the Redis cable:
+/// `Cable::Registry` takes a String or a Hash and encodes it at delivery,
+/// so this encodes it the same way before it is published.
+const REDIS_CABLE_RUBY_TRANSPORT: &str = "
+module RedisCable
+  class Transport
+    def broadcast(stream, message)
+      RedisCable.publish(stream, JsonBuilder.escape_html_entities(JSON.generate(message)))
+    end
+  end
+end
+";
+
 /// The real Redis connection for a tree on `:sidekiq`, swapped in for the
 /// raising façade at `runtime/sidekiq_redis.rb` on every Ruby-family lane.
 const SIDEKIQ_REDIS_CLIENT: &str = "runtime/spinel/sidekiq/sidekiq_redis.rb";
@@ -5365,6 +5401,35 @@ fn worker_defaults_source(defaults: &crate::app::SidekiqWorkerDefaults) -> Strin
     )
 }
 
+/// Whether the tree sends broadcasts through Redis: on `:sidekiq`
+/// (`needs_redis`), with config/cable.yml's production adapter `redis`.
+fn cable_redis(app: &App) -> Option<&crate::app::CableRedisConfig> {
+    if needs_redis(app) { app.cable_redis.as_ref() } else { None }
+}
+
+/// The `JobRegistry.cable_redis?` body for a tree that [`cable_redis`]
+/// is true for. `spin_shape` keys the transport swap on it.
+const CABLE_REDIS_REGISTRY_FLAG: &str = "  def self.cable_redis?\n    true\n  end\n";
+
+/// The real Redis broadcast transport, swapped in for the façade at
+/// `runtime/redis_cable.rb` on every Ruby-family lane for a tree that
+/// [`cable_redis`] is true for.
+const REDIS_CABLE: &str = "runtime/spinel/sidekiq/redis_cable.rb";
+
+/// `JobRegistry`'s broadcast settings: whether they go through Redis,
+/// where, and Action Cable's channel prefix.
+fn cable_redis_source(app: &App) -> String {
+    use crate::emit::ruby::expr::ruby_str_literal;
+    match cable_redis(app) {
+        None => "\n  def self.cable_redis?\n    false\n  end\n\n  def self.cable_redis_url\n    \"\"\n  end\n\n  def self.cable_channel_prefix\n    \"\"\n  end\n".to_string(),
+        Some(config) => format!(
+            "\n{CABLE_REDIS_REGISTRY_FLAG}\n  def self.cable_redis_url\n    {}\n  end\n\n  def self.cable_channel_prefix\n    {}\n  end\n",
+            redis_setting_source(Some(&config.url)),
+            ruby_str_literal(&config.channel_prefix),
+        ),
+    }
+}
+
 fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "  # >>> generated: job-registry\n";
     const TAIL: &str = "  # <<< generated: job-registry\n";
@@ -5379,6 +5444,7 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
         redis_setting_source(app.sidekiq_redis.password.as_ref()),
         worker_defaults_source(&app.sidekiq_worker),
     );
+    let redis = format!("{redis}{}", cable_redis_source(app));
     let generated = format!(
         "{HEAD}{}\n{flag}{redis}{TAIL}",
         crate::lower::job_payload::registry_source(&app.job_plans, needs_redis(app))
@@ -7552,7 +7618,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // Sidekiq pushes (queue_adapter :sidekiq): the envelope writer and
     // the Redis façade. `spin_shape` drops the façade's sidecar when it
     // swaps in the real client, whose surface is inferred.
-    for name in ["sidekiq_push", "sidekiq_redis", "sidekiq_envelope", "sidekiq_worker"] {
+    for name in ["sidekiq_push", "sidekiq_redis", "sidekiq_envelope", "sidekiq_worker", "redis_cable"] {
         let src = format!("runtime/spinel/{name}.rbs");
         let rbs = crate::runtime_files::read_to_string(&src).map_err(|e| format!("read {src}: {e}"))?;
         files.push((format!("sig/runtime/{name}.rbs"), rbs));
@@ -10451,6 +10517,22 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         facade.1 = worker;
         files.retain(|(p, _)| p != "runtime/sidekiq_redis.rbs" && p != "runtime/sidekiq_worker.rbs");
     }
+    // The Redis broadcast transport, for a tree on :sidekiq whose
+    // config/cable.yml names `adapter: redis` (the registry's
+    // `cable_redis?`).
+    let cable_redis = files
+        .iter()
+        .any(|(p, c)| p == "runtime/job_registry.rb" && c.contains(CABLE_REDIS_REGISTRY_FLAG));
+    if cable_redis {
+        let real = crate::runtime_files::read_to_string(REDIS_CABLE)?;
+        let facade = files
+            .iter_mut()
+            .find(|(p, _)| p == "runtime/redis_cable.rb")
+            .ok_or("spin_shape: the tree sends broadcasts through Redis but runtime/redis_cable.rb \
+                    is not in the spinel file set")?;
+        facade.1 = real;
+        files.retain(|(p, _)| p != "runtime/redis_cable.rbs");
+    }
 
     // commonmarker: no façade to swap (Markdowner's own façade stands aside
     // when the app's Markdowner names Commonmarker and Nokogiri — see
@@ -10682,7 +10764,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     // drive. It also supplies the `--rbs` root, so the test recipe drops
     // `$(RBS_FLAG)` rather than passing two.
     //
-    // MINUS `--strict-require`, which `spin flags` includes and the app
+    // MINUS `--strict-require` (`--require-gate` before Spinel 6aaec4f41), which `spin flags` includes and the app
     // binary should keep: it turns an unresolvable require into a
     // compile-time refusal. A TEST tree requires gems that have no spinel
     // surface at all — campfire's suite pulls vips, mocha and webmock —
@@ -10697,7 +10779,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         let dep_patches: [(&str, &str); 3] = [
             (
                 "SPINEL ?= spinel",
-                "SPINEL ?= spinel\nSPIN   ?= spin\n\n# Package deps for the per-test compiles, from spin itself.\n# `--strict-require` is stripped: the app binary wants an\n# unresolvable require to be fatal, a test tree requires\n# gems with no spinel surface (vips, mocha, webmock) and\n# must still compile far enough to report its type errors.\nSPIN_TEST_FLAGS = $(shell $(SPIN) flags 2>/dev/null | sed 's/--strict-require //')",
+                "SPINEL ?= spinel\nSPIN   ?= spin\n\n# Package deps for the per-test compiles, from spin itself.\n# `--strict-require` is stripped: the app binary wants an\n# unresolvable require to be fatal, a test tree requires\n# gems with no spinel surface (vips, mocha, webmock) and\n# must still compile far enough to report its type errors.\nSPIN_TEST_FLAGS = $(shell $(SPIN) flags 2>/dev/null | sed -e 's/--strict-require //' -e 's/--require-gate //')",
             ),
             (
                 "\t$(SPINEL) main.rb $(RBS_FLAG) -o $@",

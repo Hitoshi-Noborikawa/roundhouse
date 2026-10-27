@@ -90,7 +90,8 @@ class FalconController < Async::Container::Controller
         if defined?(ActiveJob) && ActiveJob.respond_to?(:start_drainer)
           ActiveJob.start_drainer { |work| Async(transient: true) { work.call } }
         end
-        if CABLE_HUB && defined?(Broadcasts) && defined?(Cable::Registry)
+        # Redis relays between the workers already when cable.yml says so.
+        if CABLE_HUB && defined?(Broadcasts) && defined?(Cable::Registry) && !RedisCable.enabled?
           Broadcasts.set_transport(Cable::Hub.connect(CABLE_HUB_PATH))
         end
         if defined?(Cable::Stats) && Cable::Stats::ON

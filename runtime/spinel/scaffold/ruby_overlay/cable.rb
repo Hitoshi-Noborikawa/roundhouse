@@ -469,6 +469,12 @@ module Cable
 
   # The `Broadcasts` transport: stream name → subscribed connections.
   # Reactor thread only (see the threading contract above), so no lock.
+  # The Redis subscriber's way in (runtime/redis_cable.rb), named as on
+  # spinel.
+  def self.deliver_json(stream, message_json)
+    Registry.deliver_json(stream, message_json)
+  end
+
   module Registry
     SUBS = {}
     # Told when a stream gains its first subscriber here and loses its last:
@@ -487,6 +493,13 @@ module Cable
     def self.broadcast(stream, message)
       Reactor.post { Registry.deliver(stream, message) }
       nil
+    end
+
+    # A message from Redis for this process's sockets (runtime/
+    # redis_cable.rb's subscriber thread): the JSON Rails published, read
+    # back into the String or Hash `deliver` encodes again.
+    def self.deliver_json(stream, message_json)
+      broadcast(stream, JSON.parse(message_json))
     end
 
     # Reactor thread. `message` is a rendered <turbo-stream> String from
@@ -997,6 +1010,10 @@ module Cable
     identity = identify(env)
     return nil if identity.nil?
 
+    # This process's Redis subscription, when broadcasts go through Redis
+    # (runtime/redis_cable.rb): started here, on the request thread, so
+    # its wait for the first confirmation never stalls the reactor.
+    RedisCable.ensure_subscriber
     socket = env["rack.hijack"].call
     conn = Connection.new(env, socket, identity == NO_IDENTITY ? nil : identity)
     Reactor.attach(conn)

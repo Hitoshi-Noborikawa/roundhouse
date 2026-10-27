@@ -303,6 +303,12 @@ pub struct App {
     /// worker's own `-c`, `-t` and `-q` win over them.
     #[serde(default, skip_serializing_if = "SidekiqWorkerDefaults::is_empty")]
     pub sidekiq_worker: SidekiqWorkerDefaults,
+    /// `config/cable.yml`'s production Redis, when its adapter is
+    /// `redis`, read at ingest by `ingest::cable_yml`. A tree on
+    /// `:sidekiq` then sends every broadcast through it, so one a
+    /// worker makes reaches the web processes' sockets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cable_redis: Option<CableRedisConfig>,
     /// Model names whose attachment sgid the app resolves even when
     /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
     /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
@@ -1117,6 +1123,7 @@ impl App {
             queue_adapter: None,
             sidekiq_redis: SidekiqRedisConfig::default(),
             sidekiq_worker: SidekiqWorkerDefaults::default(),
+            cable_redis: None,
             attachable_unsigned_models: Vec::new(),
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
@@ -1216,6 +1223,15 @@ impl SidekiqRedisConfig {
     pub fn is_empty(&self) -> bool {
         self.url.is_none() && self.password.is_none()
     }
+}
+
+/// `config/cable.yml`'s production `adapter: redis` settings: where
+/// broadcasts are published, and the prefix Action Cable puts on each
+/// channel (`""` for none).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CableRedisConfig {
+    pub url: RedisSetting,
+    pub channel_prefix: String,
 }
 
 /// `config/sidekiq.yml`'s literal worker settings: each `None` (or the

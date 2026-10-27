@@ -130,12 +130,17 @@ const AGGREGATES: &str = r#"class FeatureProbe
   def self.found_inside
     Feature.where(title: Feature.find_by(title: "f").title).exists?
   end
+
+  def self.find_then_count
+    Feature.find([1, 2]).count
+  end
 end
 "#;
 
 /// `none` loads nothing, and an aggregate's relation (`where(…).count`,
 /// `order(…).pluck`) answers a value, so neither is reported. A finder
-/// in the aggregate's arguments still is.
+/// in the aggregate's arguments still is. An eager `find` under `.count`
+/// still loads rows, so it is reported.
 #[test]
 fn none_and_an_aggregates_relation_are_not_reported() {
     let src = scratch("value-src");
@@ -146,6 +151,85 @@ fn none_and_an_aggregates_relation_are_not_reported() {
         assert!(!stderr.contains(&format!("`{call}`")), "{call} loads no record: {stderr}");
     }
     assert!(stderr.contains("`Feature.find_by` on a subclass"), "the argument's finder is reported: {stderr}");
+    assert!(
+        stderr.contains("`Feature.find` on a subclass"),
+        "eager find under count still loads rows: {stderr}"
+    );
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// `Feature.where(…).find(…).count` must still warn: the finder loads
+/// rows, so aggregate suppression must not quiet the preceding `where`.
+#[test]
+fn a_chained_find_under_an_aggregate_is_reported() {
+    let src = scratch("chain-find-src");
+    let out = scratch("chain-find-out");
+    app(
+        &src,
+        "",
+        "class FeatureProbe\n  def self.run\n    Feature.where(title: \"f\").find([1, 2]).count\n  end\nend\n",
+    );
+    let stderr = survey(&src, &out);
+    assert!(
+        stderr.contains("`Feature.where` on a subclass"),
+        "where before find under count still loads rows: {stderr}"
+    );
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// `in_batches.update_all` updates without instantiating rows; keep it
+/// quiet. `in_batches.each` loads rows and must warn.
+#[test]
+fn in_batches_warns_only_when_it_loads_rows() {
+    let src = scratch("batches-update-src");
+    let out = scratch("batches-update-out");
+    app(
+        &src,
+        "",
+        "class FeatureProbe\n  def self.run\n    Feature.in_batches.update_all(title: \"x\")\n  end\nend\n",
+    );
+    let stderr = survey(&src, &out);
+    assert!(
+        !stderr.contains("`Feature.in_batches` on a subclass"),
+        "in_batches.update_all loads no row: {stderr}"
+    );
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+
+    let src = scratch("batches-each-src");
+    let out = scratch("batches-each-out");
+    app(
+        &src,
+        "",
+        "class FeatureProbe\n  def self.run\n    Feature.in_batches.each { |row| row }\n  end\nend\n",
+    );
+    let stderr = survey(&src, &out);
+    assert!(
+        stderr.contains("`Feature.in_batches` on a subclass"),
+        "in_batches.each loads rows: {stderr}"
+    );
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// `in_batches.each_record` enumerates records — treat it as a loading
+/// boundary so aggregate suppression does not quiet the chain.
+#[test]
+fn in_batches_each_record_under_an_aggregate_is_reported() {
+    let src = scratch("batches-each-record-src");
+    let out = scratch("batches-each-record-out");
+    app(
+        &src,
+        "",
+        "class FeatureProbe\n  def self.run\n    Feature.in_batches.each_record.count\n  end\nend\n",
+    );
+    let stderr = survey(&src, &out);
+    assert!(
+        stderr.contains("`Feature.in_batches` on a subclass"),
+        "each_record under count still loads rows: {stderr}"
+    );
     fs::remove_dir_all(&src).unwrap();
     fs::remove_dir_all(&out).unwrap();
 }
