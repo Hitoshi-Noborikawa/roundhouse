@@ -17,7 +17,8 @@
 //! ends the process, took the server down on the first subscribe
 //! rather than failing one subscription.
 //!
-//! ONLY A TYPED ARRAY RECEIVER. `second` also exists on
+//! ONLY A TYPED ARRAY (OR TUPLE) RECEIVER. A tuple is an Array at run
+//! time, e.g. the `[key, value]` pair a one-parameter Hash block binds. `second` also exists on
 //! `ActiveRecord::Relation`, where it is `offset(1).first` — a query,
 //! not an index read — and the runtime answers that one with a real
 //! method and a real signature. An untyped receiver is left alone for
@@ -71,7 +72,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     let Some((_, index)) = ORDINALS.iter().find(|(name, _)| *name == method.as_str()) else {
         return false;
     };
-    if !matches!(recv.ty, Some(Ty::Array { .. })) {
+    if !matches!(recv.ty, Some(Ty::Array { .. } | Ty::Tuple { .. })) {
         return false;
     }
     let span = expr.span;
