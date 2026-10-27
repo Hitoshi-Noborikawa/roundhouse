@@ -70,8 +70,10 @@
 //! against `COMMENTABLE_DAYS.days.ago`); views rejoin when the view
 //! pipeline migrates to shared lowerings.
 
+use std::collections::BTreeSet;
+
 use crate::app::App;
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
@@ -110,12 +112,79 @@ pub fn apply_duration_lowering(app: &mut App) {
 /// `Time - Time` shape.
 pub(crate) fn apply_duration_rewrites(body: &mut Expr, temporal_predicates: bool) {
     rewrite_durations(body);
+    rewrite_local_time_durations(body, &mut BTreeSet::new());
     if temporal_predicates {
         rewrite_temporal_predicates(body);
     }
     rewrite_duration_comparisons(body);
     rewrite_time_duration_arith(body);
     rewrite_expires_in(body);
+}
+
+fn integral_clock_duration(expr: &Expr, locals: &BTreeSet<Symbol>) -> bool {
+    if let ExprNode::Var { name, .. } = &*expr.node {
+        return locals.contains(name);
+    }
+    is_duration_const_call(expr)
+        && matches!(&*expr.node, ExprNode::Send { method, args, .. }
+            if matches!(method.as_str(), "seconds" | "second" | "minutes" | "minute" | "hours" | "hour")
+                && matches!(args.as_slice(), [value] if matches!(value.ty, Some(Ty::Int))))
+}
+
+fn rewrite_local_time_durations(expr: &mut Expr, locals: &mut BTreeSet<Symbol>) {
+    match &mut *expr.node {
+        ExprNode::Seq { exprs } => {
+            for child in exprs {
+                rewrite_local_time_durations(child, locals);
+            }
+            return;
+        }
+        ExprNode::Assign {
+            target: LValue::Var { name, .. },
+            value,
+        } => {
+            rewrite_local_time_durations(value, locals);
+            if integral_clock_duration(value, locals) {
+                locals.insert(name.clone());
+            } else {
+                locals.remove(name);
+            }
+            return;
+        }
+        ExprNode::Send { block: None, .. }
+        | ExprNode::Array { .. }
+        | ExprNode::Hash { .. }
+        | ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => {
+            expr.node
+                .for_each_child_mut(&mut |child| rewrite_local_time_durations(child, locals));
+        }
+        _ => {
+            expr.node.for_each_child_mut(&mut |child| {
+                rewrite_local_time_durations(child, &mut BTreeSet::new())
+            });
+            locals.clear();
+            return;
+        }
+    }
+    let ExprNode::Send {
+        recv: Some(recv),
+        method,
+        args,
+        block: None,
+        ..
+    } = &mut *expr.node
+    else {
+        return;
+    };
+    if matches!(method.as_str(), "+" | "-")
+        && matches!(recv.ty, Some(Ty::Time))
+        && matches!(args.as_slice(), [value] if matches!(&*value.node, ExprNode::Var { .. }) && integral_clock_duration(value, locals))
+    {
+        args[0] = seconds_of(take(&mut args[0]));
+    }
 }
 
 /// `expires_in <dur>, stale_while_revalidate: <dur>, stale_if_error:
