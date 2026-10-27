@@ -5347,6 +5347,24 @@ fn redis_setting_source(setting: Option<&crate::app::RedisSetting>) -> String {
     }
 }
 
+/// `JobRegistry`'s `config/sidekiq.yml` defaults for the worker:
+/// concurrency 0 and timeout -1 when the file gives none, and the queues
+/// as one String of `name` or `name,weight` words, `""` for none.
+fn worker_defaults_source(defaults: &crate::app::SidekiqWorkerDefaults) -> String {
+    use crate::emit::ruby::expr::ruby_str_literal;
+    let queues: Vec<String> = defaults
+        .queues
+        .iter()
+        .map(|(name, weight)| if *weight == 0 { name.clone() } else { format!("{name},{weight}") })
+        .collect();
+    format!(
+        "\n  def self.sidekiq_worker_concurrency\n    {}\n  end\n\n  def self.sidekiq_worker_timeout\n    {}\n  end\n\n  def self.sidekiq_worker_queues\n    {}\n  end\n",
+        defaults.concurrency.unwrap_or(0),
+        defaults.timeout.unwrap_or(-1),
+        ruby_str_literal(&queues.join(" ")),
+    )
+}
+
 fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "  # >>> generated: job-registry\n";
     const TAIL: &str = "  # <<< generated: job-registry\n";
@@ -5356,9 +5374,10 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
         "  def self.sidekiq?\n    false\n  end\n".to_string()
     };
     let redis = format!(
-        "\n  def self.sidekiq_redis_url\n    {}\n  end\n\n  def self.sidekiq_redis_password\n    {}\n  end\n",
+        "\n  def self.sidekiq_redis_url\n    {}\n  end\n\n  def self.sidekiq_redis_password\n    {}\n  end\n{}",
         redis_setting_source(app.sidekiq_redis.url.as_ref()),
         redis_setting_source(app.sidekiq_redis.password.as_ref()),
+        worker_defaults_source(&app.sidekiq_worker),
     );
     let generated = format!(
         "{HEAD}{}\n{flag}{redis}{TAIL}",

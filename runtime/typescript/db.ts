@@ -190,8 +190,12 @@ function escapeString(s: unknown): string {
 function escapeInt(n: unknown): string {
   // Truncate-to-int matches Ruby's `n.to_i.to_s` semantic in
   // `runtime/spinel/db.rb`. Non-numeric input parses to 0 (Ruby
-  // semantics: "abc".to_i == 0).
-  const parsed = typeof n === "number" ? n : Number(n);
+  // semantics: "abc".to_i == 0). A non-finite *number* has no Integer
+  // (Ruby's `Float::NAN.to_i` raises): it is NULL, which no `id = `
+  // matches, so a `find(NaN)` (a blank or non-numeric request id) finds
+  // nothing rather than row 0.
+  if (typeof n === "number") return Number.isFinite(n) ? String(Math.trunc(n)) : "NULL";
+  const parsed = Number(n);
   return Number.isFinite(parsed) ? String(Math.trunc(parsed)) : "0";
 }
 

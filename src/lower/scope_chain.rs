@@ -1361,15 +1361,22 @@ struct AssocBuild {
     /// in place of Rails' own, so a call by one of these names is not
     /// expanded.
     extension: Vec<Symbol>,
+    /// The target model's key is `id` (no `self.primary_key =`), so a
+    /// `find_by` naming `id` matches at most one row.
+    target_keyed_by_id: bool,
 }
 
 impl AssocBuild {
     /// The expansion of `<parent>.<assoc>.<call>`: none when the
     /// extension defines `call`, or the scope changes what `call`
-    /// builds or finds.
-    fn expansion_for(&self, call: &Symbol) -> Option<&(ClassId, Symbol)> {
+    /// builds or finds. A `find_by` naming the target's `id`
+    /// (`by_id`) matches at most one row, so an ordering scope cannot
+    /// change which it takes: the scope judges it as it judges `find`.
+    fn expansion_for(&self, call: &Symbol, by_id: bool) -> Option<&(ClassId, Symbol)> {
+        let find = Symbol::from("find");
+        let judged = if by_id && self.target_keyed_by_id && call.as_str() == "find_by" { &find } else { call };
         self.expansion.as_ref().filter(|_| {
-            !self.extension.contains(call) && self.scope.as_ref().is_none_or(|s| scope_is_build_neutral(s, call))
+            !self.extension.contains(call) && self.scope.as_ref().is_none_or(|s| scope_is_build_neutral(s, judged))
         })
     }
 }
@@ -1605,12 +1612,13 @@ impl AssocRegistry {
     /// The answer is per call: an extension defining `find` declines
     /// `find`, so the extension runs, and leaves `build` expanded; an
     /// ordering scope declines `find_by` alone (see
-    /// [`scope_is_build_neutral`]).
-    pub fn build_target(&self, owner: &Expr, assoc: &Symbol, call: &Symbol) -> AssocBuildTarget {
+    /// [`scope_is_build_neutral`]), unless it names the target's `id`
+    /// (`by_id`).
+    pub fn build_target(&self, owner: &Expr, assoc: &Symbol, call: &Symbol, by_id: bool) -> AssocBuildTarget {
         if !self.assoc_builds.keys().any(|(_, name)| name == assoc) {
             return AssocBuildTarget::Undeclared;
         }
-        let read = |class: &ClassId| self.assoc_builds[&(class.clone(), assoc.clone())].expansion_for(call);
+        let read = |class: &ClassId| self.assoc_builds[&(class.clone(), assoc.clone())].expansion_for(call, by_id);
         let expansions: Vec<Option<&(ClassId, Symbol)>> = match self.owner_models(owner, assoc) {
             Some(models) => {
                 models.into_iter().map(|model| self.declaring_class(model, assoc).and_then(read)).collect()
@@ -1621,7 +1629,7 @@ impl AssocRegistry {
                     .assoc_builds
                     .iter()
                     .filter(|((_, name), _)| name == assoc)
-                    .map(|(_, b)| b.expansion_for(call))
+                    .map(|(_, b)| b.expansion_for(call, by_id))
                     .collect(),
             },
         };
@@ -1843,7 +1851,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
         let own = reg.table_for(&m.name);
         for a in m.associations() {
             reg.forget(&m.name, a.name());
-            reg.assoc_builds.insert((m.name.clone(), a.name().clone()), assoc_build(a));
+            reg.assoc_builds.insert((m.name.clone(), a.name().clone()), assoc_build(a, models));
             match a {
                 Association::BelongsTo {
                     name, target, foreign_key, primary_key, polymorphic, polymorphic_targets, foreign_type, ..
@@ -2140,7 +2148,7 @@ fn scope_join_tails(reg: &mut AssocRegistry, models: &[Model]) {
 /// Nor does any other kind: a `has_one` or `belongs_to` reader is never
 /// a collection proxy, so `.build` / `.find` on it is not an association
 /// call, and a `has_and_belongs_to_many` builds through its join table.
-fn assoc_build(a: &Association) -> AssocBuild {
+fn assoc_build(a: &Association, models: &[Model]) -> AssocBuild {
     match a {
         Association::HasMany { target, foreign_key, through, as_interface, scope, extension, .. } => {
             let reproducible = through.is_none() && as_interface.is_none() && a.owner_key().as_str() == "id";
@@ -2148,9 +2156,13 @@ fn assoc_build(a: &Association) -> AssocBuild {
                 expansion: reproducible.then(|| (target.clone(), foreign_key.clone())),
                 scope: scope.clone(),
                 extension: extension.iter().map(|x| x.name.clone()).collect(),
+                // `self.primary_key = "id"` names the default key.
+                target_keyed_by_id: models.iter().any(|m| {
+                    &m.name == target && m.primary_key.as_ref().is_none_or(|key| key.as_str() == "id")
+                }),
             }
         }
-        _ => AssocBuild { expansion: None, scope: None, extension: Vec::new() },
+        _ => AssocBuild { expansion: None, scope: None, extension: Vec::new(), target_keyed_by_id: false },
     }
 }
 
@@ -6186,7 +6198,7 @@ mod tests {
         let tags = Symbol::from("tags");
         let mut owner = syn(crate::span::Span::synthetic(), ExprNode::Ivar { name: Symbol::from("story") });
         owner.ty = Some(story);
-        assert_eq!(assocs.build_target(&owner, &tags, &Symbol::from("build")), AssocBuildTarget::Declined);
+        assert_eq!(assocs.build_target(&owner, &tags, &Symbol::from("build"), false), AssocBuildTarget::Declined);
         assert_eq!(assoc_read_target(&owner, &tags, &assocs), None);
     }
 

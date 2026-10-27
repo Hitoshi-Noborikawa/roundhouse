@@ -298,6 +298,11 @@ pub struct App {
     /// the fallback when it names no URL. Other keys are not read.
     #[serde(default, skip_serializing_if = "SidekiqRedisConfig::is_empty")]
     pub sidekiq_redis: SidekiqRedisConfig,
+    /// The worker's defaults from `config/sidekiq.yml` (concurrency,
+    /// timeout, queues), read at ingest by `ingest::sidekiq_yml`. The
+    /// worker's own `-c`, `-t` and `-q` win over them.
+    #[serde(default, skip_serializing_if = "SidekiqWorkerDefaults::is_empty")]
+    pub sidekiq_worker: SidekiqWorkerDefaults,
     /// Model names whose attachment sgid the app resolves even when
     /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
     /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
@@ -1104,6 +1109,7 @@ impl App {
             job_plans: Vec::new(),
             queue_adapter: None,
             sidekiq_redis: SidekiqRedisConfig::default(),
+            sidekiq_worker: SidekiqWorkerDefaults::default(),
             attachable_unsigned_models: Vec::new(),
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
@@ -1201,6 +1207,22 @@ pub struct SidekiqRedisConfig {
 impl SidekiqRedisConfig {
     pub fn is_empty(&self) -> bool {
         self.url.is_none() && self.password.is_none()
+    }
+}
+
+/// `config/sidekiq.yml`'s literal worker settings: each `None` (or the
+/// queues empty) when the file doesn't give it in a form ingest reads.
+/// A queue's weight is 0 when it has none.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SidekiqWorkerDefaults {
+    pub concurrency: Option<i64>,
+    pub timeout: Option<i64>,
+    pub queues: Vec<(String, i64)>,
+}
+
+impl SidekiqWorkerDefaults {
+    pub fn is_empty(&self) -> bool {
+        self.concurrency.is_none() && self.timeout.is_none() && self.queues.is_empty()
     }
 }
 

@@ -54,10 +54,6 @@ module ActiveSupport
       return ActiveSupport::Cache.append_cache_key(+"", key) if key.is_a?(Array)
       return ActiveSupport::Cache.retrieve_cache_key(key.to_a) if key.is_a?(Hash)
       return "" if key.nil?
-      # A String key comes back as a copy: the Array route's result is
-      # built in place, and Spinel cannot yet hand on a String that one
-      # route shares with the caller and another changes (#9258).
-      return key.dup if key.is_a?(String)
       key.to_s
     end
 

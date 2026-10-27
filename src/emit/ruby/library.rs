@@ -26,14 +26,19 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
     let templates = crate::runtime_src::parse_methods(
         "def reload(options = nil)\n  super(options)\n  self\nend\ndef lock!(lock = true)\n  super(lock)\n  self\nend\n",
     ).expect("receiver-return forwarders parse");
+    // The names of the models with a table, and one index of the source's
+    // methods for every ask (each ask built its own over the whole app).
+    let tabled: std::collections::HashSet<&ClassId> =
+        app.models.iter().filter(|m| app.schema.tables.contains_key(&m.table.0)).map(|m| &m.name).collect();
+    let source_methods = crate::analyze::SourceMethodIndex::new(app);
     for lc in lcs {
-        if !app.models.iter().any(|m| m.name == lc.name && app.schema.tables.contains_key(&m.table.0)) {
+        if !tabled.contains(&lc.name) {
             continue;
         }
         let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
         for template in &templates {
             if lc.methods.iter().any(|m| m.name == template.name && m.receiver == MethodReceiver::Instance)
-                || record_return_overridden(app, &lc.name, template.name.as_str())
+                || record_return_overridden(&source_methods, &lc.name, template.name.as_str())
             {
                 continue;
             }
@@ -65,9 +70,13 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
 /// Source overrides, including those on ApplicationRecord or a mixin,
 /// may return a different object. Do not interpose a self-returning wrapper.
 /// `lock!` calls `reload`, so an override of either one answers the source.
-fn record_return_overridden(app: &App, class: &ClassId, method: &str) -> bool {
-    crate::analyze::source_instance_method(app, class, method)
-        || (method == "lock!" && crate::analyze::source_instance_method(app, class, "reload"))
+fn record_return_overridden(
+    source_methods: &crate::analyze::SourceMethodIndex<'_>,
+    class: &ClassId,
+    method: &str,
+) -> bool {
+    source_methods.instance_method(class, method)
+        || (method == "lock!" && source_methods.instance_method(class, "reload"))
 }
 
 /// Lower library classes for Ruby and emit their source/RBS file pairs, grouping
@@ -3207,14 +3216,15 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         .chain(app.library_classes.iter().flat_map(|c| c.methods.iter().map(|d| d.name.as_str().to_string())))
         .filter(|n| is_framework_view_helper(n))
         .collect();
+    let source_methods = crate::analyze::SourceMethodIndex::new(app);
+    let controller_names: std::collections::HashSet<&ClassId> = app.controllers.iter().map(|c| &c.name).collect();
     for lc in lcs.iter_mut() {
         // CONTROLLERS in the index provide `helper_method`s to views:
         // only the call-site rewrite applies to them — their methods
         // must NOT flip class-side wholesale (actions are instance
         // methods; the class-side clone for the marked helpers comes
         // from the controller lowering itself).
-        let is_helper_module = helper_modules.contains(&lc.name)
-            && !app.controllers.iter().any(|c| c.name == lc.name);
+        let is_helper_module = helper_modules.contains(&lc.name) && !controller_names.contains(&lc.name);
         // Helper and view module functions have no controller context —
         // a bare `request` read there resolves to the per-dispatch
         // `ActionController::Current.request` (controllers keep their
@@ -3252,9 +3262,9 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 .iter()
                 .filter(|n| {
                     if class_side {
-                        crate::analyze::source_class_method(app, &lc.name, n)
+                        source_methods.class_method(&lc.name, n)
                     } else {
-                        crate::analyze::source_instance_method(app, &lc.name, n)
+                        source_methods.instance_method(&lc.name, n)
                     }
                 })
                 .map(|n| Symbol::from(n.as_str()))

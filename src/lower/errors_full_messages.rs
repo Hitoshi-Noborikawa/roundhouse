@@ -26,12 +26,11 @@
 //! and the identity we already knew went unapplied purely because of
 //! which walk the pass had asked for.
 //!
-//! An equivalent rewrite already existed as `rewrite_errors_full_messages`
-//! in the Roda ingest, applied to view bodies only. That copy is left in
-//! place deliberately: it runs at INGEST, this runs post-analyze, and
-//! the fold is idempotent (after either pass no `full_messages` send
-//! survives for the other to match), so the lanes can overlap without
-//! interfering. Retiring it is a separate cleanup with its own gate.
+//! The Roda ingest used to fold the same send in its view bodies at
+//! ingest time. Folded before analysis, `errors.each` there typed its
+//! block parameter as an `ActiveModel::Error`, so
+//! [`super::errors_index`] then iterated the details, not the messages;
+//! the Roda views now reach this pass like any other.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode};

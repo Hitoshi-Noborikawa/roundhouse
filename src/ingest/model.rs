@@ -2007,11 +2007,11 @@ pub(super) struct ClassConsts {
     /// Names any app source defines below the top level
     /// (`EnumConstants::nested_names`): what an ancestor of the class
     /// (its superclass chain, an included module) could define.
-    app_nested_names: std::collections::HashSet<String>,
+    app_nested_names: std::rc::Rc<std::collections::HashSet<String>>,
     /// First segments of every name the app defines or reopens
     /// (`EnumConstants::top_level_names`): a top-level namespace the app
     /// touches, whose standard-library contents it may have replaced.
-    app_top_level_names: std::collections::HashSet<String>,
+    app_top_level_names: std::rc::Rc<std::collections::HashSet<String>>,
     /// `NAME = 3`, `NAME = (2**31) - 1`, `NAME = 4 * (OTHER + 1)`: every
     /// Integer the class body folds, at the width Ruby computes it (an
     /// `i128`, so `2**63` is kept exactly; `scalars` holds the ones that
@@ -2194,8 +2194,8 @@ impl ClassConsts {
     pub(super) fn set_lexical_scope(
         &mut self,
         top_level: bool,
-        app_nested_names: std::collections::HashSet<String>,
-        app_top_level_names: std::collections::HashSet<String>,
+        app_nested_names: std::rc::Rc<std::collections::HashSet<String>>,
+        app_top_level_names: std::rc::Rc<std::collections::HashSet<String>>,
     ) {
         self.top_level = top_level;
         self.app_nested_names = app_nested_names;
@@ -4237,7 +4237,7 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // Array, Hash, scalar, or nil, so neither String nor one fixed
         // container type is honest. The emitted model keeps serialized
         // text in its DB slot and decodes/encodes at the public accessor
-        // boundary (`JsonColumn`); analysis uses the deliberate gradual
+        // boundary (`RoundhouseJsonColumn`); analysis uses the deliberate gradual
         // type. A `has_json` declaration adds its stronger per-key schema
         // separately in `lower::has_json`.
         ColumnType::Json | ColumnType::Jsonb => Ty::Untyped,

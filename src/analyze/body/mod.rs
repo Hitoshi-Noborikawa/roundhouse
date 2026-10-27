@@ -4262,9 +4262,17 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     // and associative under derived `==` — fixpoint convergence checks
     // and iteration order both depend on that; the lattice-law tests
     // in this file's test module enforce it.
-    let mut variants = Vec::new();
-    push_union_variants(a, &mut variants);
-    push_union_variants(b, &mut variants);
+    // Joining a large canonical union with variants it already holds is
+    // the fixpoint's common case (a parameter's stored union met by each
+    // further call site); the rebuild below would be quadratic in its
+    // size for no change. Variant order is untouched: the result is `a`.
+    if union_contains_all(&a, &b) {
+        return a;
+    }
+    let mut acc = UnionAcc::default();
+    push_union_variants(a, &mut acc);
+    push_union_variants(b, &mut acc);
+    let mut variants = acc.out;
     Ty::canonicalize_variants(&mut variants);
     match variants.len() {
         0 => Ty::Bottom,
@@ -4273,44 +4281,97 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     }
 }
 
-/// Append `t`'s constituent variants to `out`, flattening nested
+/// Unions at or above this many variants find an equal variant through a
+/// fingerprint index instead of scanning with `==`.
+const UNION_INDEX_MIN: usize = 24;
+
+/// True when `a` is a large union already in canonical form and every
+/// variant of `b` is one it holds, so joining them returns `a` unchanged
+/// (`union_of`'s flatten/dedup/sort would rebuild the same list).
+fn union_contains_all(a: &Ty, b: &Ty) -> bool {
+    let Ty::Union { variants: av } = a else { return false };
+    if av.len() < UNION_INDEX_MIN {
+        return false;
+    }
+    let bs = match b {
+        Ty::Union { variants } => &variants[..],
+        other => std::slice::from_ref(other),
+    };
+    bs.iter().all(|v| {
+        !matches!(v, Ty::Union { .. }) && !v.holds_record() && Ty::find_in_sorted_variants(av, v).is_some()
+    }) && Ty::is_canonical_union_without_records(av)
+}
+
+/// The variant list `push_union_variants` builds, with a lazily built
+/// fingerprint index over the non-container variants once it is large.
+#[derive(Default)]
+struct UnionAcc {
+    out: Vec<Ty>,
+    /// Fingerprint → positions in `out`, covering `out[..indexed]`.
+    index: HashMap<u64, Vec<usize>>,
+    indexed: usize,
+}
+
+impl UnionAcc {
+    /// The first position holding a variant `==` to `other`. `other` is
+    /// neither `Hash` nor `Array`, so those entries (mutated in place by
+    /// the merge arms) never match and are left out of the index.
+    fn position_of(&mut self, other: &Ty) -> Option<usize> {
+        if self.out.len() < UNION_INDEX_MIN {
+            return self.out.iter().position(|v| v == other);
+        }
+        while self.indexed < self.out.len() {
+            let v = &self.out[self.indexed];
+            if !matches!(v, Ty::Hash { .. } | Ty::Array { .. }) {
+                self.index.entry(v.eq_fingerprint()).or_default().push(self.indexed);
+            }
+            self.indexed += 1;
+        }
+        self.index.get(&other.eq_fingerprint())?.iter().copied().find(|&i| self.out[i] == *other)
+    }
+}
+
+/// Append `t`'s constituent variants to `acc`, flattening nested
 /// `Union`s and skipping any variant already present (structural
 /// equality) so the result carries each distinct type once. A `Hash`
 /// or `Array` merges pointwise into an existing same-spine variant
 /// instead of appending, keeping the union to one spine per container
 /// kind regardless of the order joins arrive in.
-fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
+fn push_union_variants(t: Ty, acc: &mut UnionAcc) {
     match t {
         Ty::Union { variants } => {
             for v in variants {
-                push_union_variants(v, out);
+                push_union_variants(v, acc);
             }
         }
         Ty::Hash { key, value } => {
-            for existing in out.iter_mut() {
+            for existing in acc.out.iter_mut() {
                 if let Ty::Hash { key: k0, value: v0 } = existing {
                     *k0 = std::sync::Arc::new(union_of((**k0).clone(), std::sync::Arc::unwrap_or_clone(key)));
                     *v0 = std::sync::Arc::new(union_of((**v0).clone(), std::sync::Arc::unwrap_or_clone(value)));
                     return;
                 }
             }
-            out.push(Ty::Hash { key, value });
+            acc.out.push(Ty::Hash { key, value });
         }
         Ty::Array { elem } => {
-            for existing in out.iter_mut() {
+            for existing in acc.out.iter_mut() {
                 if let Ty::Array { elem: e0 } = existing {
                     *e0 = std::sync::Arc::new(union_of((**e0).clone(), std::sync::Arc::unwrap_or_clone(elem)));
                     return;
                 }
             }
-            out.push(Ty::Array { elem });
+            acc.out.push(Ty::Array { elem });
         }
-        other => match out.iter_mut().find(|v| **v == other) {
+        other => match acc.position_of(&other) {
             // An equal variant can differ in record field order; keep
             // the canonical one so the result doesn't depend on which
             // arrived first.
-            Some(existing) => *existing = Ty::canonical_min(existing.clone(), other),
-            None => out.push(other),
+            Some(i) => {
+                let existing = &mut acc.out[i];
+                *existing = Ty::canonical_min(existing.clone(), other);
+            }
+            None => acc.out.push(other),
         },
     }
 }
@@ -4341,6 +4402,9 @@ pub(crate) fn drop_pending_arms(t: Ty) -> Ty {
             value: std::sync::Arc::new(drop_pending_arms(std::sync::Arc::unwrap_or_clone(value))),
         },
         Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(drop_pending_arms(std::sync::Arc::unwrap_or_clone(elem))) },
+        Ty::Union { variants } if variants.len() >= UNION_INDEX_MIN && is_settled_arm_list(&variants) => {
+            Ty::Union { variants }
+        }
         Ty::Union { variants } => {
             let mut variants: Vec<Ty> = variants.into_iter().map(drop_pending_arms).collect();
             if variants.iter().any(|v| !matches!(v, Ty::Var { .. })) {
@@ -4356,6 +4420,14 @@ pub(crate) fn drop_pending_arms(t: Ty) -> Ty {
         }
         other => other,
     }
+}
+
+/// Whether `drop_pending_arms` would return this arm list as it stands:
+/// no `Var` or nested container to rewrite, and already in sorted order
+/// (so its re-sort is a no-op).
+fn is_settled_arm_list(variants: &[Ty]) -> bool {
+    variants.iter().all(|v| !matches!(v, Ty::Var { .. } | Ty::Union { .. } | Ty::Hash { .. } | Ty::Array { .. }))
+        && variants.windows(2).all(|w| Ty::cmp_nil_last(&w[0], &w[1]) != std::cmp::Ordering::Greater)
 }
 
 pub(super) fn union_many(tys: Vec<Ty>) -> Ty {
@@ -5479,6 +5551,118 @@ mod tests {
                 variants: vec![hash(Ty::Str, Ty::Int), Ty::Nil].into(),
             },
         ]
+    }
+
+    fn class_ty(name: &str) -> Ty {
+        Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from(name)), args: vec![].into() }
+    }
+
+    /// The join as it was before the large-union index: scan for an equal
+    /// variant, flatten, sort.
+    fn naive_union_of(a: Ty, b: Ty) -> Ty {
+        fn push(t: Ty, out: &mut Vec<Ty>) {
+            match t {
+                Ty::Union { variants } => variants.iter().cloned().for_each(|v| push(v, out)),
+                other => match out.iter().position(|v| *v == other) {
+                    Some(i) => out[i] = Ty::canonical_min(out[i].clone(), other),
+                    None => out.push(other),
+                },
+            }
+        }
+        let mut out = Vec::new();
+        push(a, &mut out);
+        push(b, &mut out);
+        Ty::canonicalize_variants(&mut out);
+        Ty::Union { variants: out.into() }
+    }
+
+    #[test]
+    fn large_union_join_keeps_variant_order() {
+        // 200 classes joined in a scrambled order, repeatedly: the stored
+        // union is the same list whichever order they arrive in, and
+        // re-joining members returns it untouched.
+        let names: Vec<String> = (0..200).map(|i| format!("Model{:03}", (i * 37) % 200)).collect();
+        let mut stored = Ty::Nil;
+        for n in &names {
+            stored = union_of(stored, class_ty(n));
+        }
+        let Ty::Union { variants } = &stored else { panic!("{stored:?}") };
+        assert_eq!(variants.len(), 201);
+        assert!(variants.windows(2).all(|w| Ty::cmp_nil_last(&w[0], &w[1]).is_lt()));
+        assert_eq!(variants.last(), Some(&Ty::Nil));
+        let mut sorted: Vec<&str> = variants[..200]
+            .iter()
+            .map(|v| match v { Ty::Class { id, .. } => id.0.as_str(), other => panic!("{other:?}") })
+            .collect();
+        let before = sorted.clone();
+        sorted.sort();
+        assert_eq!(sorted, before);
+        for n in names.iter().rev() {
+            assert_eq!(union_of(stored.clone(), class_ty(n)), stored);
+            assert_eq!(union_of(class_ty(n), stored.clone()), stored);
+        }
+        assert_eq!(union_of(stored.clone(), Ty::Nil), stored);
+        // A new variant lands in sorted position, not at the end.
+        let joined = union_of(stored.clone(), class_ty("Model0005x"));
+        let Ty::Union { variants: v2 } = &joined else { panic!() };
+        assert_eq!(v2.len(), 202);
+        assert_eq!(joined, naive_union_of(stored.clone(), class_ty("Model0005x")));
+        // A union observed against it, partly overlapping.
+        let other = Ty::Union { variants: vec![class_ty("Model010"), class_ty("Zed"), Ty::Int].into() };
+        assert_eq!(union_of(stored.clone(), other.clone()), naive_union_of(stored.clone(), other));
+    }
+
+    #[test]
+    fn large_union_join_with_records_and_containers_matches_naive() {
+        let rec = |fields: &[(&str, Ty)]| {
+            let mut m = indexmap::IndexMap::new();
+            for (k, v) in fields {
+                m.insert(crate::ident::Symbol::from(*k), v.clone());
+            }
+            Ty::Record { row: crate::ty::Row { fields: m.into(), rest: None } }
+        };
+        let mut variants: Vec<Ty> = (0..40).map(|i| class_ty(&format!("C{i:02}"))).collect();
+        variants.push(rec(&[("a", Ty::Int), ("b", Ty::Str)]));
+        variants.push(Ty::Int);
+        let big = naive_union_of(Ty::Union { variants: variants.into() }, Ty::Str);
+        for obs in [
+            rec(&[("b", Ty::Str), ("a", Ty::Int)]),
+            rec(&[("a", Ty::Int), ("b", Ty::Str)]),
+            Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
+            class_ty("C07"),
+            Ty::Nil,
+            Ty::Union { variants: vec![class_ty("C07"), Ty::Int].into() },
+        ] {
+            assert_eq!(union_of(big.clone(), obs.clone()), naive_union_of(big.clone(), obs.clone()), "{obs:?}");
+            let once = union_of(big.clone(), obs.clone());
+            assert_eq!(union_of(once.clone(), obs.clone()), once);
+            assert_eq!(crate::analyze::unify_param_ty(big.clone(), obs.clone()), drop_pending_arms(union_of(big.clone(), obs.clone())));
+        }
+    }
+
+    /// Joining members into a large stored union must not be quadratic: a
+    /// scan of `==` per variant took seconds at this size, the index and
+    /// containment check take milliseconds. Generous bound, so it only
+    /// trips on a regression to the scan. Only the re-joins are timed:
+    /// growing the union one new variant at a time still re-sorts it per
+    /// join, which a debug build takes tens of seconds for at this size.
+    #[test]
+    fn large_union_join_is_not_quadratic() {
+        let n = 4000;
+        let classes: Vec<Ty> = (0..n).map(|i| class_ty(&format!("Model{i:05}"))).collect();
+        let mut variants = classes.clone();
+        Ty::canonicalize_variants(&mut variants);
+        let mut stored = Ty::Union { variants: variants.into() };
+        let Ty::Union { variants } = &stored else { panic!() };
+        assert!(Ty::is_canonical_union_without_records(variants));
+        let started = std::time::Instant::now();
+        for c in classes.iter().step_by(7) {
+            stored = union_of(stored, c.clone());
+        }
+        let Ty::Union { variants } = &stored else { panic!() };
+        assert_eq!(variants.len(), n);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "took {:?}", started.elapsed());
     }
 
     #[test]
