@@ -96,3 +96,27 @@ puts "file-level class new passed"
 fn a_file_level_class_new_constant_is_a_top_level_class() {
     file_level_app().run_ruby(FILE_LEVEL_ASSERTIONS).assert_passes();
 }
+
+fn same_file_parent_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/errors.rb",
+            "class AppError < StandardError; end\nNotFound = Class.new(AppError)\n",
+        )
+        .write(
+            "app/models/owner.rb",
+            "class Owner\n  class Parent; end\n  Child = Class.new(Parent)\n  def self.lineage = [NotFound.superclass.name, Child.superclass.name]\nend\n",
+        )
+}
+
+const SAME_FILE_PARENT_ASSERTIONS: &str = r##"got = Owner.lineage
+raise got.inspect unless got == ["AppError", "Owner::Parent"]
+puts "same-file class new parents passed"
+"##;
+
+#[test]
+fn a_factory_subclassing_an_in_file_class_loads() {
+    same_file_parent_app()
+        .run_ruby(SAME_FILE_PARENT_ASSERTIONS)
+        .assert_passes();
+}

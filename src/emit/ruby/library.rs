@@ -527,6 +527,21 @@ fn emit_library_class_with_nested(
     let kids = {
         let names: std::collections::HashSet<&str> =
             kids.iter().map(|k| k.name.0.as_str()).collect();
+        // Bare `Parent` inside `Owner` is `Owner::Parent` when a sibling
+        // of that name is among the kids. `Class.new(Parent)` stores the
+        // written bare name; an ordinary `class Child < Parent` may too.
+        // Absolute `::X` and names that already identify a collected
+        // child stay as written so both `Child < Parent` and
+        // `Parent = Class.new(Base)` before `class Child < Parent` order.
+        let dependency_name = |written: &str| -> String {
+            if let Some(rooted) = written.strip_prefix("::") {
+                rooted.to_owned()
+            } else if names.contains(written) {
+                written.to_owned()
+            } else {
+                format!("{}::{written}", parent.name.0)
+            }
+        };
         let mut pending: Vec<&LibraryClass> = kids.to_vec();
         let mut ordered: Vec<&LibraryClass> = Vec::new();
         let mut placed: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -541,8 +556,8 @@ fn emit_library_class_with_nested(
                     .parent
                     .iter()
                     .chain(k.includes.iter())
-                    .map(|p| p.0.as_str())
-                    .any(|p| names.contains(p) && !placed.contains(p));
+                    .map(|p| dependency_name(p.0.as_str()))
+                    .any(|p| names.contains(p.as_str()) && !placed.contains(&p));
                 if waits_for {
                     return true;
                 }

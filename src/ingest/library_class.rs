@@ -189,9 +189,12 @@ fn ingest_library_classes_impl(
     //
     // A file-level `X = Class.new(Parent)` is not hoisted: it defines the
     // top-level class X, which any file reads, so it is that class here
-    // too, ahead of the file's other classes, any of which may subclass
-    // it. A file of nothing else defines just those classes. The nested
-    // walk (`nested_in`) takes no top-level declaration.
+    // too. Factories with external parents go ahead of the file's other
+    // classes (any of which may subclass them); a factory that subclasses
+    // an in-file class follows that class — Ruby resolves the superclass
+    // while defining the subclass. A file of nothing else defines just
+    // those classes. The nested walk (`nested_in`) takes no top-level
+    // declaration.
     let made = match (nested_in, root.as_program_node()) {
         (None, Some(program)) => class_new_constant_classes(None, Some(program.statements().as_node()), file),
         _ => Vec::new(),
@@ -203,8 +206,48 @@ fn ingest_library_classes_impl(
             first.constants = file_constants;
         }
     }
-    out.splice(0..0, made.into_iter().map(|(_, c)| c));
-    Ok(out)
+    Ok(order_same_file_by_parents(
+        made.into_iter().map(|(_, c)| c).collect(),
+        out,
+    ))
+}
+
+/// Combine file-level `Class.new` factories with the file's other classes
+/// so a same-file superclass is defined before any subclass that names it.
+/// Factories whose parents are outside the file still precede classes that
+/// depend on them; a cycle cannot be Ruby either and keeps source order.
+fn order_same_file_by_parents(factories: Vec<LibraryClass>, rest: Vec<LibraryClass>) -> Vec<LibraryClass> {
+    if factories.is_empty() {
+        return rest;
+    }
+    let mut pending = factories;
+    pending.extend(rest);
+    let names: HashSet<String> = pending.iter().map(|class| class.name.0.as_str().to_string()).collect();
+    let mut ordered = Vec::with_capacity(pending.len());
+    let mut placed = HashSet::new();
+    while !pending.is_empty() {
+        let before = pending.len();
+        let mut deferred = Vec::new();
+        for class in pending.drain(..) {
+            let waits_for = class
+                .parent
+                .iter()
+                .chain(class.includes.iter())
+                .any(|dep| names.contains(dep.0.as_str()) && !placed.contains(dep.0.as_str()));
+            if waits_for {
+                deferred.push(class);
+                continue;
+            }
+            placed.insert(class.name.0.as_str().to_string());
+            ordered.push(class);
+        }
+        if deferred.len() == before {
+            ordered.extend(deferred);
+            break;
+        }
+        pending = deferred;
+    }
+    ordered
 }
 
 /// The block of `NAME = Data.define(:a, :b) do def … end end`, when that

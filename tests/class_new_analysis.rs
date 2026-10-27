@@ -1462,3 +1462,34 @@ fn other_file_level_factories_stay_unresolved_constants() {
         assert!(!analyzer.class_registry().contains_key(&ClassId(Symbol::from("ExampleError"))), "{factory}");
     }
 }
+
+#[test]
+fn a_file_level_factory_follows_its_in_file_parent_class() {
+    // `NotFound = Class.new(AppError)` after `class AppError` must not
+    // prepend the factory ahead of AppError: Ruby resolves the superclass
+    // while defining NotFound.
+    let files = [(
+        "app/models/errors.rb",
+        "class AppError < StandardError; end\nNotFound = Class.new(AppError)\n",
+    )];
+    let (app, _) = analyzed(ingest_files(&files), true);
+    assert!(errors(&app).is_empty(), "{:?}", errors(&app));
+    let names: Vec<&str> = app.library_classes.iter().map(|class| class.name.0.as_str()).collect();
+    let app_error = names.iter().position(|name| *name == "AppError").expect("AppError");
+    let not_found = names.iter().position(|name| *name == "NotFound").expect("NotFound");
+    assert!(app_error < not_found, "expected AppError before NotFound, got {names:?}");
+}
+
+#[test]
+fn a_nested_factory_is_the_sibling_of_its_ordinary_parent() {
+    let files = [(
+        "app/models/owner.rb",
+        "class Owner\n  class Parent; end\n  Child = Class.new(Parent)\nend\n",
+    )];
+    let (app, analyzer) = analyzed(ingest_files(&files), true);
+    assert!(errors(&app).is_empty(), "{:?}", errors(&app));
+    assert!(app.library_classes.iter().any(|class| class.name.0.as_str() == "Owner::Child"));
+    assert!(app.library_classes.iter().any(|class| class.name.0.as_str() == "Owner::Parent"));
+    let child = &analyzer.class_registry()[&ClassId(Symbol::from("Owner::Child"))];
+    assert_eq!(child.parent, Some(ClassId(Symbol::from("Owner::Parent"))));
+}
