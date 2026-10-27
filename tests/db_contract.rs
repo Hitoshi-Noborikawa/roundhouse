@@ -7,11 +7,14 @@
 //! (PostgreSQL), which need the Spinel toolchain.
 //!
 //!   cargo test --test db_contract
+//!   ROUNDHOUSE_PG_TEST_URL=postgres://... cargo test --test db_contract
+//!
+//! A CRuby PostgreSQL lane skips, saying so, without ROUNDHOUSE_PG_TEST_URL.
 
 #[path = "support/db_contract.rs"]
 mod db_contract;
 
-use db_contract::{Backend, LANES, Runtime, lanes};
+use db_contract::{Backend, LANES, Runtime, lanes, pg_test_url::schema_name};
 
 #[test]
 fn cruby_sqlite_shims_pass_the_contract() {
@@ -21,6 +24,13 @@ fn cruby_sqlite_shims_pass_the_contract() {
         ran += 1;
     }
     assert!(ran > 0, "no CRuby SQLite lane");
+}
+
+#[test]
+fn cruby_postgres_shims_pass_the_contract() {
+    for lane in lanes(Runtime::Cruby, Backend::Postgres) {
+        db_contract::run_lane(lane);
+    }
 }
 
 /// Every Ruby-family `Db` shim the runtime ships is a lane, except the
@@ -49,4 +59,18 @@ fn every_ruby_family_shim_has_a_lane() {
             lane.name
         );
     }
+}
+
+#[test]
+fn pg_schema_names_are_identifiers_unique_per_call() {
+    let a = schema_name("db contract::Widget-Lane");
+    let b = schema_name("db contract::Widget-Lane");
+    assert_ne!(a, b);
+    assert!(a.starts_with("rh_db_contract__widget_lane_"), "{a}");
+    let long = schema_name(&"gadget".repeat(40));
+    assert!(long.len() + "_own".len() <= 63, "{long}");
+    assert!(
+        long.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    );
 }

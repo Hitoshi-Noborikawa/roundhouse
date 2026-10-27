@@ -94,7 +94,7 @@ in `src/project.rs`. Shape notes worth knowing:
 - `runtime/spinel/db_pg.rb` implements the same `Db` contract over
   PostgreSQL, on the pure-Ruby spinel-pg driver (no libpq). No target
   selects it yet. `tests/spinel_pg_db.rs` compiles it with Spinel and
-  runs it against a live server.
+  runs it against a live server (`ROUNDHOUSE_PG_TEST_URL`).
   - `Db.exec_returning` answers the returned rows.
   - `Db.last_insert_rowid` reads the inserted table's own sequence, so
     it works for serial and identity keys only; any other key raises.

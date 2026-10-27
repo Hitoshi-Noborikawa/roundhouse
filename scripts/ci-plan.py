@@ -233,6 +233,7 @@ DB_CONTRACT_INPUTS = {
     "tests/db_contract/postgres_main.rb": ("spinel_pg_db",),
     "tests/db_contract/db_pg_lane.rb": ("spinel_pg_db",),
     "tests/support/db_contract.rs": ("spinel_db_contract", "spinel_pg_db"),
+    "tests/support/pg_test_url.rs": ("spinel_pg_db",),
 }
 GENERATED_COLUMNS_SPINEL_INPUTS = {
     "src/emit/ruby/library.rs",

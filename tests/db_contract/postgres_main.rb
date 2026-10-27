@@ -2,9 +2,9 @@
 # runtime/spinel/db_pg.rb under Spinel today (tests/spinel_pg_db.rs).
 # The harness copies the shim here as db.rb, with the lane's prelude.rb
 # (ActiveRecord's error classes), its lane file as lane.rb, and the
-# suite files. DATABASE_URL names the server and SPINEL_PG_SCHEMA the
-# run's disposable schema, created here and dropped at the end with
-# everything in it.
+# suite files. ROUNDHOUSE_PG_TEST_URL names the server and
+# ROUNDHOUSE_PG_TEST_SCHEMA the run's disposable schema, created here
+# and dropped at the end with everything in it.
 require_relative "prelude"
 require_relative "db"
 require_relative "support"
@@ -20,9 +20,9 @@ def key_column
   "bigserial PRIMARY KEY"
 end
 
-url = ENV.fetch("DATABASE_URL", "")
-schema = ENV.fetch("SPINEL_PG_SCHEMA", "")
-raise "DATABASE_URL and SPINEL_PG_SCHEMA must be set" if url == "" || schema == ""
+url = ENV.fetch("ROUNDHOUSE_PG_TEST_URL", "")
+schema = ENV.fetch("ROUNDHOUSE_PG_TEST_SCHEMA", "")
+raise "ROUNDHOUSE_PG_TEST_URL and ROUNDHOUSE_PG_TEST_SCHEMA must be set" if url == "" || schema == ""
 
 lane_before
 lane_checks = $checks

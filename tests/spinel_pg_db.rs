@@ -9,12 +9,13 @@
 //! suite and its lanes are described in tests/support/db_contract.rs.
 //!
 //!   SPINEL_PG_DIR=/path/to/spinel-pg \
-//!   DATABASE_URL=postgres://postgres:secret@127.0.0.1:5432/postgres \
+//!   ROUNDHOUSE_PG_TEST_URL=postgres://postgres:secret@127.0.0.1:5432/postgres \
 //!   cargo test --test spinel_pg_db -- --ignored --nocapture
 //!
-//! Under `--ignored` a missing SPINEL_PG_DIR or DATABASE_URL fails the
-//! test rather than skipping it. The cases create one schema named after
-//! the process and drop it when they finish.
+//! Without ROUNDHOUSE_PG_TEST_URL the gate says so and skips, unless
+//! ROUNDHOUSE_PG_TEST_REQUIRED is set, as CI sets it; a missing
+//! SPINEL_PG_DIR fails it. Each run gets a schema of its own
+//! (tests/support/pg_test_url.rs), dropped when it finishes.
 
 #[path = "support/db_contract.rs"]
 mod db_contract;
@@ -23,7 +24,7 @@ use db_contract::{Backend, Runtime, lanes};
 use std::collections::BTreeSet;
 
 #[test]
-#[ignore = "requires Spinel, SPINEL_PG_DIR (a spinel-pg checkout) and DATABASE_URL (PostgreSQL)"]
+#[ignore = "requires Spinel, SPINEL_PG_DIR (a spinel-pg checkout) and ROUNDHOUSE_PG_TEST_URL (PostgreSQL)"]
 fn spinel_pg_shims_pass_the_contract_and_postgres_cases() {
     let mut ran = 0;
     for lane in lanes(Runtime::Spinel, Backend::Postgres) {

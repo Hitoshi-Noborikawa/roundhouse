@@ -26,6 +26,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "pg_test_url.rs"]
+pub mod pg_test_url;
+
 /// Checks in contract_cases.rb; every lane runs all of them.
 pub const CONTRACT_CHECKS: usize = 129;
 /// Checks in postgres_cases.rb; every PostgreSQL lane runs all of them.
@@ -169,30 +172,23 @@ fn reported(stdout: &str, suite: &str) -> usize {
         .unwrap_or_else(|| panic!("no `{suite}: N checks passed` line\n{stdout}"))
 }
 
-fn required_env(name: &str, what: &str, lane: &str) -> String {
-    match std::env::var(name) {
-        Ok(v) if !v.is_empty() => v,
-        _ => panic!(
-            "{name} must name {what} for the {lane} lane; it fails rather than skips without it"
-        ),
-    }
-}
-
-/// Runs one lane. A PostgreSQL lane needs DATABASE_URL and creates one
-/// schema named after the process, dropped when it finishes.
+/// Runs one lane. A PostgreSQL lane returns without running (after
+/// saying why) when ROUNDHOUSE_PG_TEST_URL is unset; see pg_test_url.rs.
 pub fn run_lane(lane: &Lane) {
     let test = format!("db_contract_{}", lane.name);
     let pg = match lane.backend {
         Backend::Sqlite => None,
-        Backend::Postgres => Some(required_env(
-            "DATABASE_URL",
-            "a PostgreSQL server",
-            lane.name,
-        )),
+        Backend::Postgres => match pg_test_url::pg_test_db(&test) {
+            Some(db) => Some(db),
+            None => return,
+        },
     };
     let include = lane
         .include_env
-        .map(|(var, what)| required_env(var, what, lane.name));
+        .map(|(var, what)| match std::env::var(var) {
+            Ok(v) if !v.is_empty() => v,
+            _ => panic!("{var} must name {what} for the {} lane", lane.name),
+        });
     let base = option_env!("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
@@ -264,11 +260,10 @@ pub fn run_lane(lane: &Lane) {
     if lane.backend == Backend::Sqlite {
         program.arg(dir.join("contract.sqlite3"));
     }
-    if let Some(url) = &pg {
-        program.env("DATABASE_URL", url).env(
-            "SPINEL_PG_SCHEMA",
-            format!("rh_spinel_pg_db_{}", std::process::id()),
-        );
+    if let Some(db) = &pg {
+        program
+            .env("ROUNDHOUSE_PG_TEST_URL", &db.url)
+            .env("ROUNDHOUSE_PG_TEST_SCHEMA", &db.schema);
     }
     let stdout = run(program
         .env_remove("DATABASE_POOL_SIZE")
