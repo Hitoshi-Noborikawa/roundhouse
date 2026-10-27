@@ -1913,6 +1913,257 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
 }
 
+/// An ancestor controller's method reading an ivar only a descendant
+/// writes: analysis types it from the descendants (Phase B″), which the
+/// ruby family runs as written, but a strict target's ancestor has no
+/// such field to read.
+fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    use crate::expr::{ExprNode, LValue};
+    fn writes(expr: &crate::expr::Expr, out: &mut std::collections::HashSet<String>) {
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, .. } | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
+                out.insert(name.as_str().to_string());
+            }
+            ExprNode::MultiAssign { targets, .. } => {
+                for t in targets {
+                    if let LValue::Ivar { name } = t {
+                        out.insert(name.as_str().to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        expr.node.for_each_child(&mut |child| writes(child, out));
+    }
+    let own: std::collections::HashMap<&crate::ident::ClassId, std::collections::HashSet<String>> = app
+        .controllers
+        .iter()
+        .map(|c| {
+            let mut out = std::collections::HashSet::new();
+            for action in c.actions() {
+                writes(&action.body, &mut out);
+            }
+            (&c.name, out)
+        })
+        .collect();
+    let parent_of: std::collections::HashMap<&crate::ident::ClassId, &crate::ident::ClassId> =
+        app.controllers.iter().filter_map(|c| c.parent.as_ref().map(|p| (&c.name, p))).collect();
+    let chain = |start: &crate::ident::ClassId| {
+        let mut out = vec![start.clone()];
+        let mut cursor = parent_of.get(start).copied();
+        while let Some(p) = cursor {
+            if out.contains(p) {
+                break;
+            }
+            out.push(p.clone());
+            cursor = parent_of.get(p).copied();
+        }
+        out
+    };
+    for controller in &app.controllers {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for id in chain(&controller.name) {
+            if let Some(w) = own.get(&id) {
+                seen.extend(w.iter().cloned());
+            }
+        }
+        let below: std::collections::HashSet<&String> = app
+            .controllers
+            .iter()
+            .filter(|d| d.name != controller.name && chain(&d.name).contains(&controller.name))
+            .filter_map(|d| own.get(&d.name))
+            .flatten()
+            .filter(|name| !seen.contains(*name))
+            .collect();
+        if below.is_empty() {
+            continue;
+        }
+        fn reads(expr: &crate::expr::Expr, below: &std::collections::HashSet<&String>, target: BuildTarget) {
+            if let ExprNode::Ivar { name } = &*expr.node
+                && below.contains(&name.as_str().to_string())
+            {
+                crate::emit::diagnostics::report_unsupported(
+                    expr.span, target.as_str(), "ivar written only by a subclass",
+                    format!("@{} is set by a subclass's action; this target gives the ancestor no field to read it from", name.as_str()),
+                );
+            }
+            expr.node.for_each_child(&mut |child| reads(child, below, target));
+        }
+        let spliced = app.concern_spliced_actions.get(&controller.name);
+        // Not a concern's copy: its ivars are seeded from the concern's includers, which the analysis types separately
+        for action in controller.actions().filter(|a| !spliced.is_some_and(|m| m.contains_key(&a.name))) {
+            reads(&action.body, &below, target);
+        }
+    }
+}
+
+/// `include Rails.application.routes.url_helpers` in an app class: the
+/// ruby emit routes its helper calls through the generated RouteHelpers
+/// module; no strict target's class reaches that module's helpers.
+fn report_url_helpers_includes(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    for class in &app.library_classes {
+        for (i, included) in class.includes.iter().enumerate() {
+            if included.0.as_str() != "RouteHelpers" {
+                continue;
+            }
+            crate::emit::diagnostics::report_unsupported(
+                class.include_spans.get(i).copied().unwrap_or_default(), target.as_str(), "include of the route url_helpers",
+                format!("`{}` includes Rails.application.routes.url_helpers, whose helpers only the ruby emit gives a class", class.name.0),
+            );
+        }
+    }
+}
+
+/// An operator that only some arms of its operands take (`Integer | String > Integer`):
+/// a warning in analysis, since the ruby family runs it as Ruby does and raises for
+/// the arms that miss. A strict target emits a raise for the whole expression, so it
+/// is reported there. Nil-only misses were already checked by `lower::nil_operand`.
+fn report_partial_binops(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        if let Some(crate::diagnostic::DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty }) = &expr.diagnostic()
+            && crate::analyze::some_operands_take_it(op.as_str(), lhs_ty, rhs_ty)
+        {
+            crate::emit::diagnostics::report_unsupported(
+                expr.span, target.as_str(), "operator on some of its operands' types",
+                format!("`{}` takes only some of the types its operands may hold; the ruby family raises for the rest as Ruby does, this target for all", op.as_str()),
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
+/// A constant of an unknown gem (pinned in the lockfile, no façade, no
+/// spin package): the CRuby tree requires the real gem, but nothing in
+/// the Spinel tree defines it, so a subclass or a reference raises when
+/// it runs (lobsters' `SearchParser < Parslet::Parser` stopped the server
+/// at boot with a NoMethodError while the build was clean).
+fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
+    if !matches!(target, BuildTarget::Spinel) {
+        return;
+    }
+    let Some(lock) = app.gem_lock.as_ref() else { return };
+    let census = crate::gems::GemCensus::of(lock);
+    let carried = crate::gems::native_extension_gem_namespaces(app);
+    let unknown: std::collections::HashSet<&str> = census
+        .unknown()
+        .filter(|gem| !lock.is_from_git(&gem.name) && !app.extensions.is_rails_dependent(&gem.name))
+        .filter(|gem| !carried.contains(&crate::gems::namespace_of(&gem.name)))
+        .map(|gem| gem.name.as_str())
+        .collect();
+    if unknown.is_empty() {
+        return;
+    }
+    // The longest-matching gem across the whole lockfile, so `Rack::Utils` stays rack's while `Rack::MiniProfiler` is rack-mini-profiler's
+    let ported = spinel_runtime_constants();
+    let owner = |path: &str| -> Option<String> {
+        if ported.contains(path) {
+            return None;
+        }
+        let owners = crate::gems::lock_gems_owning_constant(lock, path);
+        (!owners.is_empty() && owners.iter().all(|g| unknown.contains(g))).then(|| owners.join(", "))
+    };
+    let report = |span: crate::span::Span, path: &str, ns: &str| {
+        crate::emit::diagnostics::report_unsupported(
+            span, "spinel", "constant of an unknown gem",
+            format!("`{path}` belongs to the {ns} gem, which the Spinel tree does not carry (no façade, no spin package); it raises where it runs"),
+        );
+    };
+    for_each_app_constant(app, &mut |span, path| {
+        if let Some(ns) = owner(path) {
+            report(span, path, &ns);
+        }
+    });
+}
+
+/// Every constant the app's classes name that the app does not define itself:
+/// superclasses, and each `Const` in an emitted body.
+fn for_each_app_constant(app: &App, f: &mut dyn FnMut(crate::span::Span, &str)) {
+    let own: std::collections::HashSet<&str> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str())
+        .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
+        .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
+        .collect();
+    let f = &mut |span: crate::span::Span, path: &str| {
+        if !own.contains(path) {
+            f(span, path);
+        }
+    };
+    let parents = app
+        .models
+        .iter()
+        .map(|m| (m.parent.as_ref(), m.parent_span))
+        .chain(app.library_classes.iter().map(|c| (c.parent.as_ref(), c.parent_span)))
+        .chain(app.controllers.iter().map(|c| (c.parent.as_ref(), c.parent_span)));
+    for (parent, span) in parents {
+        if let Some(parent) = parent {
+            f(span, parent.0.as_str());
+        }
+    }
+    fn visit(expr: &crate::expr::Expr, f: &mut dyn FnMut(crate::span::Span, &str)) {
+        if let crate::expr::ExprNode::Const { path } = &*expr.node {
+            let joined = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+            f(expr.span, &joined);
+            return;
+        }
+        expr.node.for_each_child(&mut |child| visit(child, f));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, f));
+}
+
+/// Every class and module `runtime/spinel/*.rb` declares, by full name: a gem's
+/// constant ported there (`Net::HTTP::Persistent`) runs on the Spinel tree.
+fn spinel_runtime_constants() -> &'static std::collections::HashSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        struct Declared {
+            nesting: Vec<String>,
+            out: std::collections::HashSet<String>,
+        }
+        impl Declared {
+            fn enter(&mut self, path: &ruby_prism::Node<'_>) {
+                let name = String::from_utf8_lossy(path.location().as_slice()).trim_start_matches("::").to_string();
+                self.nesting.push(name);
+                self.out.insert(self.nesting.join("::"));
+            }
+        }
+        impl<'pr> ruby_prism::Visit<'pr> for Declared {
+            fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+                self.enter(&node.constant_path());
+                ruby_prism::visit_module_node(self, node);
+                self.nesting.pop();
+            }
+            fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+                self.enter(&node.constant_path());
+                ruby_prism::visit_class_node(self, node);
+                self.nesting.pop();
+            }
+        }
+        let mut files = Vec::new();
+        let _ = crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files);
+        let mut declared = Declared { nesting: Vec::new(), out: std::collections::HashSet::new() };
+        for (_, source) in &files {
+            let parsed = ruby_prism::parse(source.as_bytes());
+            ruby_prism::Visit::visit(&mut declared, &parsed.node());
+        }
+        declared.out
+    })
+}
+
 /// Not left to the runtime's raise: `scope_chain` needs the receiver's model to write the join's SQL.
 fn report_dynamic_association_joins(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Futamura) {
@@ -2315,6 +2566,14 @@ fn target_files_inner(
         }
         None => app,
     };
+    let with_where_bounds;
+    let app = match crate::lower::where_bounds::lower_for_target(app, target) {
+        Some(lowered) => {
+            with_where_bounds = lowered;
+            &with_where_bounds
+        }
+        None => app,
+    };
     if target == BuildTarget::Roda {
         if let Some((table, column)) = app.schema.tables.values().find_map(|table| {
             table
@@ -2389,6 +2648,10 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_descendant_ivar_reads(app, target);
+    report_url_helpers_includes(app, target);
+    report_partial_binops(app, target);
+    report_spinel_unknown_gem_constants(app, target);
     report_model_attribute_defaults(app, target);
     report_builtin_aliases(app, target);
     report_dynamic_association_joins(app, target);
@@ -4299,8 +4562,11 @@ fn apply_i18n_locales(files: &mut [(String, String)], app: &App) {
         false => format!(":{}", crate::emit::ruby::expr::ruby_str_literal(l)),
     };
     let available = catalog.locales().iter().map(|l| sym(l)).collect::<Vec<_>>().join(", ");
+    // `.freeze`: a literal Array of literals frozen in place is one shared
+    // object on CRuby 3.4+, and `I18n.locale` searches this list on every
+    // call (once per element of a cached collection's keys).
     let generated = format!(
-        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}]\n  end\n{TAIL}",
+        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}].freeze\n  end\n{TAIL}",
         sym(&catalog.locale)
     );
     for (path, content) in files.iter_mut() {
@@ -5053,6 +5319,24 @@ fn redis_setting_source(setting: Option<&crate::app::RedisSetting>) -> String {
     }
 }
 
+/// `JobRegistry`'s `config/sidekiq.yml` defaults for the worker:
+/// concurrency 0 and timeout -1 when the file gives none, and the queues
+/// as one String of `name` or `name,weight` words, `""` for none.
+fn worker_defaults_source(defaults: &crate::app::SidekiqWorkerDefaults) -> String {
+    use crate::emit::ruby::expr::ruby_str_literal;
+    let queues: Vec<String> = defaults
+        .queues
+        .iter()
+        .map(|(name, weight)| if *weight == 0 { name.clone() } else { format!("{name},{weight}") })
+        .collect();
+    format!(
+        "\n  def self.sidekiq_worker_concurrency\n    {}\n  end\n\n  def self.sidekiq_worker_timeout\n    {}\n  end\n\n  def self.sidekiq_worker_queues\n    {}\n  end\n",
+        defaults.concurrency.unwrap_or(0),
+        defaults.timeout.unwrap_or(-1),
+        ruby_str_literal(&queues.join(" ")),
+    )
+}
+
 fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "  # >>> generated: job-registry\n";
     const TAIL: &str = "  # <<< generated: job-registry\n";
@@ -5062,9 +5346,10 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
         "  def self.sidekiq?\n    false\n  end\n".to_string()
     };
     let redis = format!(
-        "\n  def self.sidekiq_redis_url\n    {}\n  end\n\n  def self.sidekiq_redis_password\n    {}\n  end\n",
+        "\n  def self.sidekiq_redis_url\n    {}\n  end\n\n  def self.sidekiq_redis_password\n    {}\n  end\n{}",
         redis_setting_source(app.sidekiq_redis.url.as_ref()),
         redis_setting_source(app.sidekiq_redis.password.as_ref()),
+        worker_defaults_source(&app.sidekiq_worker),
     );
     let generated = format!(
         "{HEAD}{}\n{flag}{redis}{TAIL}",
@@ -8756,6 +9041,11 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         return;
     };
     let census = crate::gems::GemCensus::of(lock);
+    // Not only the gem's conventional namespace spelled exactly: svg-graph's is `SVG::Graph`.
+    let mut owned = std::collections::HashSet::new();
+    for_each_app_constant(app, &mut |_, path| {
+        owned.extend(crate::gems::lock_gems_owning_constant(lock, path).into_iter().map(str::to_string));
+    });
     let needed: Vec<_> = census
         .unknown()
         .filter(|gem| {
@@ -8770,11 +9060,12 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
                 return false;
             }
             let namespace = crate::gems::namespace_of(&gem.name);
-            files.iter().any(|(path, content)| {
-                (path.starts_with("app/") || path.starts_with("lib/"))
-                    && path.ends_with(".rb")
-                    && names_constant(content, &namespace)
-            })
+            owned.contains(&gem.name)
+                || files.iter().any(|(path, content)| {
+                    (path.starts_with("app/") || path.starts_with("lib/"))
+                        && path.ends_with(".rb")
+                        && names_constant(content, &namespace)
+                })
         })
         .cloned()
         .collect();
@@ -8786,8 +9077,11 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     };
     let mut eager_requires = Vec::new();
     for gem in needed {
-        if crate::gems::loads_by_gem_name(&gem.name) {
-            eager_requires.push(gem.name.clone());
+        // Not only a gem that loads by its name: the app's Gemfile can say what Bundler requires for it.
+        match lock.gemfile_requires.get(&gem.name) {
+            Some(features) => eager_requires.extend(features.iter().cloned()),
+            None if crate::gems::loads_by_gem_name(&gem.name) => eager_requires.push(gem.name.clone()),
+            None => {}
         }
         let version = gem.version.as_deref();
         let pinned = match version {
@@ -8806,6 +9100,12 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         gemfile.push_str(&format!(
             "\n# Required by emitted application constants.\n{pinned}\n"
         ));
+    }
+    // Not only the gems the app names: a real gem can load a bundled one the app's own Gemfile lists for it (lobsters' rexml for svg-graph).
+    for dep in lock.dependencies.iter().filter(|dep| crate::gems::fate_of(dep) == crate::gems::GemFate::Stdlib) {
+        if !gemfile.contains(&format!("gem {dep:?}")) {
+            gemfile.push_str(&format!("gem {dep:?}\n"));
+        }
     }
     if let Some((_, boot)) = files.iter_mut().find(|(path, _)| path == "boot.rb") {
         let requires = eager_requires

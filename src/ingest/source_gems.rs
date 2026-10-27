@@ -41,21 +41,44 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
         };
         // Not lexical first: a `..` after a linked app dir resolves through the link, as the OS reads it
         let installed = vfs.canonical(&installed).unwrap_or_else(|| normalize(&installed));
-        let files = required_files(vfs, &installed, name)?;
+        let files = required_files(vfs, &installed, name, lock.gemfile_requires.get(name))?;
         gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
     }
     Ok(gems)
 }
 
-fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BTreeSet<PathBuf>, String> {
+fn required_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    gem: &Path,
+    name: &str,
+    gemfile_requires: Option<&Vec<String>>,
+) -> Result<BTreeSet<PathBuf>, String> {
     let lib = gem.join("lib");
-    let entry = [name.to_string(), name.replace('-', "/")]
-        .into_iter()
-        .map(|feature| lib.join(format!("{feature}.rb")))
-        .find(|path| vfs.exists(path))
-        .ok_or_else(|| format!("source gem {name:?} has no lib/{name}.rb to require"))?;
+    // Not the gem's name when the app's Gemfile says what Bundler requires (svg-graph has no `svg-graph.rb`).
+    let entries: Vec<PathBuf> = match gemfile_requires.filter(|features| !features.is_empty()) {
+        Some(features) => {
+            let mut entries = Vec::new();
+            for feature in features {
+                let path = lib.join(if feature.ends_with(".rb") { feature.clone() } else { format!("{feature}.rb") });
+                if !vfs.exists(&path) {
+                    return Err(format!("source gem {name:?}: the Gemfile requires {feature:?}, which its lib/ does not hold"));
+                }
+                entries.push(path);
+            }
+            entries
+        }
+        None => [name.to_string(), name.replace('-', "/")]
+            .into_iter()
+            .map(|feature| lib.join(format!("{feature}.rb")))
+            .find(|path| vfs.exists(path))
+            .into_iter()
+            .collect(),
+    };
+    if entries.is_empty() {
+        return Err(format!("source gem {name:?} has no lib/{name}.rb to require"));
+    }
     let mut seen = BTreeSet::new();
-    let mut pending = vec![entry];
+    let mut pending = entries;
     while let Some(file) = pending.pop() {
         if !seen.insert(file.strip_prefix(gem).unwrap().to_path_buf()) {
             continue;
@@ -270,6 +293,35 @@ mod tests {
         let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
         let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
         assert_eq!(files, vec!["lib/widgets/part.rb", "lib/widgets.rb"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_gemfile_require_names_the_entry_files() {
+        let root = std::env::temp_dir().join(format!("rh-source-gems-require-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        write("app/.bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n");
+        let gem = "app/vendor/bundle/ruby/3.4.0/gems/svg-graph-2.2.2";
+        write(&format!("{gem}/lib/SVG/Graph/TimeSeries.rb"), "require_relative \"Plot\"\n");
+        write(&format!("{gem}/lib/SVG/Graph/Plot.rb"), "module SVG; end\n");
+        write(&format!("{gem}/lib/svggraph.rb"), "module SVG; end\n");
+        let lock_with = |requires: &[&str]| {
+            let mut lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    svg-graph (2.2.2)\n\nDEPENDENCIES\n  svg-graph\n");
+            lock.gemfile_requires.insert("svg-graph".to_string(), requires.iter().map(|r| r.to_string()).collect());
+            lock
+        };
+        let vfs = crate::vfs::FsVfs::new();
+        let names = ["svg-graph".to_string()];
+        let gems = resolve(&vfs, &root.join("app"), Some(&lock_with(&["SVG/Graph/TimeSeries", "svggraph.rb"])), &names).unwrap();
+        let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(files, vec!["lib/SVG/Graph/Plot.rb", "lib/SVG/Graph/TimeSeries.rb", "lib/svggraph.rb"]);
+        let err = resolve(&vfs, &root.join("app"), Some(&lock_with(&["SVG/Graph/TimeSeries", "SVG/Missing"])), &names).err().unwrap();
+        assert!(err.contains("\"SVG/Missing\""), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

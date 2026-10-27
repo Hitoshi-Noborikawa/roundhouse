@@ -5,6 +5,14 @@ module ActiveRecord
   # first/take) — not per-model. `Relation[T]` is the later refinement.
   # `preloaded` and set-operator operands stay `untyped` for Spinel
   # integer-seed arrays.
+  class Bounds
+    type bound = Time | Date | String | Integer | Float | nil
+    def lower: () -> bound
+    def upper: () -> bound
+    def initialize: (bound lower, bound upper, bool exclusive) -> void
+    def exclusive?: () -> bool
+  end
+
   class Relation
     # Model handle is `Base` (class object collapsed onto `Ty::Class{Base}`
     # in send.rs). Do not spell `Class` — that leaves `@model` as Ty::Var
@@ -350,8 +358,9 @@ module ActiveRecord
     def exists_sql: (Integer n) -> String
     def bound_exists_sql: (Integer n) -> String
     def hash_conditions: (Hash[String | Symbol, untyped] hash) -> String
-    def column_predicate: (String col, Relation | Array[untyped] | Base | String | Integer | Float | bool | nil val) -> String
+    def column_predicate: (String col, Relation | Array[untyped] | Base | Bounds | String | Integer | Float | bool | nil val) -> String
     def range_predicate: (String qcol, untyped range) -> String
+    def bounds_predicate: (String qcol, Time | Date | String | Integer | Float | nil lower, Time | Date | String | Integer | Float | nil upper, bool exclusive) -> String
     def range_bound_sql: (untyped bound) -> String?
     def array_with_ranges_predicate: (String qcol, Array[untyped] vals) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String

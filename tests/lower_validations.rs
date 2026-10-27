@@ -58,6 +58,7 @@ fn length_rule_fans_out_into_min_and_max_checks() {
                 rules: vec![ValidationRule::Length {
                     min: Some(5),
                     max: Some(100),
+                    is: None,
                     message: None,
                     allow_nil: None,
                 }],
@@ -101,7 +102,7 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
                 attribute: Symbol::from("title"),
                 rules: vec![
                     ValidationRule::Presence,
-                    ValidationRule::Length { min: Some(3), max: None, message: None, allow_nil: None },
+                    ValidationRule::Length { min: Some(3), max: None, is: None, message: None, allow_nil: None },
                 ],
                 if_cond: None,
                 unless_cond: None,

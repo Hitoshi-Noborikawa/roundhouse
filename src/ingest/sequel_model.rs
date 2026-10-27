@@ -491,6 +491,7 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                         rules: vec![ValidationRule::Length {
                             min,
                             max,
+                            is: None,
                             message: message.clone(),
                             allow_nil: None,
                         }],

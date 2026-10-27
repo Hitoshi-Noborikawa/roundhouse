@@ -260,6 +260,23 @@ fn class_method_shape(class: &str, method: &str) -> Option<Shape> {
     method_shape(class, method, true)
 }
 
+/// Whether the class `class` reaches `ActiveRecord::Base` through the
+/// parents this emit recorded: a model, whose `find` takes its key.
+fn descends_from_active_record(class: &str) -> bool {
+    CLASS_SHAPES.with(|cell| {
+        let map = cell.borrow();
+        let mut current = Some(class.to_string());
+        for _ in 0..16 {
+            let Some(name) = current else { return false };
+            if name == "ActiveRecord::Base" {
+                return true;
+            }
+            current = map.get(&name).and_then(|shape| shape.parent.clone());
+        }
+        false
+    })
+}
+
 fn method_shape(class: &str, method: &str, class_side: bool) -> Option<Shape> {
     CLASS_SHAPES.with(|cell| {
         let map = cell.borrow();
@@ -2422,6 +2439,49 @@ fn js_send_inner(
             return js_expr(r);
         }
     }
+    // `Model.find(@params[k])`, the pre-Rails-8 spelling of `find(params.
+    // expect(:id))`, on a class reaching `ActiveRecord::Base` (another
+    // class's `find`, `Rake::Task.find(name)`, keeps its argument): the
+    // TS finder takes a `number` and the read is a `ParamValue`, so it
+    // is coerced — the TS counterpart of the Rust emitter's
+    // `.as_i64().unwrap()`. Only a nonblank String is converted: `Number`
+    // reads "" (a blank `?id=`, or a missing one) as 0, which would find
+    // row 0, so a blank, absent or non-String id is NaN and finds nothing
+    // (RecordNotFound, as Rails' `find(nil)`/`find("")`). The Ruby family
+    // hands the raw String to its casting finder instead.
+    if method == "find" && args.len() == 1 && block.is_none() {
+        if let (Some(r), ExprNode::Send { recv: Some(pr), method: index, args: index_args, block: None, .. }) =
+            (recv, &*args[0].node)
+        {
+            if matches!(&*r.node, ExprNode::Const { path } if descends_from_active_record(&path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")))
+                && index.as_str() == "[]"
+                && index_args.len() == 1
+                && matches!(&*pr.node, ExprNode::Ivar { name } if name.as_str() == "params")
+            {
+                // `Number(typeof v === "string" && v.trim() !== "" ? v : NaN)`;
+                // `v` is a property read, so reading it again is the same value.
+                let v = || js_expr(&args[0]);
+                let is_string = Js::binary(span, "===", Js::unary(span, "typeof ", v()), Js::str(span, "string"));
+                let nonblank = Js::binary(span, "!==", Js::method_call(span, v(), "trim", vec![]), Js::str(span, ""));
+                let key = Js::new(
+                    span,
+                    JsExpr::Ternary {
+                        cond: Js::binary(span, "&&", is_string, nonblank),
+                        then: v(),
+                        else_: Js::ident(span, "NaN"),
+                    },
+                );
+                let coerced = Js::call(span, Js::ident(span, "Number"), vec![key]);
+                // The `Base` it returns narrowed to the model, as the
+                // general path below narrows a class-method `find`.
+                let model = super::printer::render_expr(&js_expr(r));
+                return Js::new(
+                    span,
+                    JsExpr::Cast { expr: Js::method_call(span, js_expr(r), "find", vec![coerced]), ty: TsType(model) },
+                );
+            }
+        }
+    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
     // stored ISO-8601 text into a native `Date` (nil-safe: `string | null`
     // → `Date | null`). Maps to the hand-written `RhDateTime.parse`
@@ -2595,14 +2655,11 @@ fn js_send_inner(
             if is_framework_class_recv(r) {
                 return Js::method_call(span, js_expr(r), "get", vec![js_expr(&args[0])]);
             }
-            // Legacy hardcode for `@params[:k]` — @params's ty isn't
-            // always recovered as Class (it can flow as Hash[Sym, Any]
-            // through the analyzer), so the ivar-name shortcut still
-            // pays for itself. Subsumed by the framework-class match
-            // above when the type is recovered.
-            if matches!(&*r.node, ExprNode::Ivar { name } if name.as_str() == "params") {
-                return Js::method_call(span, js_expr(r), "get", vec![js_expr(&args[0])]);
-            }
+            // `@params[k]` is bracket access: the controller's `params`
+            // is a `Record<string, ParamValue>` (action_controller_base),
+            // not a class with a `get`. An ivar-name shortcut that routed
+            // it to `.get` outlived the class it was written for, and made
+            // `Post.find(params[:id])` a tsc error.
         }
     }
     if method == "[]" {

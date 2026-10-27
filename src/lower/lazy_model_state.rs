@@ -183,6 +183,50 @@ fn share_empty_attrs_default(m: &mut MethodDef) {
     }
 }
 
+/// `attrs[:col] || ""` → `attrs[:col] || "".freeze` in a model's
+/// `initialize`: the blank a column starts as when `attrs` does not name
+/// it. Every hydration path constructs the record bare and then writes
+/// each column, so these Strings were made per column per loaded record
+/// and replaced before anything read them (three per `Message`, 120 per
+/// room render). A frozen literal is one shared String on CRuby. An
+/// unsaved record's blank is frozen as a result; Rails starts that
+/// attribute as `nil`, so code that appends to it in place fails there
+/// too.
+fn share_blank_column_defaults(m: &mut MethodDef) {
+    if m.name.as_str() != "initialize" {
+        return;
+    }
+    fn reads_attrs(e: &Expr) -> bool {
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else { return false };
+        if method.as_str() != "[]" || args.len() != 1 {
+            return false;
+        }
+        matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str() == "attrs")
+    }
+    fn walk(e: &mut Expr) {
+        if let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } = &mut *e.node {
+            if reads_attrs(left) && matches!(&*right.node, ExprNode::Lit { value: Literal::Str { value } } if value.is_empty()) {
+                let (span, ty) = (right.span, right.ty.clone());
+                let mut frozen = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(right.clone()),
+                        method: Symbol::from("freeze"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                frozen.ty = ty;
+                *right = frozen;
+                return;
+            }
+        }
+        e.node.for_each_child_mut(&mut |c| walk(c));
+    }
+    walk(&mut m.body);
+}
+
 /// `super()` → `super(attrs)` in a model's `initialize`, when the only
 /// `initialize` above it is Base's, which ignores its argument.
 fn forward_attrs_to_base(m: &mut MethodDef) {
@@ -245,6 +289,7 @@ pub fn apply(lcs: &mut [LibraryClass], app: &App) {
         if !includes_active_model_model(model) {
             for m in lc.methods.iter_mut() {
                 share_empty_attrs_default(m);
+                share_blank_column_defaults(m);
                 if forward {
                     forward_attrs_to_base(m);
                 }

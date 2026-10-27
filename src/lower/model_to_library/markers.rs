@@ -1313,7 +1313,7 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
     if methods.iter().any(|m| {
         m.name.as_str() == "cache_version" && m.receiver == MethodReceiver::Instance
     }) {
-        methods.push(str_method(model, "cache_key_with_version", versioned_by_cache_version(span)));
+        methods.push(str_method(model, "cache_key_with_version", versioned_by_cache_version(span, &table_name, persisted)));
         return;
     }
 
@@ -1401,7 +1401,12 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
 ///
 ///   version = cache_version
 ///   version.nil? ? cache_key : "#{cache_key}-#{version}"
-fn versioned_by_cache_version(span: Span) -> Expr {
+///
+/// with the synthesized `cache_key` spelled out in the joined arm, as
+/// the `updated_at` path does: `persisted? ? "<table>/#{@id}-#{version}"
+/// : "<table>/new-#{version}"`, one String rather than the key's and
+/// then the joined one, for every element of a cached collection.
+fn versioned_by_cache_version(span: Span, table_name: &str, persisted: Expr) -> Expr {
     let version = Symbol::from("version");
     let call = |recv: Option<Expr>, method: &str| {
         Expr::new(
@@ -1423,15 +1428,26 @@ fn versioned_by_cache_version(span: Span) -> Expr {
             value: call(Some(Expr::new(span, ExprNode::SelfRef)), "cache_version"),
         },
     );
+    let interp = |parts: Vec<crate::expr::InterpPart>| {
+        with_ty(Expr::new(span, ExprNode::StringInterp { parts }), Ty::Str)
+    };
     let joined = with_ty(
         Expr::new(
             span,
-            ExprNode::StringInterp {
-                parts: vec![
-                    crate::expr::InterpPart::Expr { expr: call(None, "cache_key") },
+            ExprNode::If {
+                cond: persisted,
+                then_branch: interp(vec![
+                    crate::expr::InterpPart::Text { value: format!("{table_name}/") },
+                    crate::expr::InterpPart::Expr {
+                        expr: Expr::new(span, ExprNode::Ivar { name: Symbol::from("id") }),
+                    },
                     crate::expr::InterpPart::Text { value: "-".to_string() },
                     crate::expr::InterpPart::Expr { expr: read() },
-                ],
+                ]),
+                else_branch: interp(vec![
+                    crate::expr::InterpPart::Text { value: format!("{table_name}/new-") },
+                    crate::expr::InterpPart::Expr { expr: read() },
+                ]),
             },
         ),
         Ty::Str,
@@ -1855,7 +1871,11 @@ fn block_callback_on(arg: &Expr) -> Option<crate::dialect::CallbackOn> {
 /// them, changes the arity or the binding and is declined.
 pub(super) fn block_defaults_bindable(block: &Expr) -> bool {
     match &*block.node {
-        ExprNode::Lambda { params, rest_param, extra_params, .. } => {
+        ExprNode::Lambda { params, rest_param, extra_params, body, .. } => {
+            // Rails runs a one-parameter block with the record as both `self` and its argument
+            if let [record] = params.as_slice() {
+                return rest_param.is_none() && extra_params.is_empty() && !rebinds(body, record);
+            }
             if !params.is_empty() || rest_param.is_some() {
                 return false;
             }
@@ -1935,6 +1955,25 @@ pub(crate) fn block_callback_shape(
         _ => return None,
     };
     Some((callback, hook_name, on))
+}
+
+/// Whether a nested block or lambda binds `name` again.
+fn rebinds(expr: &Expr, name: &Symbol) -> bool {
+    crate::lower::rebinds_local(expr, name.as_str())
+}
+
+/// The body with each read of the record parameter as `self`.
+fn record_as_self(body: &Expr, record: &Symbol) -> Expr {
+    fn swap(e: &mut Expr, record: &Symbol) {
+        if matches!(&*e.node, ExprNode::Var { name, .. } if name == record) {
+            *e.node = ExprNode::SelfRef;
+            return;
+        }
+        e.node.for_each_child_mut(&mut |c| swap(c, record));
+    }
+    let mut out = body.clone();
+    swap(&mut out, record);
+    out
 }
 
 /// Does `expr` read no local but those in `bound`? (A nested lambda's
@@ -2054,8 +2093,16 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
             ExprNode::Send { method, .. } => method.as_str(),
             _ => return,
         };
-        let ExprNode::Lambda { body: lambda_body, extra_params, .. } = &*callback.node else {
+        let ExprNode::Lambda { body: lambda_body, extra_params, params, .. } = &*callback.node else {
             return;
+        };
+        let record_body;
+        let lambda_body = match params.as_slice() {
+            [record] => {
+                record_body = record_as_self(lambda_body, record);
+                &record_body
+            }
+            _ => lambda_body,
         };
         // `|key: 7, x = 1|` (see `block_defaults_bindable`): bind each
         // default as a local ahead of the body.

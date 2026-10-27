@@ -1,6 +1,6 @@
 # Typing for runtime/spinel/active_job_serialization.rb. Readers take
 # the parsed `arguments` array, which is `JSON.parse` output and so
-# `untyped`, the same contract as `JsonColumn.load`.
+# `untyped`, the same contract as `RoundhouseJsonColumn.load`.
 module ActiveJob
   module Arguments
     GLOBALID_KEY: String

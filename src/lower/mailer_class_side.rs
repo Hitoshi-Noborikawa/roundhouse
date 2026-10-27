@@ -67,6 +67,28 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
     }
 
     let parameterized = parameterized_mailers(app, &mailers);
+    // A mailer whose actions, or an ancestor's, carry their callback chain
+    // (`ingest::mailer_callbacks`): its own wrappers or ones it inherits.
+    let chained_mailers: BTreeSet<String> = mailers
+        .iter()
+        .filter(|name| {
+            let mut cur = Some((*name).clone());
+            let mut guard = 0;
+            while let Some(class) = cur {
+                guard += 1;
+                if guard > 64 {
+                    break;
+                }
+                let Some(lc) = app.library_classes.iter().find(|c| c.name.0.as_str() == class) else { break };
+                if lc.methods.iter().any(|m| m.name.as_str().starts_with("__mailer_action_")) {
+                    return true;
+                }
+                cur = lc.parent.as_ref().map(|p| p.0.as_str().to_string()).filter(|p| mailers.contains(p));
+            }
+            false
+        })
+        .cloned()
+        .collect();
     let own_with = defines_with(app);
     for lc in app.library_classes.iter_mut() {
         if !mailers.contains(lc.name.0.as_str()) {
@@ -78,6 +100,7 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
             .filter(|m| m.receiver == crate::dialect::MethodReceiver::Class)
             .map(|m| m.name.as_str())
             .collect();
+        let chained = chained_mailers.contains(lc.name.0.as_str());
         let mut wrappers: Vec<crate::dialect::MethodDef> = Vec::new();
         for m in &lc.methods {
             // ActionMailer's class-side proxy answers only the public
@@ -147,6 +170,17 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
                 },
             );
             new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![].into() });
+            // A mailer whose actions carry their callback chain
+            // (`ingest::mailer_callbacks`) runs it for a class-side call
+            // only: the wrapper marks the mailer it builds.
+            if chained {
+                let ty = new_call.ty.clone();
+                new_call = Expr::new(
+                    span,
+                    ExprNode::Send { recv: Some(new_call), method: Symbol::from("__processing"), args: vec![], block: None, parenthesized: false },
+                );
+                new_call.ty = ty;
+            }
             let mut body = Expr::new(
                 span,
                 ExprNode::Send {

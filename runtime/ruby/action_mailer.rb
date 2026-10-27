@@ -43,6 +43,22 @@ module ActionMailer
     end
   end
 
+  # One header of a built mail, as `Mail::Message#[]` answers it.
+  class Header
+    def initialize(name, value)
+      @name = name
+      @value = value
+    end
+
+    def name
+      @name
+    end
+
+    def value
+      @value
+    end
+  end
+
   # One built mail, as ActionMailer's `Mail::Message` answers it: address
   # headers as Arrays of bare addresses, and with both a text and an html
   # template, a multipart/alternative whose own body is empty.
@@ -54,6 +70,9 @@ module ActionMailer
       @bcc = Message.addresses(opts[:bcc])
       @reply_to = Message.addresses(opts[:reply_to])
       @subject = opts[:subject]
+      @headers = {}
+      @mailer = nil
+      @null = false
       @text_body = text_body
       @html_body = html_body
       given = opts[:body]
@@ -104,6 +123,38 @@ module ActionMailer
       @subject
     end
 
+    # Headers a mailer added (`headers("X-Priority" => "1")`), by name.
+    def headers
+      @headers
+    end
+
+    def add_header(name, value)
+      @headers[name] = value
+      value
+    end
+
+    # `message["To"]`: an added header, or an address header `mail` set, by
+    # name in any case; nil when the mail has none. The subject is
+    # `subject` (its value is stored as given, untyped).
+    def [](name)
+      key = name.downcase
+      found = nil
+      @headers.each { |given, value| found = Header.new(given, value) if found.nil? && given.downcase == key }
+      return found unless found.nil?
+      value = case key
+      when "to" then Message.joined(@to)
+      when "from" then Message.joined(@from)
+      when "cc" then Message.joined(@cc)
+      when "bcc" then Message.joined(@bcc)
+      when "reply-to" then Message.joined(@reply_to)
+      end
+      value.nil? ? nil : Header.new(name, value)
+    end
+
+    def self.joined(list)
+      list.nil? ? nil : list.join(", ")
+    end
+
     def body
       @body
     end
@@ -124,13 +175,33 @@ module ActionMailer
     # return the message so `X.notify(...).deliver_now` chains stay
     # value-shaped. `deliver_later` has no queue in a single-process
     # runtime; immediate collection is the honest equivalent.
+    #
+    # A mail a mailer built is delivered through it, which runs its
+    # delivery callbacks (`before_deliver`, …) around `__push`.
     def deliver_now
+      mailer = @mailer
+      mailer.nil? ? __push : mailer.__deliver(self)
+    end
+
+    def deliver_later
+      deliver_now
+    end
+
+    # Collects the mail; a null one (`NullMail`: an action that built no
+    # mail) is not collected and answers nil.
+    def __push
+      return nil if @null
       ActionMailer::Base.deliveries.push(self)
       self
     end
 
-    def deliver_later
-      ActionMailer::Base.deliveries.push(self)
+    def __link(mailer)
+      @mailer = mailer
+      self
+    end
+
+    def __nullify
+      @null = true
       self
     end
   end
@@ -148,8 +219,75 @@ module ActionMailer
       @deliveries ||= []
     end
 
+    # The mail is kept as `message`, for the after callbacks; headers
+    # given before it was built are added to it.
     def mail(opts, text_body = nil, html_body = nil)
-      Message.new(opts, text_body, html_body)
+      built = Message.new(opts, text_body, html_body).__link(self)
+      __headers.each { |name, value| built.add_header(name, value) }
+      @_message = built
+      built
+    end
+
+    def message
+      @_message
+    end
+
+    # What an action that built no mail answers, as Rails' `NullMail`:
+    # delivering it runs the delivery callbacks and sends nothing.
+    def __null_mail
+      built = Message.new({}, nil, nil).__link(self).__nullify
+      @_message = built
+      built
+    end
+
+    # Delivers `mail`; a mailer with delivery callbacks overrides it
+    # (`ingest::mailer_callbacks`).
+    def __deliver(mail)
+      mail.__push
+    end
+
+    # The action this mailer runs, which the generated callback chain sets
+    # (`ingest::mailer_callbacks`).
+    def action_name
+      @_action_name.to_s
+    end
+
+    # Starts the action's chain, or answers false while another action
+    # runs: a public method called from inside one is a plain call, as in
+    # Rails, where only processing an action runs the callbacks.
+    #
+    # Only a mailer the class side or `with` built processes an action, as
+    # in Rails: `Mailer.new.action` is a plain call too.
+    def __start_action(name)
+      return false unless @_processing && @_action_name.nil?
+      @_action_name = name
+      @_message = nil
+      @_headers = {}
+      true
+    end
+
+    # Ends the chain `__start_action` started.
+    def __end_action
+      @_action_name = nil
+      nil
+    end
+
+    # `headers("X-Priority" => "1")` adds them; `headers["X"] = value`
+    # adds one through the answer.
+    def headers(values = nil)
+      values.each { |name, value| __add_header(name, value) } unless values.nil?
+      Headers.new(self)
+    end
+
+    def __headers
+      @_headers ||= {}
+    end
+
+    def __add_header(name, value)
+      __headers[name] = value
+      built = @_message
+      built.add_header(name, value) unless built.nil?
+      value
     end
 
     def params
@@ -158,7 +296,30 @@ module ActionMailer
 
     def _with_params(params)
       @params = params
+      __processing
+    end
+
+    # Marks a mailer the class side (`Mailer.action(...)`) or `with` built:
+    # its actions run their chains.
+    def __processing
+      @_processing = true
       self
+    end
+  end
+
+  # What `headers` answers: `headers["X"] = value` adds a header to the
+  # mail, or to the one `mail` will build.
+  class Headers
+    def initialize(mailer)
+      @mailer = mailer
+    end
+
+    def []=(name, value)
+      @mailer.__add_header(name, value)
+    end
+
+    def [](name)
+      @mailer.__headers[name]
     end
   end
 end

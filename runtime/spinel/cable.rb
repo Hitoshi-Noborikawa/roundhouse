@@ -715,6 +715,11 @@ module Cable
   class Socket
     attr_accessor :ws
 
+    def transmit(data)
+      @ws.text(ActionCable.payload_json(data))
+      nil
+    end
+
     def close_with_reason(reason, reconnect)
       drv = @ws
       drv.text(ActionCable.disconnect_json(reason, reconnect))

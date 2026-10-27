@@ -30,6 +30,10 @@ pub(super) fn push_validate_method(
 ) {
     let model_msgs = Messages(Some(model), None);
     let mut stmts: Vec<Expr> = Vec::new();
+    let store_attrs: std::collections::HashSet<Symbol> = crate::lower::typed_store::typed_store_decls(&model.body)
+        .into_iter()
+        .flat_map(|(_, attrs)| attrs.into_iter().map(|a| a.name))
+        .collect();
 
     // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
     for item in &model.body {
@@ -119,6 +123,12 @@ pub(super) fn push_validate_method(
                             seq(produced)
                         };
                         produced = vec![with_condition_guard(body, &v.if_cond, &v.unless_cond)];
+                    }
+                    // Not the `@attr` slot a column has: a typed_store attribute lives in its store column, behind the reader Rails validates through.
+                    if store_attrs.contains(&v.attribute) {
+                        for check in &mut produced {
+                            read_through_reader(check, &v.attribute);
+                        }
                     }
                     for mut check in produced {
                         // Each expanded check attributes to its `validates` line.
@@ -619,11 +629,12 @@ fn validation_rule_to_calls(
         ValidationRule::Acceptance { accept, allow_nil } => {
             vec![inline_acceptance_check(msgs, attr, accept, *allow_nil != Some(false), attr_ty, runtime_relation)]
         }
-        ValidationRule::Length { min, max, message, allow_nil } => inline_length_check(
+        ValidationRule::Length { min, max, is, message, allow_nil } => inline_length_check(
             msgs,
             attr,
             min.map(|n| n as usize),
             max.map(|n| n as usize),
+            is.map(|n| n as usize),
             message.as_deref(),
             attr_ty,
             *allow_nil,
@@ -965,6 +976,13 @@ fn with_condition_guard(body: Expr, if_cond: &Option<Expr>, unless_cond: &Option
 
 /// `@<attr>` — direct ivar read passed as the `value` positional arg
 /// to every validates_* helper.
+fn read_through_reader(expr: &mut Expr, attr: &Symbol) {
+    expr.node.for_each_child_mut(&mut |c| read_through_reader(c, attr));
+    if matches!(&*expr.node, ExprNode::Ivar { name } if name == attr) {
+        *expr.node = ExprNode::Send { recv: None, method: attr.clone(), args: vec![], block: None, parenthesized: false };
+    }
+}
+
 fn ivar(attr: &Symbol) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Ivar { name: attr.clone() })
 }
@@ -1547,6 +1565,7 @@ fn inline_length_check(
     attr: &Symbol,
     min: Option<usize>,
     max: Option<usize>,
+    is: Option<usize>,
     message: Option<&str>,
     attr_ty: Option<&Ty>,
     allow_nil: Option<bool>,
@@ -1568,16 +1587,22 @@ fn inline_length_check(
     let len_expr = match attr_ty {
         Some(Ty::Str) | Some(Ty::Array { .. }) => length_send,
         _ => {
-            let zero_lit = Expr::new(
+            // Not 0: Rails measures a value without `length` by its text (`value.to_s.length`), so `42` is two long.
+            let text_length = send(send(attr_ivar.clone(), "to_s", vec![]), "length", vec![]);
+            let hash_or_text = Expr::new(
                 Span::synthetic(),
-                ExprNode::Lit { value: Literal::Int { value: 0 } },
+                ExprNode::If {
+                    cond: is_a_check(&attr_ivar, "Hash"),
+                    then_branch: length_send.clone(),
+                    else_branch: text_length,
+                },
             );
             let inner_else = Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
                     cond: is_a_check(&attr_ivar, "Array"),
                     then_branch: length_send.clone(),
-                    else_branch: zero_lit,
+                    else_branch: hash_or_text,
                 },
             );
             Expr::new(
@@ -1614,6 +1639,7 @@ fn inline_length_check(
     for (bound, n, kind, op) in [
         (LengthBound::Min, min, "too_short", "<"),
         (LengthBound::Max, max, "too_long", ">"),
+        (LengthBound::Is, is, "wrong_length", "!="),
     ] {
         let Some(n) = n else { continue };
         let cmp = send(
@@ -1664,6 +1690,7 @@ fn inline_length_check(
 enum LengthBound {
     Min,
     Max,
+    Is,
 }
 
 /// Whether a nil value fails this bound. `None` is Rails' default
@@ -1672,7 +1699,7 @@ fn nil_fails_bound(bound: LengthBound, allow_nil: Option<bool>) -> bool {
     match allow_nil {
         Some(true) => false,
         Some(false) => true,
-        None => matches!(bound, LengthBound::Min),
+        None => matches!(bound, LengthBound::Min | LengthBound::Is),
     }
 }
 
@@ -2137,7 +2164,7 @@ mod tests {
 
     #[test]
     fn length_min_only_emits_too_short() {
-        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), None, None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), None, None, None, None, None);
         assert_eq!(exprs.len(), 1, "length lowers to one outer expression");
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         // Nil fails the minimum outright, and a present value fails when shorter.
@@ -2156,7 +2183,7 @@ mod tests {
 
     #[test]
     fn length_max_only_skips_nil() {
-        let exprs = inline_length_check(Messages::default(), &attr(), None, Some(100), None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), None, Some(100), None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(msgs, vec!["Title is too long (maximum is 100 characters)"]);
         let (cond, _, else_branch) = root_if(&exprs);
@@ -2170,6 +2197,7 @@ mod tests {
             Messages::default(),
             &attr(),
             Some(5),
+            None,
             None,
             None,
             None,
@@ -2189,6 +2217,7 @@ mod tests {
             Some(100),
             None,
             None,
+            None,
             Some(false),
         );
         let (cond, then_branch, _) = root_if(&exprs);
@@ -2201,7 +2230,7 @@ mod tests {
 
     #[test]
     fn length_min_and_max_emits_both_in_order() {
-        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), Some(100), None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), Some(100), None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(
             msgs,

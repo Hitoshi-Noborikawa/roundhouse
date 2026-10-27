@@ -208,6 +208,7 @@ fn enum_label_walks_past_the_first_label() {
     std::fs::write(
         scratch.join("tests/route_path_captures.rs"),
         r#"
+use app::errors_ext::Raised;
 use app::router::Router;
 #[test]
 fn routed_captures_and_checked_bytes() {
@@ -220,10 +221,10 @@ fn routed_captures_and_checked_bytes() {
     assert_eq!(Router::capture_byte(vec![0, 255], 1), 255);
     for index in [-1, 1] {
         let error = std::panic::catch_unwind(|| Router::capture_byte(vec![0], index)).expect_err("invalid offset must reject");
-        assert_eq!(error.downcast_ref::<String>().map(String::as_str), Some("FrameworkError::Argument"));
+        assert_eq!(error.downcast_ref::<Raised>().map(|e| (e.class, e.message.as_str())), Some(("ArgumentError", "Invalid encoding for path parameter")));
     }
     let error = std::panic::catch_unwind(|| Router::decode_capture("%FF")).expect_err("invalid UTF-8 must reject");
-    assert_eq!(error.downcast_ref::<String>().map(String::as_str), Some("FrameworkError::Argument"));
+    assert_eq!(error.downcast_ref::<Raised>().map(|e| (e.class, e.message.as_str())), Some(("ArgumentError", "Invalid encoding for path parameter")));
 }
 "#,
     ).unwrap();

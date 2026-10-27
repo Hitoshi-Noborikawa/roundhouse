@@ -29,6 +29,7 @@ pub mod chain;
 pub mod controller;
 pub mod controller_test;
 pub mod nil_operand;
+pub mod where_bounds;
 pub mod fixtures;
 pub(crate) mod forwarding;
 pub mod functionalize;
@@ -1032,6 +1033,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));
     ran!("params_merge");
+    diags.extend(as_json_poro::implicit_serializer_renders(app));
     as_json_poro::apply_as_json_synthesis(app, registry);
     ran!("as_json_poro");
     diags.extend(active_model_model::apply_active_model_model_synthesis(app));
@@ -1877,4 +1879,33 @@ mod body_root_tests {
         assert_eq!(seen, expected);
         for_each_forwarding_body_ref(&app, &mut |root| assert_eq!(root.span.start, 99));
     }
+}
+
+/// Does `expr` bind `name` anew anywhere: any parameter of a nested block
+/// or lambda (`|record = 0|`, `|*record|`, `|record:|`, `|&record|`), or an
+/// assignment to the local (`record = nil`, `record ||= x`, `a, record = …`)?
+/// A rewrite that reads the name as something else (`self`) is wrong past one.
+pub(crate) fn rebinds_local(expr: &crate::expr::Expr, name: &str) -> bool {
+    use crate::expr::{ExprNode, LValue};
+    let is = |n: &crate::ident::Symbol| n.as_str() == name;
+    let here = match &*expr.node {
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } => {
+            params.iter().any(is)
+                || rest_param.as_ref().is_some_and(is)
+                || block_param.as_ref().is_some_and(is)
+                || extra_params.iter().any(|p| is(&p.name))
+        }
+        ExprNode::Assign { target: LValue::Var { name: n, .. }, .. }
+        | ExprNode::OpAssign { target: LValue::Var { name: n, .. }, .. } => is(n),
+        ExprNode::MultiAssign { targets, .. } => {
+            targets.iter().any(|t| matches!(t, LValue::Var { name: n, .. } if is(n)))
+        }
+        _ => false,
+    };
+    if here {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| found |= rebinds_local(c, name));
+    found
 }

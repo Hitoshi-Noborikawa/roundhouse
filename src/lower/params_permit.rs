@@ -57,6 +57,111 @@ fn rewrite(expr: &mut Expr) {
     }
 }
 
+/// Every top-level `params.permit(:a, :b)` left in a controller body, in
+/// any position: a params helper's tail that names no resource
+/// (lobsters' `def search_params = params.permit(:q, :what, …)`) is not
+/// a typed params class's, and emitted verbatim it called `permit` on a
+/// Hash.
+pub(crate) fn rewrite_bare_permits(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_bare_permits);
+    if let Some(mut permitted) = permitted_chain(expr) {
+        permitted.ty = Some(permitted_ty());
+        *expr = permitted;
+    } else if let Some(filtered) = filtered_chain(expr) {
+        *expr = filtered;
+    }
+}
+
+/// The private helpers whose value is a nested `params.permit` (`def
+/// moderation_params = @moderation_params ||= params.permit(:page, what:
+/// [...])`), so their call sites can carry the String-keyed type.
+pub(crate) fn filtered_permit_helpers(privs: &[crate::dialect::Action]) -> std::collections::HashSet<Symbol> {
+    fn tail(e: &Expr) -> &Expr {
+        match &*e.node {
+            ExprNode::Seq { exprs } if !exprs.is_empty() => tail(exprs.last().unwrap()),
+            ExprNode::OpAssign { value, .. } | ExprNode::Assign { value, .. } => tail(value),
+            _ => e,
+        }
+    }
+    privs
+        .iter()
+        .filter(|a| a.params.fields.is_empty() && filtered_chain(tail(&a.body)).is_some())
+        .map(|a| a.name.clone())
+        .collect()
+}
+
+/// `moderation_params.dig(:what, :stories)` → `.dig("what", "stories")`,
+/// the indifferent read Rails' Parameters gives on String-keyed storage.
+/// Not left to the Ruby emit's typed key coercion: these helper calls reach it untyped.
+pub(crate) fn stringify_filtered_helper_reads(expr: &mut Expr, helpers: &std::collections::HashSet<Symbol>) {
+    expr.node.for_each_child_mut(&mut |c| stringify_filtered_helper_reads(c, helpers));
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr.node else { return };
+    let helper_call = matches!(&*r.node, ExprNode::Send { recv, method, args, block: None, .. }
+        if args.is_empty()
+            && helpers.contains(method)
+            && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)));
+    if !helper_call {
+        return;
+    }
+    let keys = match method.as_str() {
+        "dig" => args.len(),
+        "[]" | "fetch" | "key?" | "has_key?" | "include?" | "member?" => args.len().min(1),
+        _ => 0,
+    };
+    for key in args.iter_mut().take(keys) {
+        if let Some(name) = sym_name(key) {
+            *key = str_lit(key.span, name);
+        }
+    }
+}
+
+/// `params.permit(:a, what: [:x, :y])` → `Params.filtered_values(params,
+/// ["a"], {"what" => ["x", "y"]}, {"what" => "any"})`.
+/// Not the Symbol-keyed `permitted` hash: a nested filter's value is a
+/// hash or list, which a `Hash[Symbol, String]` cannot hold, so this keeps
+/// Rails' own String-keyed storage and the emit's indifferent key reads.
+fn filtered_chain(e: &Expr) -> Option<Expr> {
+    use crate::lower::controller_to_library::params::{nested_candidates, params_hash_ty};
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else { return None };
+    if method.as_str() != "permit" || !is_request_params(r) || is_param_value(r.ty.as_ref()) {
+        return None;
+    }
+    let (last, scalars) = args.split_last()?;
+    let ExprNode::Hash { entries, .. } = &*last.node else { return None };
+    let names = scalars.iter().map(sym_name).collect::<Option<Vec<_>>>()?;
+    let nested = nested_candidates(e, &crate::ident::ClassId(Symbol::from("")));
+    // A key the parser could not read (`k: [{ … }]`) would be dropped silently.
+    if entries.is_empty() || nested.len() != entries.len() {
+        return None;
+    }
+    let span = e.span;
+    let str_array = |items: Vec<String>| {
+        let mut a = Expr::new(span, ExprNode::Array {
+            elements: items.into_iter().map(|s| str_lit(span, s)).collect(),
+            style: Default::default(),
+        });
+        a.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+        a
+    };
+    let hash = |entries: Vec<(Expr, Expr)>, value: Ty| {
+        let mut h = Expr::new(span, ExprNode::Hash { entries, kwargs: false });
+        h.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(value) });
+        h
+    };
+    let children = hash(
+        nested.iter().map(|n| (str_lit(span, n.name.as_str().to_string()), str_array(n.allowed.clone()))).collect(),
+        Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+    );
+    let modes = hash(
+        nested.iter().map(|n| (str_lit(span, n.name.as_str().to_string()), str_lit(span, n.mode.to_string()))).collect(),
+        Ty::Str,
+    );
+    let params_const = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Params")] });
+    let mut out = send(span, Some(params_const), "filtered_values", vec![r.clone(), str_array(names), children, modes]);
+    out.ty = Some(params_hash_ty());
+    Some(out)
+}
+
 /// `params.permit(:a, :b)` on the request's params →
 /// `Params.permitted(Params.permitted({}, params, "a", :a), params, "b", :b)`.
 /// A model write reads Symbol keys, so this builds a Symbol-keyed hash

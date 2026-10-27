@@ -349,7 +349,7 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                         // a lone maximum, `false` fails both). Emitting
                         // `:allow_nil` here would claim that match. The
                         // field is named so the drop is visible.
-                        ValidationRule::Length { min, max, message, allow_nil: _ } => {
+                        ValidationRule::Length { min, max, is, message, allow_nil: _ } => {
                             let msg = message
                                 .as_ref()
                                 .map(|m| format!(", message: {}", crate::emit::ruby::expr::ruby_str_literal(m)))
@@ -363,6 +363,12 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                             if let Some(max) = max {
                                 validate_lines.push(format!(
                                     "    validates_max_length {max}, :{}{msg}",
+                                    validation.attribute
+                                ));
+                            }
+                            if let Some(is) = is {
+                                validate_lines.push(format!(
+                                    "    validates_exact_length {is}, :{}{msg}",
                                     validation.attribute
                                 ));
                             }

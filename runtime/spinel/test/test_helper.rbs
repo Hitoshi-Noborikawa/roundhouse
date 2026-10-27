@@ -33,6 +33,7 @@ module Dom
   def self.parse: (String html) -> String
   def self.select: (String root, String selector) -> Array[String]
   def self.text: (String node) -> String
+  def self.unescape: (String s) -> String
   def self.fragment_for: (String selector) -> String
   def self.selector_attrs: (String chunk) -> Array[String]
   def self.target_chunk: (String selector) -> String

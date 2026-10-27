@@ -546,7 +546,8 @@ struct SetFolds {
 /// `priority:` keys. `wait:` is relative to now and `wait_until:`
 /// absolute, as Rails reads them, and `wait_until:` wins when both are
 /// given; both go through `to_f`, which an
-/// Integer, a Float, a Duration and a Time all answer.
+/// Integer, a Float, a Duration and a Time all answer. A literal
+/// `wait:` (`90`, `2.seconds`) is folded to its seconds instead.
 fn set_options(args: &[Expr], span: crate::span::Span, folds: &mut SetFolds) -> Option<(Expr, Expr)> {
     let [opts] = args else { return None };
     let ExprNode::Hash { entries, .. } = &*opts.node else { return None };
@@ -577,7 +578,13 @@ fn set_options(args: &[Expr], span: crate::span::Span, folds: &mut SetFolds) -> 
                     Ty::Class { id: crate::ident::ClassId(Symbol::from("Time")), args: vec![].into() },
                 );
                 let now_f = send(now, "to_f", vec![], Ty::Float);
-                let wait_f = send(v.clone(), "to_f", vec![], Ty::Float);
+                // A literal Duration (`2.seconds`, `5.minutes`) folds to
+                // its seconds here, so a target with no Duration (go)
+                // still gets a plain Float.
+                let wait_f = match super::duration::literal_seconds(v) {
+                    Some(n) => typed(ExprNode::Lit { value: crate::expr::Literal::Float { value: n as f64 } }, Ty::Float),
+                    None => send(v.clone(), "to_f", vec![], Ty::Float),
+                };
                 at = send(now_f, "+", vec![wait_f], Ty::Float);
             }
             "wait_until" => at = send(v.clone(), "to_f", vec![], Ty::Float),
