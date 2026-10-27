@@ -4570,7 +4570,11 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     || method.as_str() == "all"
                     || CLASS_ROOT_TERMINALS.contains(&method.as_str())
                 {
-                    let seed = relation_new(span, &m);
+                    // An STI subclass's scope (`lower::sti_scope`) is the
+                    // base's relation holding the subclass, so a row
+                    // without `type` is built as the subclass, as Rails does.
+                    let queried = super::sti_scope::sti_queried_class(method.as_str(), &args);
+                    let seed = relation_new(span, queried.as_ref().unwrap_or(&m));
                     if method.as_str() == "all" {
                         *expr = seed;
                     } else {

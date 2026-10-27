@@ -21,4 +21,7 @@ check("exists?, the base's row", StiProbe.exists(a), false)
 check("pick", StiProbe.pick_title, "f")
 check("find_or_create_by finds a deeper subclass's row", StiProbe.found_deeper, ["SpecialFeature", s])
 check("find_or_create_by adds no row for it", StiProbe.counts, [3, 2, 1])
+check("select without type, first", StiProbe.select_first_class, "Feature")
+check("select without type, each row", StiProbe.select_classes, ["Feature", "Feature"])
+check("select with type, each row", StiProbe.select_typed_classes, ["Feature", "SpecialFeature"])
 puts "sti queries passed"
