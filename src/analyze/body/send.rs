@@ -485,8 +485,12 @@ impl<'a> BodyTyper<'a> {
         // A Hash yields ONE `[key, value]` Array to these methods, which a
         // two-parameter block destructures and a one-parameter block
         // receives whole. `block_params_for` answers the destructured
-        // pair, so a lone parameter would otherwise bind the key.
-        if let [name] = params.as_slice() {
+        // pair, so a lone parameter would otherwise bind the key. Only a
+        // lone REQUIRED one: an optional or a rest after it makes Ruby
+        // splat the pair (`|k, v = 0|` binds the key). Keywords don't.
+        let splats = matches!(&*block.node, ExprNode::Lambda { rest_param, extra_params, .. }
+            if rest_param.is_some() || extra_params.iter().any(|p| !p.keyword && !p.rest));
+        if let ([name], false) = (params.as_slice(), splats) {
             if let Some(Ty::Hash { key, value }) = recv_ty.map(super::narrowing::remove_nil) {
                 if HASH_PAIR_METHODS.contains(&method.as_str()) {
                     new_ctx.local_bindings.insert(

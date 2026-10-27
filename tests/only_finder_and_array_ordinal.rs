@@ -199,6 +199,39 @@ fn a_one_param_hash_sum_binds_the_pair() {
     assert!(!src.contains(".second"), "no `second` should survive:\n{src}");
 }
 
+/// Only a lone REQUIRED parameter receives the pair (review). With an
+/// optional or a rest after it, CRuby 4.0.5 splats the pair: in
+/// `{5 => 1}.map { |k, v = 0| k }` and `{ |k, *rest| k }`, `k` is `5`.
+/// A destructured `|(name, list)|` takes the pair and unpacks it. The
+/// keys are Strings, which have no `second`, so `k.second` stays a call
+/// where `k` is the key and becomes `k[1]` only where it's the pair.
+#[test]
+fn only_a_lone_required_param_binds_the_pair() {
+    let src = emit_lib(
+        "class GadgetShapes\n  def self.optional\n    { \"a\" => 1 }.map { |k, v = 0| k.second }\n  end\n\n  \
+         def self.rest\n    { \"a\" => 1 }.map { |k, *rest| k.second }\n  end\n\n  \
+         def self.destructured\n    { \"small\" => [1, 2] }.map { |(name, list)| list.second }\n  end\nend\n",
+        "gadget_shapes",
+    );
+    assert_eq!(src.matches("k.second").count(), 2, "the key is no pair:\n{src}");
+    assert!(!src.contains("k[1]"), "the key is no pair:\n{src}");
+    assert!(src.contains("list[1]"), "a destructured pair unpacks:\n{src}");
+}
+
+/// An ordinal past a pair's end isn't an index read (review): Ruby's
+/// `pair.third` is nil, and a strict target's tuple has no index 2.
+#[test]
+fn an_ordinal_past_the_pair_is_left_alone() {
+    let src = emit_lib(
+        "class GadgetEnds\n  def self.third\n    { \"a\" => 1 }.map { |pair| pair.third }\n  end\n\n  \
+         def self.second\n    { \"a\" => 1 }.map { |pair| pair.second }\n  end\nend\n",
+        "gadget_ends",
+    );
+    assert!(src.contains("pair.third"), "past the end:\n{src}");
+    assert!(!src.contains("pair[2]"), "past the end:\n{src}");
+    assert!(src.contains("pair[1]"), "in range:\n{src}");
+}
+
 // ── conversions type through an untyped receiver ─────────────────────
 
 /// `x.to_s` is a String whatever `x` is, and saying so is what lets a
