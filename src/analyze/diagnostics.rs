@@ -448,6 +448,20 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // walker emits the outer node before recursing, that's the longest,
     // outermost span. Self-correcting: once span preservation gives links
     // distinct starts, they survive on their own again.
+    // Not left a warning: a call only an initializer's top-level `def` answers is a NameError in the emitted app.
+    for d in &mut out {
+        if let DiagnosticKind::UnresolvedType { expr_kind, name: Some(name) } = &d.kind
+            && expr_kind.as_str() == "method call"
+            && app.initializer_defs.contains(name)
+        {
+            *d = Diagnostic::unsupported(
+                d.span,
+                None,
+                "method an initializer defines at top level",
+                format!("`{}` is a method on Object only while the initializer has run, and the emitted app does not replay initializer code", name.as_str()),
+            );
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     out.retain(|d| seen.insert((d.span.file, d.span.start, d.code(), d.message.clone())));
     // A template no request reaches (`ingest::unreachable_views`): its errors stay visible, as warnings.
@@ -781,9 +795,9 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                 if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
         ) {
             let severity = match kind {
-                // Not an error where nil is the only miss: Ruby raises NoMethodError there, which the ruby family runs as written and a strict target checks (`lower::nil_operand`)
+                // Not an error where some operand arm takes it: Ruby raises for the others, which the ruby family runs as written and a strict target reports or checks (`lower::nil_operand`)
                 DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty }
-                    if crate::lower::nil_operand::nil_is_the_only_miss(op.as_str(), lhs_ty, rhs_ty) =>
+                    if crate::analyze::body::some_operands_take_it(op.as_str(), lhs_ty, rhs_ty) =>
                 {
                     crate::diagnostic::Severity::Warning
                 }

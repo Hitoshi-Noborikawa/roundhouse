@@ -2007,11 +2007,11 @@ pub(super) struct ClassConsts {
     /// Names any app source defines below the top level
     /// (`EnumConstants::nested_names`): what an ancestor of the class
     /// (its superclass chain, an included module) could define.
-    app_nested_names: std::collections::HashSet<String>,
+    app_nested_names: std::rc::Rc<std::collections::HashSet<String>>,
     /// First segments of every name the app defines or reopens
     /// (`EnumConstants::top_level_names`): a top-level namespace the app
     /// touches, whose standard-library contents it may have replaced.
-    app_top_level_names: std::collections::HashSet<String>,
+    app_top_level_names: std::rc::Rc<std::collections::HashSet<String>>,
     /// `NAME = 3`, `NAME = (2**31) - 1`, `NAME = 4 * (OTHER + 1)`: every
     /// Integer the class body folds, at the width Ruby computes it (an
     /// `i128`, so `2**63` is kept exactly; `scalars` holds the ones that
@@ -2194,8 +2194,8 @@ impl ClassConsts {
     pub(super) fn set_lexical_scope(
         &mut self,
         top_level: bool,
-        app_nested_names: std::collections::HashSet<String>,
-        app_top_level_names: std::collections::HashSet<String>,
+        app_nested_names: std::rc::Rc<std::collections::HashSet<String>>,
+        app_top_level_names: std::rc::Rc<std::collections::HashSet<String>>,
     ) {
         self.top_level = top_level;
         self.app_nested_names = app_nested_names;
@@ -2304,7 +2304,7 @@ impl ClassConsts {
     /// folded constants join this table's. A name both bodies write is
     /// refused by [`enum_constants::EnumConstants::owner_constant`]'s
     /// write count, whichever value this keeps.
-    fn merge(&mut self, other: ClassConsts) {
+    pub(super) fn merge(&mut self, other: ClassConsts) {
         self.scalars.extend(other.scalars);
         self.mappings.extend(other.mappings);
         self.labels.extend(other.labels);
@@ -2388,8 +2388,8 @@ impl ClassConsts {
     /// leaves the whole constant unresolved.
     fn interpolated_regex(&self, node: &Node<'_>) -> Option<(String, String)> {
         let ir = node.as_interpolated_regular_expression_node()?;
-        if ir.is_once()
-            || ir.is_euc_jp()
+        // Not refused for `/o`: every part below folds to a constant, which evaluating once or each time reads the same
+        if ir.is_euc_jp()
             || ir.is_windows_31j()
             || ir.is_utf_8()
             || ir.is_ascii_8bit()
@@ -3272,6 +3272,11 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
         return callback_condition(&inner, file);
     }
     if let Some(lambda) = value.as_lambda_node() {
+        // Rails calls a one-parameter condition with the record, which the spliced guard reads as `self`
+        if let Some(record) = record_parameter(lambda.parameters()) {
+            let body = simple_condition_body_with(None, lambda.body(), Some(&record))?;
+            return record_as_self(ingest_expr(&body, file).ok()?, &record);
+        }
         let body = simple_condition_body(lambda.parameters(), lambda.body())?;
         return ingest_expr(&body, file).ok();
     }
@@ -3350,6 +3355,53 @@ fn symbol_operator_value(node: &ruby_prism::Node<'_>) -> Option<String> {
 fn simple_condition_body<'pr>(
     params: Option<ruby_prism::Node<'pr>>,
     body: Option<ruby_prism::Node<'pr>>,
+) -> Option<ruby_prism::Node<'pr>> {
+    simple_condition_body_with(params, body, None)
+}
+
+/// `->(record) { … }`: the lambda's one required parameter, when it has
+/// no other.
+fn record_parameter(params: Option<ruby_prism::Node<'_>>) -> Option<String> {
+    let bp = params?.as_block_parameters_node()?;
+    if bp.locals().iter().next().is_some() {
+        return None;
+    }
+    let pn = bp.parameters()?;
+    let requireds: Vec<_> = pn.requireds().iter().collect();
+    let [only] = requireds.as_slice() else { return None };
+    if pn.optionals().iter().next().is_some()
+        || pn.rest().is_some()
+        || pn.posts().iter().next().is_some()
+        || pn.keywords().iter().next().is_some()
+        || pn.keyword_rest().is_some()
+        || pn.block().is_some()
+    {
+        return None;
+    }
+    Some(constant_id_str(&only.as_required_parameter_node()?.name()).to_string())
+}
+
+/// The guard with each read of the record parameter as `self`; `None`
+/// when a nested block or lambda binds that name again.
+fn record_as_self(mut expr: Expr, record: &str) -> Option<Expr> {
+    fn swap(e: &mut Expr, record: &str) {
+        if matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == record) {
+            *e.node = ExprNode::SelfRef;
+            return;
+        }
+        e.node.for_each_child_mut(&mut |c| swap(c, record));
+    }
+    if crate::lower::rebinds_local(&expr, record) {
+        return None;
+    }
+    swap(&mut expr, record);
+    Some(expr)
+}
+
+fn simple_condition_body_with<'pr>(
+    params: Option<ruby_prism::Node<'pr>>,
+    body: Option<ruby_prism::Node<'pr>>,
+    record: Option<&str>,
 ) -> Option<ruby_prism::Node<'pr>> {
     if let Some(p) = params {
         let bp = p.as_block_parameters_node()?;
@@ -3479,7 +3531,7 @@ fn simple_condition_body<'pr>(
             self.bad = true;
         }
     }
-    let mut v = Escapes { bad: false, bound: Vec::new() };
+    let mut v = Escapes { bad: false, bound: record.map(|r| vec![r.to_string()]).unwrap_or_default() };
     ruby_prism::Visit::visit(&mut v, &only);
     if v.bad { None } else { Some(only) }
 }
@@ -4185,7 +4237,7 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // Array, Hash, scalar, or nil, so neither String nor one fixed
         // container type is honest. The emitted model keeps serialized
         // text in its DB slot and decodes/encodes at the public accessor
-        // boundary (`JsonColumn`); analysis uses the deliberate gradual
+        // boundary (`RoundhouseJsonColumn`); analysis uses the deliberate gradual
         // type. A `has_json` declaration adds its stronger per-key schema
         // separately in `lower::has_json`.
         ColumnType::Json | ColumnType::Jsonb => Ty::Untyped,

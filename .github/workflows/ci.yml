@@ -2285,6 +2285,12 @@ jobs:
       - name: cargo test --test tiny_api cruby_gate_ -- --ignored
         if: ${{ !cancelled() }}
         run: cargo test --test tiny_api cruby_gate_ -- --ignored --nocapture
+      # The Roda + Sequel front-end's 19-check oracle, on the fixture and
+      # on its CRuby emit. Unscheduled until 10-26, it went red twice in
+      # October (CSRF default, `<%==`) and nothing saw it.
+      - name: cargo test --test roda_toolchain -- --ignored
+        if: ${{ !cancelled() }}
+        run: cargo test --test roda_toolchain -- --ignored --nocapture
       - name: scripts/compare ruby
         if: ${{ !cancelled() }}
         run: scripts/compare ruby

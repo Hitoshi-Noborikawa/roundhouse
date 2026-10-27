@@ -166,6 +166,26 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 },
             )]
         }
+        // `<% type, value = node.first %>` (lobsters' search parse
+        // tree) — the multi-local form of the arm above. Locals only:
+        // an ivar target would need the view-context write-through the
+        // single-ivar arm builds, so that shape keeps the residue line.
+        ExprNode::MultiAssign { targets, value }
+            if targets.iter().all(|t| matches!(t, LValue::Var { .. })) =>
+        {
+            vec![Expr::new(
+                stmt.span,
+                ExprNode::MultiAssign {
+                    targets: targets.clone(),
+                    value: rewrite_predicates(
+                        value,
+                        &ctx.nullable_locals,
+                        &ctx.reference_reads,
+                        &ctx.nilable_scalar_reads,
+                    ),
+                },
+            )]
+        }
         // Conditional branching at the template level. Cond goes
         // through `rewrite_predicates`: `.blank?` / `.present?` become
         // `(recv || "").empty?`, and `.any?` / `.none?` / `.empty?`

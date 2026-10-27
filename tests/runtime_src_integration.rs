@@ -1223,7 +1223,15 @@ fn every_runtime_method_body_concretely_typed() {
     // omits it), so its `nil?` and `to_s` read that value untyped, as
     // `h` does; one call so the value expression runs once (+2 in
     // action_view/view_helpers.rb, 878 -> 880).
-    const CEILING: usize = 880;
+    // MEASURED 884 on 2026-10-26 (on 880): `ViewHelpers.url_for_options`
+    // reads a class's own `default_url_options`, a `Hash[Symbol, untyped]`
+    // as Rails' is, for its host, port and protocol (+4 in
+    // action_view/view_helpers_ext.rb, 880 -> 884).
+    // MEASURED 886 on 2026-10-26 (on 884): a condition Array can hold an
+    // `ActiveRecord::Bounds` element (`where(created_at: [nil, 7.days.ago..])`),
+    // and the element read off the untyped Array reaches `bounds_predicate`
+    // through it (+2 in active_record/relation.rb, 884 -> 886).
+    const CEILING: usize = 886;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

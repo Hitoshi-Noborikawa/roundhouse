@@ -40,6 +40,8 @@ mod string_truncate_native;
 mod array_excluding;
 #[path = "spinel_toolchain/array_excluding.rs"]
 mod array_excluding_native;
+#[path = "spinel_toolchain/lobsters_zero.rs"]
+mod lobsters_zero;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
@@ -94,6 +96,12 @@ mod vary_accept_contract;
 mod vary_accept;
 #[path = "support/erb_template.rs"]
 mod erb_template_contract;
+#[path = "support/bare_permit.rs"]
+mod bare_permit_contract;
+#[path = "support/data_paths.rs"]
+mod data_paths_contract;
+#[path = "support/eager_load_filter.rs"]
+mod eager_load_filter_contract;
 #[path = "spinel_toolchain/erb_template.rs"]
 mod erb_template;
 #[path = "support/anonymous_keywords.rs"]
@@ -184,6 +192,14 @@ mod stdlib_rnp;
 mod representable_decorator;
 #[path = "spinel_toolchain/representable.rs"]
 mod representable;
+#[path = "support/auto_source_gem.rs"]
+mod auto_source_gem_contract;
+#[path = "spinel_toolchain/auto_source_gem.rs"]
+mod auto_source_gem;
+#[path = "support/active_model_serializer.rs"]
+mod active_model_serializer_app;
+#[path = "spinel_toolchain/active_model_serializer.rs"]
+mod active_model_serializer;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]

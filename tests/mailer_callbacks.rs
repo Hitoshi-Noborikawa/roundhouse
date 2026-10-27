@@ -458,3 +458,44 @@ fn a_modules_action_runs_the_chain_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("module actions passed"), "{}", run.stdout);
 }
+
+// Review of #1392 / #1394 (4377085149, 4377088105, oracle
+// `test_app/review7_oracle.rb`): a mailer with no callbacks, under a base
+// with none, whose only action comes from an included module still answers
+// it on the class side and through `with`. It was skipped as having no
+// actions, so `DigestMailer.weekly` raised NoMethodError.
+const DIGEST_ACTIONS: &str = "module DigestActions\n  def weekly(name = \"you\")\n    mail(to: \"d@example.com\", subject: \"Weekly for \" + name, body: \"w\")\n  end\nend\n";
+const PLAIN_BASE_MAILER: &str = "class PlainBaseMailer < ActionMailer::Base\n  default from: \"from@example.com\"\nend\n";
+const DIGEST_MAILER: &str = "class DigestMailer < PlainBaseMailer\n  include DigestActions\nend\n";
+const DIGESTS: &str = "class Digests\n  def self.with(params)\n    DigestMailer.with(params)\n  end\nend\n";
+const DIGEST_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+check("a module's action on a mailer with no callbacks, on the class", DigestMailer.weekly.deliver_now.subject, "Weekly for you")
+check("through with, its argument given", Digests.with(x: 1).weekly("bo").deliver_now.subject, "Weekly for bo")
+puts "module actions without callbacks passed"
+"##;
+
+fn digest_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/mailers/concerns/digest_actions.rb", DIGEST_ACTIONS)
+        .write("app/mailers/plain_base_mailer.rb", PLAIN_BASE_MAILER)
+        .write("app/mailers/digest_mailer.rb", DIGEST_MAILER)
+        .write("app/models/digests.rb", DIGESTS)
+}
+
+#[test]
+fn a_mailer_whose_actions_are_a_modules_answers_them_on_ruby() {
+    let run = digest_app().run_ruby(DIGEST_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("module actions without callbacks passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_mailer_whose_actions_are_a_modules_answers_them_on_spinel() {
+    let run = digest_app().run_spinel_with_db(DIGEST_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("module actions without callbacks passed"), "{}", run.stdout);
+}

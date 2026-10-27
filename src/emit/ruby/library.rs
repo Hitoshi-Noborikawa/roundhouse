@@ -26,14 +26,19 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
     let templates = crate::runtime_src::parse_methods(
         "def reload(options = nil)\n  super(options)\n  self\nend\ndef lock!(lock = true)\n  super(lock)\n  self\nend\n",
     ).expect("receiver-return forwarders parse");
+    // The names of the models with a table, and one index of the source's
+    // methods for every ask (each ask built its own over the whole app).
+    let tabled: std::collections::HashSet<&ClassId> =
+        app.models.iter().filter(|m| app.schema.tables.contains_key(&m.table.0)).map(|m| &m.name).collect();
+    let source_methods = crate::analyze::SourceMethodIndex::new(app);
     for lc in lcs {
-        if !app.models.iter().any(|m| m.name == lc.name && app.schema.tables.contains_key(&m.table.0)) {
+        if !tabled.contains(&lc.name) {
             continue;
         }
         let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
         for template in &templates {
             if lc.methods.iter().any(|m| m.name == template.name && m.receiver == MethodReceiver::Instance)
-                || record_return_overridden(app, &lc.name, template.name.as_str())
+                || record_return_overridden(&source_methods, &lc.name, template.name.as_str())
             {
                 continue;
             }
@@ -65,9 +70,13 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
 /// Source overrides, including those on ApplicationRecord or a mixin,
 /// may return a different object. Do not interpose a self-returning wrapper.
 /// `lock!` calls `reload`, so an override of either one answers the source.
-fn record_return_overridden(app: &App, class: &ClassId, method: &str) -> bool {
-    crate::analyze::source_instance_method(app, class, method)
-        || (method == "lock!" && crate::analyze::source_instance_method(app, class, "reload"))
+fn record_return_overridden(
+    source_methods: &crate::analyze::SourceMethodIndex<'_>,
+    class: &ClassId,
+    method: &str,
+) -> bool {
+    source_methods.instance_method(class, method)
+        || (method == "lock!" && source_methods.instance_method(class, "reload"))
 }
 
 /// Lower library classes for Ruby and emit their source/RBS file pairs, grouping
@@ -515,39 +524,35 @@ fn emit_library_class_with_nested(
     // where the base must already be defined — the requirement the
     // require between two files used to satisfy. Left to the
     // collection's own order this works by luck.
+    // Order children so a superclass / included sibling precedes dependents.
+    // Bare `Parent` inside `Owner` is `Owner::Parent` when a sibling of that
+    // name is among the kids (`Class.new(Parent)` and ordinary
+    // `class Child < Parent` may store the written bare name). Absolute
+    // `::X` and names that already identify a collected child stay as written.
     let kids = {
         let names: std::collections::HashSet<&str> =
             kids.iter().map(|k| k.name.0.as_str()).collect();
-        let mut pending: Vec<&LibraryClass> = kids.to_vec();
-        let mut ordered: Vec<&LibraryClass> = Vec::new();
-        let mut placed: std::collections::HashSet<String> = std::collections::HashSet::new();
-        while !pending.is_empty() {
-            let before = pending.len();
-            pending.retain(|k| {
-                // A superclass, and a module the class body `include`s:
-                // both are read the moment the body runs. (campfire's
-                // `class HTTP < Net::HTTP; include Stages; end` beside
-                // its `module Stages`.)
-                let waits_for = k
-                    .parent
+        let owner = parent.name.0.as_str();
+        let dependency_name = |written: &str| -> String {
+            if let Some(rooted) = written.strip_prefix("::") {
+                rooted.to_owned()
+            } else if names.contains(written) {
+                written.to_owned()
+            } else {
+                format!("{owner}::{written}")
+            }
+        };
+        crate::library_class_order::order_by_deps(
+            kids.to_vec(),
+            |k| k.name.0.as_str(),
+            |k| {
+                k.parent
                     .iter()
                     .chain(k.includes.iter())
-                    .map(|p| p.0.as_str())
-                    .any(|p| names.contains(p) && !placed.contains(p));
-                if waits_for {
-                    return true;
-                }
-                placed.insert(k.name.0.as_str().to_string());
-                ordered.push(k);
-                false
-            });
-            // A cycle cannot be ordered and cannot be Ruby either;
-            // emit the rest as they came rather than loop forever.
-            if pending.len() == before {
-                ordered.extend(pending.drain(..));
-            }
-        }
-        ordered
+                    .map(|p| dependency_name(p.0.as_str()))
+                    .collect()
+            },
+        )
     };
     let kids = &kids[..];
     let mut blocks: Vec<NestedBlock> = Vec::new();
@@ -1765,6 +1770,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let query_arguments = crate::lower::scope_chain::query_arguments::QueryArguments::build(app);
     // Class methods reached THROUGH an association (`user.sessions
     // .start!`) — demand-gated on the call sites this app actually
     // writes, so an app without that shape emits exactly what it did
@@ -1823,6 +1829,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // extension, and its call sites need the same rewrite.
         && !crate::lower::scope_chain::any_assoc_extensions(&assocs)
         && !wants_model_chain
+        && query_arguments.is_empty()
     {
         return;
     }
@@ -1839,6 +1846,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // The Ruby family's attrs Hash holds a record (see the field).
         owner_objects: true,
     };
+    query_arguments.rewrite(lcs, &regs);
     let sole_includers = app.sole_includer_of_modules();
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
@@ -3207,14 +3215,15 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         .chain(app.library_classes.iter().flat_map(|c| c.methods.iter().map(|d| d.name.as_str().to_string())))
         .filter(|n| is_framework_view_helper(n))
         .collect();
+    let source_methods = crate::analyze::SourceMethodIndex::new(app);
+    let controller_names: std::collections::HashSet<&ClassId> = app.controllers.iter().map(|c| &c.name).collect();
     for lc in lcs.iter_mut() {
         // CONTROLLERS in the index provide `helper_method`s to views:
         // only the call-site rewrite applies to them — their methods
         // must NOT flip class-side wholesale (actions are instance
         // methods; the class-side clone for the marked helpers comes
         // from the controller lowering itself).
-        let is_helper_module = helper_modules.contains(&lc.name)
-            && !app.controllers.iter().any(|c| c.name == lc.name);
+        let is_helper_module = helper_modules.contains(&lc.name) && !controller_names.contains(&lc.name);
         // Helper and view module functions have no controller context —
         // a bare `request` read there resolves to the per-dispatch
         // `ActionController::Current.request` (controllers keep their
@@ -3259,9 +3268,9 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 .iter()
                 .filter(|n| {
                     if class_side {
-                        crate::analyze::source_class_method(app, &lc.name, n)
+                        source_methods.class_method(&lc.name, n)
                     } else {
-                        crate::analyze::source_instance_method(app, &lc.name, n)
+                        source_methods.instance_method(&lc.name, n)
                     }
                 })
                 .map(|n| Symbol::from(n.as_str()))
@@ -4587,7 +4596,11 @@ fn rewrite_helper_calls(
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));
             if route_helpers.contains(&path_name) {
-                *expr = crate::lower::view_to_library::absolute_url_interp(stem, args.clone());
+                *expr = if own_methods.contains(&Symbol::from("default_url_options")) {
+                    url_for_own_options(stem, args.clone())
+                } else {
+                    crate::lower::view_to_library::absolute_url_interp(stem, args.clone())
+                };
                 return;
             }
         }
@@ -5011,6 +5024,29 @@ fn rewrite_layout_wrap(
 ///   * `port:` follows the host as `:N`. A literal port that is the
 ///     scheme's own (80 for http, 443 for https) or `nil` is left out,
 ///     as Rails' `build_host_url` leaves it out.
+/// `ActionView::ViewHelpers.url_for_options(RouteHelpers.<stem>_path(args), default_url_options)`:
+/// a bare `<x>_url` in a class that defines its own `default_url_options`.
+fn url_for_own_options(stem: &str, args: Vec<Expr>) -> Expr {
+    let synth = |node: ExprNode| Expr::new(crate::span::Span::synthetic(), node);
+    let path_call = synth(ExprNode::Send {
+        recv: Some(synth(ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] })),
+        method: Symbol::from(format!("{stem}_path")),
+        args,
+        block: None,
+        parenthesized: true,
+    });
+    let options = synth(ExprNode::Send { recv: None, method: Symbol::from("default_url_options"), args: vec![], block: None, parenthesized: false });
+    let mut call = synth(ExprNode::Send {
+        recv: Some(synth(ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] })),
+        method: Symbol::from("url_for_options"),
+        args: vec![path_call, options],
+        block: None,
+        parenthesized: true,
+    });
+    call.ty = Some(crate::ty::Ty::Str);
+    call
+}
+
 pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite_url_helpers_absolute);
     let matches = matches!(
@@ -7189,10 +7225,11 @@ pub(crate) fn apply_dynamic_render_options_lowering(lcs: &mut [LibraryClass]) {
 
 fn rewrite_render_options_assign(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut |c| rewrite_render_options_assign(c));
-    let ExprNode::Assign { target: crate::expr::LValue::Ivar { .. }, value } = &mut *expr.node
+    let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = &mut *expr.node
     else {
         return;
     };
+    let ivar = ivar.clone();
     let ExprNode::Hash { entries, .. } = &*value.node else {
         return;
     };
@@ -7202,6 +7239,7 @@ fn rewrite_render_options_assign(expr: &mut Expr) {
     // unrelated config hash like `@x = {partial: "y", scope: z}` app-wide —
     // `render @above` is the only consumer of this collapse.
     let mut partial_name: Option<String> = None;
+    let mut computed: Vec<(Symbol, Expr)> = Vec::new();
     for (k, v) in entries.iter() {
         let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
             return; // non-symbol key → not a render-options hash
@@ -7213,13 +7251,40 @@ fn rewrite_render_options_assign(expr: &mut Expr) {
                 }
                 _ => return, // dynamic partial name — leave the hash intact
             },
-            "locals" => {} // allowed; dropped in the collapse (ledgered)
+            "locals" => {
+                if let ExprNode::Hash { entries: locals, .. } = &*v.node {
+                    for (lk, lv) in locals {
+                        if let ExprNode::Lit { value: Literal::Sym { value: local } } = &*lk.node
+                            && !matches!(&*lv.node, ExprNode::Ivar { .. } | ExprNode::Lit { .. })
+                        {
+                            computed.push((local.clone(), lv.clone()));
+                        }
+                    }
+                }
+            }
             _ => return, // any foreign key → not a render-options hash
         }
     }
     if let Some(name) = partial_name {
         let span = value.span;
         *value = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: name } });
+        if computed.is_empty() {
+            return;
+        }
+        // The view's dispatch arm reads each computed local back from this ivar (`dynamic_local_ivar`).
+        let mut stmts: Vec<Expr> = computed
+            .into_iter()
+            .map(|(local, value)| {
+                Expr::new(span, ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar {
+                        name: crate::lower::view_to_library::dynamic_local_ivar(&ivar, &local),
+                    },
+                    value,
+                })
+            })
+            .collect();
+        stmts.push(expr.clone());
+        *expr = Expr::new(expr.span, ExprNode::Seq { exprs: stmts });
     }
 }
 
@@ -11064,6 +11129,24 @@ end
         src.push_str("  end\n  nil\nend\n");
     }
 
+    // An eager load's association (`lower::eager_load`): the same IN load
+    // with the chain's conditions and order on the association's table.
+    src.push_str("\ndef self._eager_dispatch(records, name, filter)\n");
+    let eager = crate::lower::eager_load::eager_loadable(model);
+    if eager.is_empty() {
+        src.push_str("  nil\nend\n");
+    } else {
+        src.push_str("  case name\n");
+        for (name, target, fk) in &eager {
+            let target = target.0.as_str();
+            let _ = write!(
+                src,
+                "  when :{name}\n    ids = []\n    records.each do |r| ids << r.id end\n    loaded = []\n    if ids.length > 0\n      rel = ActiveRecord::Relation.new({target}).where({fk}: ids)\n      filter.conditions.each do |c| rel = rel.where(c) end\n      filter.negations.each do |c| rel = rel.where.not(c) end\n      filter.orders.each do |o| rel = rel.order(o) end\n      loaded = rel.to_a\n    end\n    grouped = {{}}\n    loaded.each do |rec|\n      k = rec.{fk}\n      grouped[k] = [] if grouped[k].nil?\n      grouped[k] << rec\n    end\n    records.each do |r| r._preload_{name}(grouped[r.id] || []) end\n    {target}.preload_associations(loaded, [filter.nested]) unless filter.nested.nil?\n"
+            );
+        }
+        src.push_str("  end\n  nil\nend\n");
+    }
+
     // Spec walker — the entry point `Relation#to_a` calls. Specs are
     // Symbols, Hashes (nested: `story: :user`), or Arrays of either.
     src.push_str(
@@ -11073,7 +11156,11 @@ def self.preload_associations(records, specs)
   specs.each do |spec|
     if spec.is_a?(Hash)
       spec.each do |name, nested|
-        _preload_dispatch(records, name, nested)
+        if nested.is_a?(ActiveRecord::EagerFilter)
+          _eager_dispatch(records, name, nested)
+        else
+          _preload_dispatch(records, name, nested)
+        end
       end
     elsif spec.is_a?(Array)
       preload_associations(records, spec)

@@ -586,9 +586,35 @@ impl<'a> Mentions<'a> {
             return count;
         }
         let words = self.words.get_or_init(|| {
-            let mut words = HashMap::new();
-            for source in self.sources {
-                count_words(&source.text, &mut words);
+            // Each chunk of sources counts on its own thread, and the totals are
+            // sums merged in chunk order, so the schedule cannot change them.
+            // `count_words` reads only its text: no thread-local compiler state,
+            // which a worker would not have. Only this build runs in parallel;
+            // `Mentions` itself (the `scans` memo) stays on the calling thread.
+            // When `par::map` would not spawn workers (wasm / one core / one
+            // chunk), stay on one accumulator — buffering every chunk map is
+            // pure peak-memory cost with no schedule gain.
+            let chunk = self.sources.len().div_ceil(64).max(1);
+            let n_parts = self.sources.len().div_ceil(chunk);
+            if crate::par::workers_for(n_parts) <= 1 {
+                let mut words: HashMap<&'a str, usize> = HashMap::new();
+                for source in self.sources {
+                    count_words(&source.text, &mut words);
+                }
+                return words;
+            }
+            let parts: Vec<&'a [SourceFile]> = self.sources.chunks(chunk).collect();
+            let mut words: HashMap<&'a str, usize> = HashMap::new();
+            for part in crate::par::map(&parts, |part| {
+                let mut words = HashMap::new();
+                for source in *part {
+                    count_words(&source.text, &mut words);
+                }
+                words
+            }) {
+                for (word, n) in part {
+                    *words.entry(word).or_default() += n;
+                }
             }
             words
         });
@@ -2059,6 +2085,23 @@ mod tests {
             assert_eq!(mentions.mentioned(name), mentions_scan(name, &sources) > 0, "{name:?}");
         }
         assert!(mentions.count("foo") > 0 && mentions.count("foo?") > 0 && mentions.count("a") > 0);
+    }
+
+    /// Many sources split into several chunks and counted on worker threads: the index
+    /// holds the totals the one-pass scan gives, whatever the chunk boundaries.
+    #[test]
+    fn the_parallel_index_counts_what_the_scan_counts() {
+        let sources: Vec<SourceFile> = (0..500)
+            .map(|i| SourceFile {
+                path: format!("{i}.rb"),
+                text: format!("def run_{}\n  helper_{}(x)\n  shared? && flag!\n  self.shared = {i}\nend\nshared shared= [] ==\n", i % 7, i % 5),
+            })
+            .collect();
+        let mentions = Mentions::new(&sources);
+        for name in ["shared", "shared?", "shared=", "flag!", "helper_0", "helper_4", "run_3", "x", "end", "self", "[]", "==", "absent"] {
+            assert_eq!(mentions.count(name), mentions_scan(name, &sources), "{name:?}");
+        }
+        assert_eq!(mentions.count("shared"), 1000);
     }
 
     /// A name the word index does not answer (an operator) is scanned once, however often

@@ -477,7 +477,21 @@ fn untyped_subexpressions_baseline() {
     // class (`TimestampSwitches.store` / `lookup`), and the reader walks the
     // ancestors for it. The class name and value parameters are vars on this
     // RBS-less probe (+7 in connection.rb); the RBS-paired gate types them.
-    const CEILING: usize = 1092;
+    // MEASURED 1101 on 2026-10-26 (on 1092): `ActiveRecord::Bounds` holds
+    // a `where` Range's non-numeric ends for Spinel, and `column_predicate`
+    // reads them; its parameters and readers are vars on this RBS-less
+    // probe (+9 in relation.rb); the RBS-paired gate types them.
+    // MEASURED 1105 on 2026-10-26 (on 1101): the same Bounds element of a
+    // condition Array, read untyped where the predicate builds its SQL
+    // (+4 in active_record/relation.rb, 1101 -> 1105).
+    // MEASURED 1110 on 2026-10-27 (on 1105): `ActiveRecord::EagerFilter`
+    // carries an eager load's conditions and orders to the preload
+    // walker; its parameters and readers are vars on this RBS-less probe
+    // (+5 in active_record/relation.rb); the RBS-paired gate types them.
+    // MEASURED 1112 on 2026-10-27 (on 1110): the filter's `where.not`
+    // list, its parameter and reader (+2 in the same file), and the
+    // preloads nested under the association (+2 more, 1114).
+    const CEILING: usize = 1114;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

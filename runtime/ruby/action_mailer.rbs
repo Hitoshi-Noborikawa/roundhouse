@@ -78,7 +78,8 @@ module ActionMailer
     def __start_action: (String name) -> bool
     def __end_action: () -> nil
     def __processing: () -> self
-    def headers: (?Hash[String, String]? values) -> Headers
+    def headers: (?Hash[String, String | Array[String]]? values) -> Headers
+    def __header_text: (String name, String | Array[String] value) -> String
     def __headers: () -> Hash[String, String]
     def __add_header: (String name, String value) -> String
   end

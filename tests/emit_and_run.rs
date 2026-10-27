@@ -34,6 +34,8 @@ mod active_model_attribute_alias;
 mod active_model_attributes;
 #[path = "emit_and_run/active_model_attributes_form.rs"]
 mod active_model_attributes_form;
+#[path = "emit_and_run/association_query_arguments.rs"]
+mod association_query_arguments;
 #[path = "emit_and_run/active_model_superclass.rs"]
 mod active_model_superclass;
 #[path = "emit_and_run/arel_nodes.rs"]
@@ -82,6 +84,10 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "support/auto_source_gem.rs"]
+mod auto_source_gem_contract;
+#[path = "emit_and_run/auto_source_gem.rs"]
+mod auto_source_gem;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]
@@ -180,12 +186,26 @@ mod stdlib_rnp_contract;
 mod stdlib_rnp;
 #[path = "support/erb_template.rs"]
 mod erb_template_contract;
+#[path = "support/bare_permit.rs"]
+mod bare_permit_contract;
+#[path = "support/data_paths.rs"]
+mod data_paths_contract;
+#[path = "support/eager_load_filter.rs"]
+mod eager_load_filter_contract;
+#[path = "emit_and_run/data_paths.rs"]
+mod data_paths;
+#[path = "emit_and_run/bare_permit.rs"]
+mod bare_permit;
 #[path = "emit_and_run/erb_template.rs"]
 mod erb_template;
 #[path = "support/representable_decorator.rs"]
 mod representable_decorator;
 #[path = "emit_and_run/representable.rs"]
 mod representable;
+#[path = "support/active_model_serializer.rs"]
+mod active_model_serializer_app;
+#[path = "emit_and_run/active_model_serializer.rs"]
+mod active_model_serializer;
 #[path = "emit_and_run/instance_extend.rs"]
 mod instance_extend;
 
@@ -10325,6 +10345,78 @@ puts "ok"
         .assert_passes();
 }
 
+#[test]
+fn an_app_tag_helper_override_owns_helper_and_view_calls() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/tag_defaults.rb",
+            r#"module TagDefaults
+  def content_tag(name, text)
+    "default tag"
+  end
+
+  def safe_join(parts, separator)
+    separator
+  end
+end
+"#,
+        )
+        .write(
+            "app/helpers/application_helper.rb",
+            r#"module ApplicationHelper
+  include TagDefaults
+
+  def content_tag(name, text)
+    37
+  end
+
+  def override_value
+    content_tag(:span, "ignored") + 3
+  end
+end
+"#,
+        )
+        .write(
+            "app/views/articles/_custom_tag.html.erb",
+            "<%= content_tag(:span, \"ignored\").div(2) %>|<%= \"nested #{content_tag(:i, 'ignored') + 5}\" %>|<%= override_value %>|<%= safe_join([\"a\", \"b\"], 11).div(2) %>",
+        )
+        .run_ruby(
+            r#"raise "helper override lost" unless ApplicationHelper.override_value == 40
+raise "view override lost" unless Views::Articles.custom_tag(nil) == "18|nested 42|40|5"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn promoted_module_helpers_and_controller_helpers_keep_their_view_dispatch() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/bare_helper.rb",
+            "module BareHelper\n  module_function\n  def bare_value\n    17\n  end\nend\n",
+        )
+        .write(
+            "app/helpers/named_helper.rb",
+            "module NamedHelper\n  def named_value\n    19\n  end\n  module_function :named_value\nend\n",
+        )
+        .write(
+            "app/helpers/extended_helper.rb",
+            "module ExtendedHelper\n  extend self\n  def extended_value\n    23\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  helper_method :content_tag\n  def content_tag(name, text)\n    37\n  end\nend\n",
+        )
+        .write(
+            "app/views/articles/_helper_channels.html.erb",
+            "<%= bare_value.div(2) %>|<%= named_value.div(2) %>|<%= extended_value.div(2) %>|<%= content_tag(:span, \"ignored\").div(2) %>",
+        )
+        .run_ruby(
+            "raise \"helper dispatch lost\" unless Views::Articles.helper_channels(nil) == \"8|9|11|18\"\n",
+        )
+        .assert_passes();
+}
+
 /// #139 typed `Model.human_attribute_name` as a String, but no runtime
 /// defined it, so every page rendering the form raised `undefined method
 /// 'human_attribute_name' for class Article` (#147). A literal attribute
@@ -19810,6 +19902,40 @@ mod enum_cross_class_mapping;
 mod jbuilder_record_values;
 #[path = "emit_and_run/nil_operand.rs"]
 mod nil_operand;
+#[path = "emit_and_run/descendant_ivar.rs"]
+mod descendant_ivar;
+#[path = "emit_and_run/initializer_top_level_def.rs"]
+mod initializer_top_level_def;
+#[path = "emit_and_run/unknown_gem_namespace.rs"]
+mod unknown_gem_namespace;
+#[path = "emit_and_run/record_rebinding.rs"]
+mod record_rebinding;
+#[path = "emit_and_run/eager_load_filter.rs"]
+mod eager_load_filter;
+#[path = "emit_and_run/url_helpers_include.rs"]
+mod url_helpers_include;
+#[path = "emit_and_run/length_is_in_within.rs"]
+mod length_is_in_within;
+#[path = "emit_and_run/bigdecimal_clamp.rs"]
+mod bigdecimal_clamp;
+#[path = "emit_and_run/partial_binop.rs"]
+mod partial_binop;
+#[path = "emit_and_run/union_block_params.rs"]
+mod union_block_params;
+#[path = "emit_and_run/format_once.rs"]
+mod format_once;
+#[path = "emit_and_run/condition_lambda_record.rs"]
+mod condition_lambda_record;
+#[path = "emit_and_run/where_time_range.rs"]
+mod where_time_range;
+#[path = "emit_and_run/route_record_to_param.rs"]
+mod route_record_to_param;
+#[path = "emit_and_run/module_factory.rs"]
+mod module_factory;
+#[path = "emit_and_run/spinel_unknown_gem.rs"]
+mod spinel_unknown_gem;
+#[path = "emit_and_run/json_column_name.rs"]
+mod json_column_name;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

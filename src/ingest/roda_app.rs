@@ -204,7 +204,6 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
                     view.name = Symbol::from("layouts/application");
                 }
                 rewrite_part_to_render(&mut view.body, &mut part_locals);
-                rewrite_errors_full_messages(&mut view.body);
                 rewrite_flash_reads(&mut view.body);
                 app.views.push(view);
             }
@@ -369,11 +368,36 @@ fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<S
     // controller inherits from. Layout stays `Inherit`: the app's one
     // layout re-homes to `layouts/application` (the convention
     // default), so no explicit declaration is needed.
+    //
+    // `skip_forgery_protection`: Roda checks no CSRF token unless the
+    // app loads `route_csrf` / `csrf`, which are not in the recognized
+    // plugin set (`ingest_plugin_call` refuses them). Without the skip,
+    // the Rails default this parent brings (`protect_from_forgery with:
+    // :exception`) would answer 422 to every POST the Roda app accepts.
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("ApplicationController")),
         parent: Some(ClassId(Symbol::from("ActionController::Base"))),
         parent_span: Default::default(),
-        body: Vec::new(),
+        body: vec![ControllerBodyItem::Filter {
+            filter: Filter {
+                target_span: crate::span::Span::synthetic(),
+                kind: FilterKind::Skip,
+                target: Symbol::from(super::controller::VERIFY_AUTHENTICITY_TOKEN),
+                from_concern: None,
+                only: Vec::new(),
+                except: Vec::new(),
+                only_style: Default::default(),
+                except_style: Default::default(),
+                if_cond: None,
+                unless_cond: None,
+                if_cond_expr: None,
+                unless_cond_expr: None,
+                block: None,
+                prepend: false,
+            },
+            leading_comments: Vec::new(),
+            leading_blank_line: false,
+        }],
         layout: LayoutDecl::Inherit,
         sibling_classes: Vec::new(),
     });
@@ -1362,6 +1386,19 @@ fn rewrite_part_to_render(
     expr: &mut Expr,
     part_locals: &mut std::collections::HashMap<String, Vec<Symbol>>,
 ) {
+    // `<%== part(...) %>` compiles to `raw((part(...)))` (src/erb.rs
+    // leaves only a bare `render` / `yield` unwrapped). The view walker
+    // emits a `render` unescaped and matches it only as the whole
+    // expression, so the wrapper goes with the rename.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+        if method.as_str() == "raw" && args.len() == 1 {
+            if let ExprNode::Send { recv: None, method: inner, .. } = &*args[0].node {
+                if inner.as_str() == "part" {
+                    *expr = args[0].clone();
+                }
+            }
+        }
+    }
     expr.node
         .for_each_child_mut(&mut |c| rewrite_part_to_render(c, part_locals));
     let ExprNode::Send { recv: None, method, args, block, parenthesized } = &*expr.node else {
@@ -1403,30 +1440,6 @@ fn rewrite_part_to_render(
         block: block.clone(),
         parenthesized: *parenthesized,
     });
-}
-
-/// `record.errors.full_messages` → `record.errors`. The framework
-/// runtime's `errors` is already the array of full-message strings
-/// (the inline validation checks push humanized text), so Sequel's
-/// explicit `.full_messages` hop is an identity there.
-fn rewrite_errors_full_messages(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite_errors_full_messages);
-    let replacement = match &*expr.node {
-        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if method.as_str() == "full_messages"
-                && args.is_empty()
-                && matches!(
-                    &*r.node,
-                    ExprNode::Send { method, .. } if method.as_str() == "errors"
-                ) =>
-        {
-            Some((*r.node).clone())
-        }
-        _ => None,
-    };
-    if let Some(node) = replacement {
-        expr.node = Box::new(node);
-    }
 }
 
 /// View-side `flash["notice"]` / `flash["alert"]` → the bare `notice` /

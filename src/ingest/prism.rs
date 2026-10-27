@@ -68,6 +68,18 @@ pub fn scope<T>(f: impl FnOnce() -> T) -> (T, Vec<Diagnostic>) {
     (result, collected)
 }
 
+/// How many diagnostics the active buffer holds, for `rewind`.
+pub(crate) fn mark() -> Option<usize> {
+    PARSE_DIAGS.with(|c| c.borrow().as_ref().map(Vec::len))
+}
+
+/// Forget what was pushed since `mark`: an ingest pass that is run again.
+pub(crate) fn rewind(mark: Option<usize>) {
+    if let Some(length) = mark {
+        PARSE_DIAGS.with(|c| c.borrow_mut().as_mut().map(|buf| buf.truncate(length)));
+    }
+}
+
 /// Push a diagnostic into the active buffer. A no-op outside a
 /// [`scope`]. The buffer is the ingest phase's diagnostic channel: syntax
 /// errors, and the warnings ingest itself raises (the initializer ledger).

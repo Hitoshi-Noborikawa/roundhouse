@@ -9,7 +9,7 @@ use super::emit_and_run;
 /// lambda-condition follow-up) a zero-arity lambda `if:` now guards the
 /// same way — `:note` below, with dedicated coverage in
 /// `validates_lambda_conditions.rs`. `equal_to`, `other_than`,
-/// `uniqueness: { conditions: }`, comparison, and `length: is:` stay
+/// `uniqueness: { conditions: }` and comparison stay
 /// diagnostics and are not enforced (plain `uniqueness:` is covered by
 /// `validates_uniqueness.rs`).
 const MODEL: &str = r#"class Article < ApplicationRecord
@@ -64,7 +64,7 @@ base = {
   title: "Ok", body: "0123456789", price: 5, rating: 2, color: "red", stock: 2, score: 1.5,
   inventory_count: 0, ceiling: 1, parity: 9,
   code: "ABC", max_stock: 10, kind: "one", sku: "12", status: "draft",
-  label: "", extra: "", note: "", tag: "toolong", level: 9, cap: 1
+  label: "", extra: "", note: "", tag: "ab", level: 9, cap: 1
 }
 
 def messages(attrs)
@@ -146,11 +146,13 @@ raise "lambda condition not enforced: #{lambda_blank.inspect}" unless lambda_bla
 valid, msgs = messages(base.merge(title: "LambdaOk", status: "live", label: "x", extra: "y", note: "z"))
 raise "lambda condition filled rejected: #{msgs.inspect}" unless valid
 
-# uniqueness: { conditions: }, comparison:, and length: is: are not enforced.
+# uniqueness: { conditions: } and comparison: are not enforced; length: is: is.
 Article.create!(base.merge(title: "Taken", label: "x", extra: "y"))
 Article.create!(base.merge(title: "Taken"))
 valid, msgs = messages(base.merge(title: "Compared"))
-raise "comparison or length is: ran: #{msgs.inspect}" unless valid
+raise "comparison ran: #{msgs.inspect}" unless valid
+valid, msgs = messages(base.merge(title: "WrongTag", tag: "abc"))
+raise "length is: not enforced: #{msgs.to_a.inspect}" unless !valid && msgs.to_a == ["Tag is the wrong length (should be 2 characters)"]
 
 puts "validates options passed"
 "##);
@@ -169,7 +171,6 @@ puts "validates options passed"
         "other_than",
         "uniqueness",
         "comparison",
-        "length: is",
     ] {
         assert!(
             warnings.iter().any(|message| message.contains(needle)),

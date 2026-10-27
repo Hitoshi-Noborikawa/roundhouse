@@ -16,6 +16,8 @@
 //! a `Model.where(...)` / `Model.all` chain-start (no scope) is seeded with
 //! `ActiveRecord::Relation.new(Model)` so it, too, is chainable.
 
+pub(crate) mod query_arguments;
+
 use std::collections::{HashMap, HashSet};
 
 use crate::dialect::{Association, Model, ModelBodyItem, Param};
@@ -1361,15 +1363,22 @@ struct AssocBuild {
     /// in place of Rails' own, so a call by one of these names is not
     /// expanded.
     extension: Vec<Symbol>,
+    /// The target model's key is `id` (no `self.primary_key =`), so a
+    /// `find_by` naming `id` matches at most one row.
+    target_keyed_by_id: bool,
 }
 
 impl AssocBuild {
     /// The expansion of `<parent>.<assoc>.<call>`: none when the
     /// extension defines `call`, or the scope changes what `call`
-    /// builds or finds.
-    fn expansion_for(&self, call: &Symbol) -> Option<&(ClassId, Symbol)> {
+    /// builds or finds. A `find_by` naming the target's `id`
+    /// (`by_id`) matches at most one row, so an ordering scope cannot
+    /// change which it takes: the scope judges it as it judges `find`.
+    fn expansion_for(&self, call: &Symbol, by_id: bool) -> Option<&(ClassId, Symbol)> {
+        let find = Symbol::from("find");
+        let judged = if by_id && self.target_keyed_by_id && call.as_str() == "find_by" { &find } else { call };
         self.expansion.as_ref().filter(|_| {
-            !self.extension.contains(call) && self.scope.as_ref().is_none_or(|s| scope_is_build_neutral(s, call))
+            !self.extension.contains(call) && self.scope.as_ref().is_none_or(|s| scope_is_build_neutral(s, judged))
         })
     }
 }
@@ -1605,12 +1614,13 @@ impl AssocRegistry {
     /// The answer is per call: an extension defining `find` declines
     /// `find`, so the extension runs, and leaves `build` expanded; an
     /// ordering scope declines `find_by` alone (see
-    /// [`scope_is_build_neutral`]).
-    pub fn build_target(&self, owner: &Expr, assoc: &Symbol, call: &Symbol) -> AssocBuildTarget {
+    /// [`scope_is_build_neutral`]), unless it names the target's `id`
+    /// (`by_id`).
+    pub fn build_target(&self, owner: &Expr, assoc: &Symbol, call: &Symbol, by_id: bool) -> AssocBuildTarget {
         if !self.assoc_builds.keys().any(|(_, name)| name == assoc) {
             return AssocBuildTarget::Undeclared;
         }
-        let read = |class: &ClassId| self.assoc_builds[&(class.clone(), assoc.clone())].expansion_for(call);
+        let read = |class: &ClassId| self.assoc_builds[&(class.clone(), assoc.clone())].expansion_for(call, by_id);
         let expansions: Vec<Option<&(ClassId, Symbol)>> = match self.owner_models(owner, assoc) {
             Some(models) => {
                 models.into_iter().map(|model| self.declaring_class(model, assoc).and_then(read)).collect()
@@ -1621,7 +1631,7 @@ impl AssocRegistry {
                     .assoc_builds
                     .iter()
                     .filter(|((_, name), _)| name == assoc)
-                    .map(|(_, b)| b.expansion_for(call))
+                    .map(|(_, b)| b.expansion_for(call, by_id))
                     .collect(),
             },
         };
@@ -1843,7 +1853,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
         let own = reg.table_for(&m.name);
         for a in m.associations() {
             reg.forget(&m.name, a.name());
-            reg.assoc_builds.insert((m.name.clone(), a.name().clone()), assoc_build(a));
+            reg.assoc_builds.insert((m.name.clone(), a.name().clone()), assoc_build(a, models));
             match a {
                 Association::BelongsTo {
                     name, target, foreign_key, primary_key, polymorphic, polymorphic_targets, foreign_type, ..
@@ -2140,7 +2150,7 @@ fn scope_join_tails(reg: &mut AssocRegistry, models: &[Model]) {
 /// Nor does any other kind: a `has_one` or `belongs_to` reader is never
 /// a collection proxy, so `.build` / `.find` on it is not an association
 /// call, and a `has_and_belongs_to_many` builds through its join table.
-fn assoc_build(a: &Association) -> AssocBuild {
+fn assoc_build(a: &Association, models: &[Model]) -> AssocBuild {
     match a {
         Association::HasMany { target, foreign_key, through, as_interface, scope, extension, .. } => {
             let reproducible = through.is_none() && as_interface.is_none() && a.owner_key().as_str() == "id";
@@ -2148,9 +2158,13 @@ fn assoc_build(a: &Association) -> AssocBuild {
                 expansion: reproducible.then(|| (target.clone(), foreign_key.clone())),
                 scope: scope.clone(),
                 extension: extension.iter().map(|x| x.name.clone()).collect(),
+                // `self.primary_key = "id"` names the default key.
+                target_keyed_by_id: models.iter().any(|m| {
+                    &m.name == target && m.primary_key.as_ref().is_none_or(|key| key.as_str() == "id")
+                }),
             }
         }
-        _ => AssocBuild { expansion: None, scope: None, extension: Vec::new() },
+        _ => AssocBuild { expansion: None, scope: None, extension: Vec::new(), target_keyed_by_id: false },
     }
 }
 
@@ -2739,6 +2753,7 @@ fn is_relation_expr(e: &Expr, ctx: &Ctx, locals: &Locals) -> bool {
             locals.rel.contains_key(name)
                 || ctx.scope_body.as_ref().is_some_and(|(_, rel)| rel == name)
         }
+        ExprNode::Ivar { name } => locals.rel.contains_key(&alias_key(name, true)),
         ExprNode::Send { method, recv: Some(r), args, block: None, .. } => {
             if let Some(m) = const_model(r, ctx.models) {
                 if ctx.scope_of(&m, method) {
@@ -3270,6 +3285,118 @@ fn seedable_assoc_read(ctx: &Ctx, value: &Expr, span: crate::span::Span) -> Opti
     resolved
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_association_seed(
+    span: crate::span::Span,
+    target: &ClassId,
+    fk: Symbol,
+    owner_id: Expr,
+    type_entry: Option<(Expr, Expr)>,
+    owner: &Expr,
+    name: &Symbol,
+    scope_attributes: bool,
+) -> Expr {
+    // An owner key other than `id` can be NULL, and
+    // `where(fk: nil)` would match the child rows
+    // whose fk is NULL. Rails never matches a nil
+    // owner key, so the seed excludes them.
+    let keyed_guard = !matches!(
+        &*owner_id.node,
+        ExprNode::Ivar { name } if name.as_str() == "id"
+    ) && !matches!(
+        &*owner_id.node,
+        ExprNode::Send { method, .. } if method.as_str() == "id"
+    );
+    let guard_sql = format!("{} IS NOT NULL", fk.as_str());
+    let fk_hash = syn(
+        span,
+        ExprNode::Hash {
+            entries: std::iter::once((
+                syn(
+                    span,
+                    ExprNode::Lit { value: Literal::Sym { value: fk } },
+                ),
+                owner_id,
+            ))
+            .chain(type_entry.clone())
+            .collect(),
+            kwargs: true,
+        },
+    );
+    let seed_method =
+        if scope_attributes { "where_scope" } else { "where" };
+    let mut seed = syn(
+        span,
+        ExprNode::Send {
+            recv: Some(relation_new(span, target)),
+            method: Symbol::from(seed_method),
+            args: vec![fk_hash],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    if keyed_guard {
+        seed = syn(
+            span,
+            ExprNode::Send {
+                recv: Some(seed),
+                method: Symbol::from("where"),
+                args: vec![syn(
+                    span,
+                    ExprNode::Lit {
+                        value: Literal::Str { value: guard_sql },
+                    },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        );
+    }
+    // The seed REPLACES `<owner>.<assoc>`, and with
+    // it the reader's eager-load cache: a scope
+    // reached through a preloaded association
+    // (`message.boosts.ordered`, with `includes
+    // (boosts: :booster)` upstream) re-queried per
+    // record -- the room page's last N+1. So the
+    // relation is handed the cache too:
+    // `.preloaded(<owner>.<assoc>_target,
+    // <owner>.<assoc>_loaded?)` seeds its loaded
+    // memo when the association was loaded and is a
+    // no-op when it was not. An order-only scope
+    // then sorts the memo in memory (Relation#order);
+    // a filtering chain drops it and queries, as
+    // before. Not for the create-scope spelling,
+    // which builds a record rather than reading.
+    if !scope_attributes {
+        let owner_send = |m: String| {
+            syn(
+                span,
+                ExprNode::Send {
+                    recv: Some(owner.clone()),
+                    method: Symbol::from(m),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            )
+        };
+        seed = syn(
+            span,
+            ExprNode::Send {
+                recv: Some(seed),
+                method: Symbol::from("preloaded"),
+                args: vec![
+                    owner_send(format!("{}_target", name.as_str())),
+                    owner_send(format!("{}_loaded?", name.as_str())),
+                ],
+                block: None,
+                parenthesized: true,
+            },
+        );
+    }
+    seed
+}
+
 fn assoc_owner_seed(
     ctx: &Ctx,
     aname: &Symbol,
@@ -3628,6 +3755,19 @@ fn lower_relation_args(
     ctx: &Ctx,
 ) -> Vec<Symbol> {
     let mut aliases: Vec<Symbol> = Vec::new();
+    // Not handed to the runtime as an Array: Rails flattens `order([a, b])` into `order(a, b)`, and the runtime's parts are the elements.
+    if matches!(method.as_str(), "order" | "reorder")
+        && args.iter().any(|a| matches!(&*a.node, ExprNode::Array { .. }))
+    {
+        let mut flat = Vec::with_capacity(args.len());
+        for arg in args.drain(..) {
+            match &*arg.node {
+                ExprNode::Array { elements, .. } => flat.extend(elements.iter().cloned()),
+                _ => flat.push(arg),
+            }
+        }
+        *args = flat;
+    }
     match method.as_str() {
         "joins" | "left_outer_joins" | "left_joins" => {
             let kind = if method.as_str() == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };
@@ -3976,13 +4116,19 @@ pub(crate) fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option
             let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
             let ExprNode::Assign { target, mut value } = node else { unreachable!() };
             let m = rewrite(&mut value, ctx, locals);
-            if let crate::expr::LValue::Var { name, .. } = &target {
+            // Ivars too, under their `@` key: lobsters' moderations index
+            // narrows `@moderations` through a `case` and then `.joins(:moderator)`.
+            if let Some(key) = match &target {
+                crate::expr::LValue::Var { name, .. } => Some(alias_key(name, false)),
+                crate::expr::LValue::Ivar { name } => Some(alias_key(name, true)),
+                _ => None,
+            } {
                 match &m {
                     Some(model) => {
-                        locals.rel.insert(name.clone(), model.clone());
+                        locals.rel.insert(key, model.clone());
                     }
                     None => {
-                        locals.rel.remove(name);
+                        locals.rel.remove(&key);
                     }
                 }
             }
@@ -4776,104 +4922,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         // the foreign key as `scope_attributes` too.
                         let assoc_cm = ctx.assoc_class_method_params(&target, &method);
                         if is_scope || is_chain || is_term || assoc_cm.is_some() {
-                            // An owner key other than `id` can be NULL, and
-                            // `where(fk: nil)` would match the child rows
-                            // whose fk is NULL. Rails never matches a nil
-                            // owner key, so the seed excludes them.
-                            let keyed_guard = !matches!(
-                                &*owner_id.node,
-                                ExprNode::Ivar { name } if name.as_str() == "id"
-                            ) && !matches!(
-                                &*owner_id.node,
-                                ExprNode::Send { method, .. } if method.as_str() == "id"
+                            let seed = build_association_seed(
+                                span, &target, fk, owner_id, type_entry.clone(), ir, aname,
+                                assoc_cm.is_some(),
                             );
-                            let guard_sql = format!("{} IS NOT NULL", fk.as_str());
-                            let fk_hash = syn(
-                                span,
-                                ExprNode::Hash {
-                                    entries: std::iter::once((
-                                        syn(
-                                            span,
-                                            ExprNode::Lit { value: Literal::Sym { value: fk } },
-                                        ),
-                                        owner_id,
-                                    ))
-                                    .chain(type_entry.clone())
-                                    .collect(),
-                                    kwargs: true,
-                                },
-                            );
-                            let seed_method =
-                                if assoc_cm.is_some() { "where_scope" } else { "where" };
-                            let mut seed = syn(
-                                span,
-                                ExprNode::Send {
-                                    recv: Some(relation_new(span, &target)),
-                                    method: Symbol::from(seed_method),
-                                    args: vec![fk_hash],
-                                    block: None,
-                                    parenthesized: true,
-                                },
-                            );
-                            if keyed_guard {
-                                seed = syn(
-                                    span,
-                                    ExprNode::Send {
-                                        recv: Some(seed),
-                                        method: Symbol::from("where"),
-                                        args: vec![syn(
-                                            span,
-                                            ExprNode::Lit {
-                                                value: Literal::Str { value: guard_sql },
-                                            },
-                                        )],
-                                        block: None,
-                                        parenthesized: true,
-                                    },
-                                );
-                            }
-                            // The seed REPLACES `<owner>.<assoc>`, and with
-                            // it the reader's eager-load cache: a scope
-                            // reached through a preloaded association
-                            // (`message.boosts.ordered`, with `includes
-                            // (boosts: :booster)` upstream) re-queried per
-                            // record -- the room page's last N+1. So the
-                            // relation is handed the cache too:
-                            // `.preloaded(<owner>.<assoc>_target,
-                            // <owner>.<assoc>_loaded?)` seeds its loaded
-                            // memo when the association was loaded and is a
-                            // no-op when it was not. An order-only scope
-                            // then sorts the memo in memory (Relation#order);
-                            // a filtering chain drops it and queries, as
-                            // before. Not for the create-scope spelling,
-                            // which builds a record rather than reading.
-                            if assoc_cm.is_none() {
-                                let owner_send = |m: String| {
-                                    syn(
-                                        span,
-                                        ExprNode::Send {
-                                            recv: Some(ir.clone()),
-                                            method: Symbol::from(m),
-                                            args: vec![],
-                                            block: None,
-                                            parenthesized: false,
-                                        },
-                                    )
-                                };
-                                seed = syn(
-                                    span,
-                                    ExprNode::Send {
-                                        recv: Some(seed),
-                                        method: Symbol::from("preloaded"),
-                                        args: vec![
-                                            owner_send(format!("{}_target", aname.as_str())),
-                                            owner_send(format!("{}_loaded?", aname.as_str())),
-                                        ],
-                                        block: None,
-                                        parenthesized: true,
-                                    },
-                                );
-                            }
                             if let Some(leading) = assoc_cm {
                                 let new_args = thread_rel(args, seed, Some(leading), span);
                                 *expr = put(
@@ -4980,6 +5032,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // (`@story.merged_comments` → Comment).
             let r_model = match &*r.node {
                 ExprNode::Var { name, .. } => locals.rel.get(name).cloned(),
+                ExprNode::Ivar { name } => locals.rel.get(&alias_key(name, true)).cloned(),
                 _ => rewrite(&mut r, ctx, locals),
             };
             let r_model = r_model.or_else(|| match &*r.node {
@@ -6165,7 +6218,7 @@ mod tests {
         let tags = Symbol::from("tags");
         let mut owner = syn(crate::span::Span::synthetic(), ExprNode::Ivar { name: Symbol::from("story") });
         owner.ty = Some(story);
-        assert_eq!(assocs.build_target(&owner, &tags, &Symbol::from("build")), AssocBuildTarget::Declined);
+        assert_eq!(assocs.build_target(&owner, &tags, &Symbol::from("build"), false), AssocBuildTarget::Declined);
         assert_eq!(assoc_read_target(&owner, &tags, &assocs), None);
     }
 
