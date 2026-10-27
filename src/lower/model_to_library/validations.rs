@@ -30,7 +30,7 @@ pub(super) fn push_validate_method(
 ) {
     let model_msgs = Messages(Some(model), None);
     let mut stmts: Vec<Expr> = Vec::new();
-    let store_attrs: std::collections::HashSet<Symbol> = crate::lower::typed_store::typed_store_decls(&model.body)
+    let store_attrs: crate::det::HashSet<Symbol> = crate::lower::typed_store::typed_store_decls(&model.body)
         .into_iter()
         .flat_map(|(_, attrs)| attrs.into_iter().map(|a| a.name))
         .collect();

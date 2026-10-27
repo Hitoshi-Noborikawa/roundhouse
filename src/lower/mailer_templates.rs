@@ -16,7 +16,8 @@
 //! with a `format` block, `template_name:` / `template_path:`, an action
 //! with no template and no `body:`, and a `default` given a Proc.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use crate::det::HashMap;
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
@@ -88,7 +89,7 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
         }
     }
     // A parent's `default` is read for each mailer under it: report it once.
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::det::HashSet::default();
     diags.retain(|d| seen.insert((d.span.file, d.span.start, d.span.end, d.message.clone())));
     diags
 }
