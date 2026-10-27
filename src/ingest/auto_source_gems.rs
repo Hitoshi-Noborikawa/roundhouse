@@ -75,11 +75,13 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
             out.insert(gem.to_string());
         }
     };
-    let in_source_file = |file: crate::span::FileId| {
-        app.source_path(file).is_some_and(|path| {
-            lock.source.iter().any(|g| lock.version_of(g).is_some_and(|v| super::source_gems::file_of(path, g, v)))
-        })
-    };
+    let source_files: Vec<bool> = app
+        .sources
+        .iter()
+        .map(|s| lock.source.iter().any(|g| lock.version_of(g).is_some_and(|v| super::source_gems::file_of(&s.path, g, v))))
+        .collect();
+    let in_source_file =
+        |file: crate::span::FileId| (file.0 as usize).checked_sub(1).and_then(|i| source_files.get(i)).copied().unwrap_or(false);
     let in_source_gem = |e: &Expr| in_source_file(e.span.file);
     for (parent, span) in app
         .models
@@ -100,6 +102,15 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
         }
         e.node.for_each_child(&mut |c| visit(c, f));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |e| visit(e, &mut |c, path| consider(path, in_source_gem(c))));
+    // Each name once: a large app names the same constants thousands of times, and the lockfile lookup is per name.
+    let mut named: BTreeSet<(String, bool)> = BTreeSet::new();
+    crate::lower::for_each_emit_body_ref(app, &mut |e| {
+        visit(e, &mut |c, path| {
+            named.insert((path.to_string(), in_source_gem(c)));
+        })
+    });
+    for (path, from_gem) in &named {
+        consider(path, *from_gem);
+    }
     out.into_iter().collect()
 }

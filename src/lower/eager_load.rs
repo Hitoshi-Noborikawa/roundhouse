@@ -49,6 +49,22 @@ pub fn lower_for_target(app: &crate::App, target: crate::build_target::BuildTarg
     if !matches!(target, BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby) {
         return None;
     }
+    // Not a copy of the whole app for nothing: most chains have no eager load.
+    let mut any = false;
+    crate::lower::for_each_emit_body_ref(app, &mut |e| any = any || needs_rewrite(e, &app.models, None));
+    let own_side = |m: &Model| {
+        let own = Some(&m.name);
+        m.body.iter().any(|item| match item {
+            crate::dialect::ModelBodyItem::Method { method, .. } if method.receiver == crate::dialect::MethodReceiver::Class => {
+                needs_rewrite(&method.body, &app.models, own)
+            }
+            crate::dialect::ModelBodyItem::Scope { scope, .. } => needs_rewrite(&scope.body, &app.models, own),
+            _ => false,
+        })
+    };
+    if !any && !app.models.iter().any(own_side) {
+        return None;
+    }
     let mut lowered = app.clone();
     let models = app.models.clone();
     // A model's class-side bodies root their chains at the model itself (`includes(:comments)…` in `def self.x`).
@@ -68,6 +84,15 @@ pub fn lower_for_target(app: &crate::App, target: crate::build_target::BuildTarg
     }
     crate::lower::for_each_emit_body(&mut lowered, &mut |e| rewrite(e, &models, None));
     Some(lowered)
+}
+
+fn needs_rewrite(e: &Expr, models: &[Model], own: Option<&ClassId>) -> bool {
+    if chain_of(e, models, own).is_some_and(|chain| !eager_of(e.span, &chain, models).is_empty()) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || needs_rewrite(c, models, own));
+    found
 }
 
 fn rewrite(e: &mut Expr, models: &[Model], own: Option<&ClassId>) {
@@ -219,7 +244,16 @@ fn step(method: &str, args: &[Expr], chain: &mut Chain, any: &mut bool) -> bool 
 }
 
 fn apply(e: &mut Expr, chain: &Chain, models: &[Model]) {
-    let Some(model) = models.iter().find(|m| m.name == chain.model) else { return };
+    let eager = eager_of(e.span, chain, models);
+    if eager.is_empty() {
+        return;
+    }
+    rewrite_includes(e, &eager);
+}
+
+/// The `name: EagerFilter` pairs a chain's includes become; empty when none is an eager load.
+fn eager_of(span: crate::span::Span, chain: &Chain, models: &[Model]) -> Vec<(Symbol, Expr)> {
+    let Some(model) = models.iter().find(|m| m.name == chain.model) else { return Vec::new() };
     let loadable = eager_loadable(model);
     let mut eager: Vec<(Symbol, Expr)> = Vec::new();
     for name in &chain.included {
@@ -235,7 +269,7 @@ fn apply(e: &mut Expr, chain: &Chain, models: &[Model]) {
             entries
                 .iter()
                 .filter(|(k, _)| mentions(k))
-                .map(|(_, v)| hash(e.span, vec![(sym(e.span, &table), v.clone())]))
+                .map(|(_, v)| hash(span, vec![(sym(span, &table), v.clone())]))
                 .collect()
         };
         let conditions = on_table(&chain.conditions);
@@ -246,14 +280,14 @@ fn apply(e: &mut Expr, chain: &Chain, models: &[Model]) {
             continue;
         }
         let filter = Expr::new(
-            e.span,
+            span,
             ExprNode::Send {
-                recv: Some(Expr::new(e.span, ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("EagerFilter")] })),
+                recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("EagerFilter")] })),
                 method: Symbol::from("new"),
                 args: [conditions, negations, orders]
                     .into_iter()
-                    .map(|elements| Expr::new(e.span, ExprNode::Array { elements, style: Default::default() }))
-                    .chain(std::iter::once(Expr::new(e.span, ExprNode::Lit { value: Literal::Nil })))
+                    .map(|elements| Expr::new(span, ExprNode::Array { elements, style: Default::default() }))
+                    .chain(std::iter::once(Expr::new(span, ExprNode::Lit { value: Literal::Nil })))
                     .collect(),
                 block: None,
                 parenthesized: true,
@@ -261,10 +295,7 @@ fn apply(e: &mut Expr, chain: &Chain, models: &[Model]) {
         );
         eager.push((name.clone(), filter));
     }
-    if eager.is_empty() {
-        return;
-    }
-    rewrite_includes(e, &eager);
+    eager
 }
 
 /// Swap each eager-loaded Symbol of the chain's `includes` for its
