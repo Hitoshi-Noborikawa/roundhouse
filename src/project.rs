@@ -5759,7 +5759,7 @@ enum RequireTarget {
 
 /// Standard libraries in `ingest::app`'s requirable list that Spinel has
 /// no package or native module for: `spinel` warns "is not available in
-/// Spinel" for each, and an app binary's `--require-gate` (from `spin
+/// Spinel" for each, and an app binary's `--strict-require` (from `spin
 /// flags`) makes that fatal. The spinel tree leaves them out, as it did
 /// before app requires were carried; the ruby family loads them all.
 const SPINEL_LACKS: &[&str] = &[
@@ -10672,7 +10672,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     // drive. It also supplies the `--rbs` root, so the test recipe drops
     // `$(RBS_FLAG)` rather than passing two.
     //
-    // MINUS `--require-gate`, which `spin flags` includes and the app
+    // MINUS `--strict-require` (`--require-gate` before Spinel 6aaec4f41), which `spin flags` includes and the app
     // binary should keep: it turns an unresolvable require into a
     // compile-time refusal. A TEST tree requires gems that have no spinel
     // surface at all — campfire's suite pulls vips, mocha and webmock —
@@ -10687,7 +10687,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         let dep_patches: [(&str, &str); 3] = [
             (
                 "SPINEL ?= spinel",
-                "SPINEL ?= spinel\nSPIN   ?= spin\n\n# Package deps for the per-test compiles, from spin itself.\n# `--require-gate` is stripped: the app binary wants an\n# unresolvable require to be fatal, a test tree requires\n# gems with no spinel surface (vips, mocha, webmock) and\n# must still compile far enough to report its type errors.\nSPIN_TEST_FLAGS = $(shell $(SPIN) flags 2>/dev/null | sed 's/--require-gate //')",
+                "SPINEL ?= spinel\nSPIN   ?= spin\n\n# Package deps for the per-test compiles, from spin itself.\n# `--strict-require` is stripped: the app binary wants an\n# unresolvable require to be fatal, a test tree requires\n# gems with no spinel surface (vips, mocha, webmock) and\n# must still compile far enough to report its type errors.\nSPIN_TEST_FLAGS = $(shell $(SPIN) flags 2>/dev/null | sed -e 's/--strict-require //' -e 's/--require-gate //')",
             ),
             (
                 "\t$(SPINEL) main.rb $(RBS_FLAG) -o $@",
