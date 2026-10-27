@@ -2861,6 +2861,9 @@ fn target_files_inner(
             }
         }
         let mut files = files;
+        if target == BuildTarget::Spinel {
+            emit::ruby::shake::drop_shadowed_base_defs(&mut files);
+        }
         crate::timings::phase(format_args!("emit {}: tree shake", target.as_str()), || {
             emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
         });
