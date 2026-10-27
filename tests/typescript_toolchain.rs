@@ -198,6 +198,35 @@ console.log(out.join(","));
     );
 }
 
+/// The libsql adapter's `escape_int` beside a row whose id is 0: a NaN
+/// key (a blank or non-numeric request id) finds nothing, as on the
+/// better-sqlite3 adapter, rather than row 0.
+#[test]
+#[ignore]
+fn libsql_find_of_nan_finds_nothing_beside_row_zero() {
+    use roundhouse::profile::DeploymentProfile;
+
+    let scratch = scratch_dir("real-blog-libsql-find-nan");
+    generate_project_with_profile(roundhouse::fixtures::real_blog(), &scratch, &DeploymentProfile::node_async());
+    let out = run_under_tsx(
+        &scratch,
+        r#"import { setupTestDb } from "./src/juntos.js";
+import { Schema } from "./src/schema.js";
+import { Db } from "./src/db.js";
+import { Article } from "./app/models/article.js";
+await setupTestDb(Schema.statements().join(";"));
+await Db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (0, 'zero', 'b', '2026-01-01 00:00:00', '2026-01-01 00:00:00')");
+const out: string[] = [];
+for (const id of [NaN, 0]) {
+  try { out.push(`${id}=${(await Article.find(id) as any).title}`); }
+  catch (e: any) { out.push(`${id}=${e.constructor.name}`); }
+}
+console.log(out.join(","));
+"#,
+    );
+    assert_eq!(out, "NaN=RecordNotFound,0=zero");
+}
+
 /// A class that is not a model keeps its `find`'s argument: only a class
 /// reaching `ActiveRecord::Base` has the numeric key the coercion assumes.
 #[test]

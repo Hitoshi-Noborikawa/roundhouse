@@ -129,7 +129,9 @@ function escape_string(s: unknown): string {
 }
 
 function escape_int(n: unknown): string {
-  const parsed = typeof n === "number" ? n : Number(n);
+  // As `escapeInt` in db.ts: a non-finite number is NULL, not row 0.
+  if (typeof n === "number") return Number.isFinite(n) ? String(Math.trunc(n)) : "NULL";
+  const parsed = Number(n);
   return Number.isFinite(parsed) ? String(Math.trunc(parsed)) : "0";
 }
 
