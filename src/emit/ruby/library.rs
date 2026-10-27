@@ -525,39 +525,35 @@ fn emit_library_class_with_nested(
     // where the base must already be defined — the requirement the
     // require between two files used to satisfy. Left to the
     // collection's own order this works by luck.
+    // Order children so a superclass / included sibling precedes dependents.
+    // Bare `Parent` inside `Owner` is `Owner::Parent` when a sibling of that
+    // name is among the kids (`Class.new(Parent)` and ordinary
+    // `class Child < Parent` may store the written bare name). Absolute
+    // `::X` and names that already identify a collected child stay as written.
     let kids = {
         let names: crate::det::HashSet<&str> =
             kids.iter().map(|k| k.name.0.as_str()).collect();
-        let mut pending: Vec<&LibraryClass> = kids.to_vec();
-        let mut ordered: Vec<&LibraryClass> = Vec::new();
-        let mut placed: crate::det::HashSet<String> = crate::det::HashSet::default();
-        while !pending.is_empty() {
-            let before = pending.len();
-            pending.retain(|k| {
-                // A superclass, and a module the class body `include`s:
-                // both are read the moment the body runs. (campfire's
-                // `class HTTP < Net::HTTP; include Stages; end` beside
-                // its `module Stages`.)
-                let waits_for = k
-                    .parent
+        let owner = parent.name.0.as_str();
+        let dependency_name = |written: &str| -> String {
+            if let Some(rooted) = written.strip_prefix("::") {
+                rooted.to_owned()
+            } else if names.contains(written) {
+                written.to_owned()
+            } else {
+                format!("{owner}::{written}")
+            }
+        };
+        crate::library_class_order::order_by_deps(
+            kids.to_vec(),
+            |k| k.name.0.as_str(),
+            |k| {
+                k.parent
                     .iter()
                     .chain(k.includes.iter())
-                    .map(|p| p.0.as_str())
-                    .any(|p| names.contains(p) && !placed.contains(p));
-                if waits_for {
-                    return true;
-                }
-                placed.insert(k.name.0.as_str().to_string());
-                ordered.push(k);
-                false
-            });
-            // A cycle cannot be ordered and cannot be Ruby either;
-            // emit the rest as they came rather than loop forever.
-            if pending.len() == before {
-                ordered.extend(pending.drain(..));
-            }
-        }
-        ordered
+                    .map(|p| dependency_name(p.0.as_str()))
+                    .collect()
+            },
+        )
     };
     let kids = &kids[..];
     let mut blocks: Vec<NestedBlock> = Vec::new();
