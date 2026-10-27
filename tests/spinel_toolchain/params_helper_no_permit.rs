@@ -90,6 +90,9 @@ fn a_no_permit_guard_filter_builds_and_runs_on_spinel() {
     assert!(full.body.contains("href=\"/finds/page/2?q=rails\""), "{}", full.body);
     assert!(full.body.contains("href=\"/finds/page/3?q=rails\""), "{}", full.body);
     assert!(full.body.contains("href=\"/finds/page/4?q=rails\""), "{}", full.body);
+    let pager = server.get("/finds/pager?q=rails");
+    assert_eq!(pager.status, 200, "{}", pager.body);
+    assert!(pager.body.contains("href=\"/finds/pager?page=3&amp;q=rails\""), "{}", pager.body);
     let bare = server.get("/finds");
     assert_eq!(bare.status, 200, "{}", bare.body);
     assert!(bare.body.contains("<p id=\"log\">(All)|||1|0</p>"), "{}", bare.body);

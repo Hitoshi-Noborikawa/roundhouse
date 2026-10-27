@@ -17,6 +17,11 @@ const CONTROLLER: &str = r#"class FindsController < ApplicationController
     @count = @articles.count
   end
 
+  def pager
+    @paging = find_params
+    render partial: "shared/pager"
+  end
+
   private
 
   def find_params
@@ -86,7 +91,7 @@ pub fn apply(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
         .edit(
             "config/routes.rb",
             "  root \"articles#index\"\n",
-            "  root \"articles#index\"\n  resources :finds, only: [:index]\n  get \"/finds/page/:page\" => \"finds#index\"\n",
+            "  root \"articles#index\"\n  resources :finds, only: [:index]\n  get \"/finds/page/:page\" => \"finds#index\"\n  get \"/finds/pager\" => \"finds#pager\"\n",
         )
         .write("app/controllers/finds_controller.rb", CONTROLLER)
         .write("app/models/finder.rb", FINDER)
