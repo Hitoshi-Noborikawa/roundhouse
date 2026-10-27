@@ -83,11 +83,12 @@ const STI_RELATION_METHODS: &[&str] = &[
     "pick", "select", "none", "find_each", "find",
 ];
 
-/// Find-or-build on a subclass: scoped like the relation methods, but the
-/// record it may build carries the scope's `type`, so it's filtered on
-/// the subclass's own name, never a list (`where` seeds a new record
-/// from an equality only). A matching row of a deeper subclass isn't
-/// found there, where Rails would find it.
+/// Find-or-build on a subclass: Rails' `find_by(attrs) || create(attrs)`,
+/// looked up in the subclass's whole scope (a deeper subclass's row is
+/// found) and built as the subclass ([`seeding_lookup`]). An argument
+/// that isn't a literal Hash of pure reads is filtered on the subclass's
+/// own name instead, since `where` seeds a new record's `type` from an
+/// equality only: there a deeper subclass's row isn't found.
 const STI_SEEDING_METHODS: &[&str] = &["find_or_create_by", "find_or_create_by!", "find_or_initialize_by"];
 
 /// Construction on a subclass, which has to STAMP the type column
@@ -515,7 +516,7 @@ fn rewrite(
     let span = expr.span;
     let str_lit = |value: &str| Expr::new(span, ExprNode::Lit { value: Literal::Str { value: value.to_string() } });
     let type_names = sti.names.get(&named).map(Vec::as_slice).unwrap_or_default();
-    let type_value = if seeding || type_names.len() <= 1 {
+    let lookup_value = if type_names.len() <= 1 {
         str_lit(named.0.as_str())
     } else {
         Expr::new(
@@ -523,6 +524,18 @@ fn rewrite(
             ExprNode::Array { elements: type_names.iter().map(|n| str_lit(n)).collect(), style: Default::default() },
         )
     };
+    // A find-or-build with a literal Hash of pure reads is Rails' own
+    // definition, `find_by(attrs) || create(attrs)`: the lookup is the
+    // subclass's whole scope, descendants included, and the record it
+    // builds is the subclass, stamped with its name. Anything else is
+    // filtered on the subclass's own name, so `where` seeds its `type`.
+    if seeding {
+        if let Some(found) = seeding_lookup(expr, base, &named, lookup_value.clone()) {
+            *expr = found;
+            return;
+        }
+    }
+    let type_value = if seeding { str_lit(named.0.as_str()) } else { lookup_value };
     let scoped = Expr::new(
         span,
         ExprNode::Send {
@@ -564,6 +577,58 @@ fn rewrite(
         span,
         ExprNode::Send { recv: Some(scoped), method, args, block, parenthesized },
     );
+}
+
+/// `Feature.find_or_create_by(title: "s")` ->
+/// `Article.where(type: ["Feature", "SpecialFeature"]).find_by(title: "s")
+/// || Feature.create(title: "s", type: "Feature")`, and `create!` / `new`
+/// for `find_or_create_by!` / `find_or_initialize_by`. The block, if any,
+/// goes to the constructor, as Rails passes it to `create`. None unless
+/// the one argument is a literal Hash of pure reads: it is evaluated
+/// twice.
+fn seeding_lookup(expr: &Expr, base: &ClassId, sub: &ClassId, lookup_value: Expr) -> Option<Expr> {
+    let ExprNode::Send { method, args, block, parenthesized, .. } = &*expr.node else { return None };
+    let [attrs] = args.as_slice() else { return None };
+    let ExprNode::Hash { entries, .. } = &*attrs.node else { return None };
+    if !entries.iter().all(|(k, v)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } }) && super::case_lambda::is_pure_read(v)
+    }) {
+        return None;
+    }
+    let constructor = match method.as_str() {
+        "find_or_create_by" => "create",
+        "find_or_create_by!" => "create!",
+        _ => "new",
+    };
+    let span = expr.span;
+    let send = |recv: Expr, method: &str, args: Vec<Expr>, block: Option<Expr>| {
+        Expr::new(
+            span,
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block, parenthesized: *parenthesized },
+        )
+    };
+    let scope = send(
+        class_const(base),
+        "where",
+        vec![Expr::new(
+            span,
+            ExprNode::Hash {
+                entries: vec![(
+                    Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(INHERITANCE_COLUMN) } }),
+                    lookup_value,
+                )],
+                kwargs: true,
+            },
+        )],
+        None,
+    );
+    let found = send(scope, "find_by", vec![attrs.clone()], None);
+    let mut built = send(class_const(sub), constructor, vec![attrs.clone()], block.clone());
+    stamp_type(&mut built, sub);
+    Some(Expr::new(
+        span,
+        ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, surface: Default::default(), left: found, right: built },
+    ))
 }
 
 /// `room.becomes!(Rooms::Open)` -> `Rooms::Open.becomes_from(room)`.

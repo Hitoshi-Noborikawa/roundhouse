@@ -70,4 +70,9 @@ class StiProbe
   def self.pick_title
     Feature.order(:id).pick(:title)
   end
+
+  def self.found_deeper
+    record = Feature.find_or_create_by(title: "s")
+    [record.class.name, record.id]
+  end
 end

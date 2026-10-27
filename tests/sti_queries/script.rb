@@ -19,4 +19,6 @@ check("select", StiProbe.select_titles, ["f", "s"])
 check("none", StiProbe.none_count, 0)
 check("exists?, the base's row", StiProbe.exists(a), false)
 check("pick", StiProbe.pick_title, "f")
+check("find_or_create_by finds a deeper subclass's row", StiProbe.found_deeper, ["SpecialFeature", s])
+check("find_or_create_by adds no row for it", StiProbe.counts, [3, 2, 1])
 puts "sti queries passed"
