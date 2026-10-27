@@ -2622,6 +2622,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             ExprNode::While { cond, body, until_form: true }
         }
+        n if n.as_for_node().is_some() => ingest_for(&n.as_for_node().unwrap(), span, file)?,
         n if n.as_range_node().is_some() => {
             let r = n.as_range_node().unwrap();
             let begin = match r.left() {
@@ -3363,6 +3364,9 @@ fn collect_interp_parts(
             })?;
             let inner = ingest_expr(&stmts.as_node(), file)?;
             out.push(InterpPart::Expr { expr: inner });
+        } else if let Some(ev) = part.as_embedded_variable_node() {
+            // `"#@name"`, `"#@@count"`, `"#$stdout"`: the same as `#{…}` around the variable.
+            out.push(InterpPart::Expr { expr: ingest_expr(&ev.variable(), file)? });
         } else if let Some(nested) = part.as_interpolated_string_node() {
             // Adjacent / line-continued string concatenation — flatten
             // the inner parts into the outer list. The inner's quote
@@ -3828,6 +3832,116 @@ fn try_ingest_method_ref(
 /// evaluates to nil. A `next` or `redo` aimed at the loop itself is
 /// refused: in the source `next` goes to the test, and here it would
 /// skip it.
+/// `for x in coll; body; end` as a `while`, not `coll.each { |x| … }`:
+/// a `for` opens no scope, so `x` and the locals its body assigns stay
+/// visible after the loop, as they do in a `while`. The value is `coll`.
+///
+///   __for = coll.to_a; __i = 0
+///   while __i < __for.length; x = __for[__i]; __i += 1; body; end
+///
+/// A range literal counts with `succ` instead of building the Array:
+///
+///   __i = a; __e = b
+///   while __i <= __e; x = __i; __i = __i.succ; body; end
+///
+/// The index moves before the body so `next` cannot skip it.
+fn ingest_for(f: &ruby_prism::ForNode<'_>, span: Span, file: &str) -> IngestResult<ExprNode> {
+    // Not `break value`: the desugar answers the collection after the loop, so the value would be lost.
+    if f.statements().is_some_and(|body| breaks_with_value(&body.as_node())) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "`break` with a value inside a `for` loop".into(),
+        });
+    }
+    let loc = f.as_node().location();
+    let local = |stem: &str| fresh_reserved_local(&loc, &format!("{stem}_{}", loc.start_offset()));
+    let (coll, index) = (local("__for"), local("__for_i"));
+    let var = |name: &Symbol| Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+    let assign = |target: crate::expr::LValue, value: Expr| Expr::new(span, ExprNode::Assign { target, value });
+    let local_target = |name: &Symbol| crate::expr::LValue::Var { id: crate::ident::VarId(0), name: name.clone() };
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(span, ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true })
+    };
+    let int = |value: i64| Expr::new(span, ExprNode::Lit { value: Literal::Int { value } });
+    // `x` or `a, b`: the element is written to the loop's target as an assignment would.
+    let bind = |element: Expr| -> IngestResult<Vec<Expr>> {
+        let target = f.index();
+        match target.as_multi_target_node() {
+            Some(mt) => destructure_target(&mt, element, span, file),
+            None => Ok(vec![assign(multi_write_target(&target, file)?, element)]),
+        }
+    };
+    let body = match f.statements() {
+        Some(s) => ingest_expr(&s.as_node(), file)?,
+        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+    };
+    let collection = f.collection();
+    let range = collection
+        .as_range_node()
+        .or_else(|| collection.as_parentheses_node().and_then(|p| p.body()).and_then(|b| {
+            b.as_statements_node().and_then(|st| st.body().iter().next()).and_then(|n| n.as_range_node())
+        }));
+    let mut exprs: Vec<Expr> = Vec::new();
+    // The range's value, from its ends evaluated once.
+    let mut counted_range: Option<Expr> = None;
+    let (cond, mut step) = match range.filter(|r| r.left().is_some()) {
+        Some(r) => {
+            let begin_local = local("__for_begin");
+            exprs.push(assign(local_target(&begin_local), ingest_expr(&r.left().unwrap(), file)?));
+            exprs.push(assign(local_target(&index), var(&begin_local)));
+            let (cond, end) = match r.right() {
+                Some(end) => {
+                    let end_local = local("__for_end");
+                    exprs.push(assign(local_target(&end_local), ingest_expr(&end, file)?));
+                    (send(var(&index), if r.is_exclude_end() { "<" } else { "<=" }, vec![var(&end_local)]), Some(var(&end_local)))
+                }
+                None => (Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: true } }), None),
+            };
+            counted_range = Some(Expr::new(
+                span,
+                ExprNode::Range { begin: Some(var(&begin_local)), end, exclusive: r.is_exclude_end() },
+            ));
+            let mut step = bind(var(&index))?;
+            step.push(assign(local_target(&index), send(var(&index), "succ", vec![])));
+            (cond, step)
+        }
+        None => {
+            exprs.push(assign(local_target(&coll), send(ingest_expr(&collection, file)?, "to_a", vec![])));
+            exprs.push(assign(local_target(&index), int(0)));
+            let cond = send(var(&index), "<", vec![send(var(&coll), "length", vec![])]);
+            let mut step = bind(send(var(&coll), "[]", vec![var(&index)]))?;
+            step.push(assign(local_target(&index), send(var(&index), "+", vec![int(1)])));
+            (cond, step)
+        }
+    };
+    step.push(body);
+    exprs.push(Expr::new(
+        span,
+        ExprNode::While { cond, body: Expr::new(span, ExprNode::Seq { exprs: step }), until_form: false },
+    ));
+    exprs.push(counted_range.unwrap_or_else(|| var(&coll)));
+    Ok(ExprNode::Seq { exprs })
+}
+
+/// A `break value` that leaves this loop (not one of a nested block or loop).
+fn breaks_with_value(node: &Node<'_>) -> bool {
+    struct Breaks(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Breaks {
+        fn visit_break_node(&mut self, node: &ruby_prism::BreakNode<'pr>) {
+            self.0 |= node.arguments().is_some();
+        }
+        fn visit_block_node(&mut self, _: &ruby_prism::BlockNode<'pr>) {}
+        fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+        fn visit_while_node(&mut self, _: &ruby_prism::WhileNode<'pr>) {}
+        fn visit_until_node(&mut self, _: &ruby_prism::UntilNode<'pr>) {}
+        fn visit_for_node(&mut self, _: &ruby_prism::ForNode<'pr>) {}
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+    }
+    let mut breaks = Breaks(false);
+    ruby_prism::Visit::visit(&mut breaks, node);
+    breaks.0
+}
+
 fn do_loop(
     statements: Option<ruby_prism::StatementsNode<'_>>,
     predicate: &Node<'_>,

@@ -84,6 +84,10 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "support/for_loops.rs"]
+mod for_loops_contract;
+#[path = "emit_and_run/for_loops.rs"]
+mod for_loops;
 #[path = "support/auto_source_gem.rs"]
 mod auto_source_gem_contract;
 #[path = "emit_and_run/auto_source_gem.rs"]

@@ -192,6 +192,10 @@ mod stdlib_rnp;
 mod representable_decorator;
 #[path = "spinel_toolchain/representable.rs"]
 mod representable;
+#[path = "support/for_loops.rs"]
+mod for_loops_contract;
+#[path = "spinel_toolchain/for_loops.rs"]
+mod for_loops;
 #[path = "support/auto_source_gem.rs"]
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]
