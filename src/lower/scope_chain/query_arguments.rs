@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param};
 use crate::expr::{Expr, ExprNode, LValue};
@@ -21,8 +21,8 @@ pub(crate) struct QueryArguments<'a> {
 impl<'a> QueryArguments<'a> {
     pub(crate) fn build(app: &'a crate::App) -> Self {
         let mut result = Self {
-            methods: HashMap::new(),
-            queries: HashMap::new(),
+            methods: HashMap::default(),
+            queries: HashMap::default(),
         };
         for model in &app.models {
             for method in model.methods() {
@@ -58,7 +58,7 @@ impl<'a> QueryArguments<'a> {
         loop {
             let mut updates = Vec::new();
             for (key, method) in &result.methods {
-                let mut blocked = HashSet::new();
+                let mut blocked = HashSet::default();
                 walk(method.body, &mut |expr| match &*expr.node {
                     ExprNode::Assign {
                         target: LValue::Var { name, .. },

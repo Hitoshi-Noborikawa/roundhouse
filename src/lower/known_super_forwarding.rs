@@ -48,7 +48,7 @@ const KNOWN: &[(&str, &str, &[&str])] = &[
 pub fn restate(app: &mut App) {
     let sole = app.sole_includer_of_modules();
     // The first library class of each name answers for it (a reopen is its own entry).
-    let mut first: std::collections::HashMap<&ClassId, usize> = Default::default();
+    let mut first: crate::det::HashMap<&ClassId, usize> = Default::default();
     for (i, lc) in app.library_classes.iter().enumerate() {
         first.entry(&lc.name).or_insert(i);
     }

@@ -5,7 +5,7 @@
 //! machinery doesn't apply; we just collect methods and `include`
 //! directives.
 
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 use ruby_prism::{parse, Node};
@@ -215,9 +215,12 @@ fn ingest_library_classes_impl(
     let mut factories: Vec<LibraryClass> = made.into_iter().map(|(_, c)| c).collect();
     if !file_constants.is_empty() {
         // A Class.new-only file with admitted factories: hoist onto the
-        // first factory. A file with only refused factories (or bare
-        // constants and no class) still has nowhere to put them — same
-        // drop as before this tip for that shape.
+        // first factory. Refuse when there is no host, or when the hoist
+        // would put a constant where another factory/class cannot read it
+        // or where its value names a class defined after the host —
+        // emitting those shapes claims a program that NameErrors at load
+        // or call time (invariant 6).
+        super::file_constant_hoist::ensure_safe(file, &file_constants, &out, &factories)?;
         if let Some(host) = out.first_mut().or_else(|| factories.first_mut()) {
             let mut consts = file_constants;
             consts.extend(std::mem::take(&mut host.constants));
@@ -807,8 +810,8 @@ pub(super) fn literal_sorbet_members(
     if members.len() != statements.len() {
         return None;
     }
-    let mut names = HashSet::new();
-    let mut serialized = HashSet::new();
+    let mut names = HashSet::default();
+    let mut serialized = HashSet::default();
     members.into_iter().map(|member| {
         if !names.insert(member.name.clone()) {
             return None;
@@ -1148,6 +1151,9 @@ struct SorbetStructMember {
     /// `factory: -> { … }`'s body, which Ruby evaluates per call just
     /// as sorbet evaluates the factory per instance.
     default: Option<Expr>,
+    /// The type is `T.nilable(…)`: sorbet makes such a prop optional,
+    /// and an omitted one is nil.
+    nilable: bool,
 }
 
 /// `T::Struct` and its variants in superclass position. `T::Struct` is
@@ -1187,9 +1193,18 @@ fn sorbet_struct_members(body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<
         }) else {
             continue;
         };
-        // The type is the second argument and belongs to the analyzer,
-        // not to the emit: `ingest::sorbet_sig` has already read it.
-        let _ty = args.next();
+        // The type belongs to the analyzer, not to the emit:
+        // `ingest::sorbet_sig` has already read it. Only whether it is
+        // `T.nilable(…)` matters here, because that makes the keyword
+        // optional.
+        let nilable = args.next().is_some_and(|ty| {
+            ty.as_call_node().is_some_and(|c| {
+                c.name().as_slice() == b"nilable"
+                    && c.receiver()
+                        .and_then(|r| constant_path_of(&r))
+                        .is_some_and(|path| path == vec!["T".to_string()])
+            })
+        });
         let mut default = None;
         for arg in args {
             let Some(hash) = arg.as_keyword_hash_node() else { continue };
@@ -1213,7 +1228,7 @@ fn sorbet_struct_members(body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<
                 }
             }
         }
-        members.push(SorbetStructMember { name, writable, default });
+        members.push(SorbetStructMember { name, writable, default, nilable });
     }
     members
 }
@@ -1237,13 +1252,25 @@ fn synth_sorbet_struct_methods(
             methods.push(synth_attr_writer(owner, &member.name, MethodReceiver::Instance));
         }
     }
-    let params: Vec<Param> = members
+    let hash_prologue = if with_constructor { struct_hash_prologue(members) } else { None };
+    let params: Vec<Param> = hash_prologue
         .iter()
-        .map(|m| Param::keyword(m.name.clone(), m.default.clone()))
-        .collect();
-    let assigns: Vec<Expr> = members
-        .iter()
+        .map(|(param, _)| Param::with_default(Symbol::from(param.as_str()), Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })))
+        .chain(members.iter()
         .map(|m| {
+            // A `T.nilable` prop with no default is optional and nil
+            // when omitted, as sorbet's generated constructor has it.
+            let default = m.default.clone().or_else(|| {
+                m.nilable
+                    .then(|| Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }))
+            });
+            Param::keyword(m.name.clone(), default)
+        }))
+        .collect();
+    let assigns: Vec<Expr> = hash_prologue
+        .into_iter()
+        .map(|(_, prologue)| prologue)
+        .chain(members.iter().map(|m| {
             Expr::new(
                 Span::synthetic(),
                 ExprNode::Assign {
@@ -1254,7 +1281,7 @@ fn synth_sorbet_struct_methods(
                     ),
                 },
             )
-        })
+        }))
         .collect();
     // A base that STAYS brings its own constructor. `T::Struct` is
     // lowered away, so the class would have none — but a gem base
@@ -1287,6 +1314,51 @@ fn synth_sorbet_struct_methods(
         methods.push(synth_struct_equality(owner, members));
     }
     methods
+}
+
+/// sorbet's `T::Struct#initialize(hash = {})` takes the props as one
+/// positional Hash as well as keywords, and apps build one from a
+/// config Hash (`RequiredAccess.new(access)`). The keyword
+/// constructor rejects that as `given 1, expected 0`.
+///
+/// Where every prop is optional (nilable or defaulted) the constructor
+/// also takes a leading optional Hash and each prop reads from it first;
+/// a key that names no prop raises, as sorbet's does. A struct with a
+/// required prop keeps keywords only: a Hash cannot be told apart from
+/// missing keywords there without a `new` override, and a class that
+/// declares `new` stops being typed as its own instance.
+///
+/// Known gap: a `factory:` default still runs when the Hash supplies its
+/// prop (the keyword default is evaluated before the body), where sorbet
+/// skips it. The value is discarded; only a factory's side effects show.
+///
+/// Returns the Hash parameter's name, `attributes_hash` unless a prop
+/// already has it, and the prologue.
+fn struct_hash_prologue(members: &[SorbetStructMember]) -> Option<(String, Expr)> {
+    if members.is_empty() || !members.iter().all(|m| m.default.is_some() || m.nilable) {
+        return None;
+    }
+    let mut param = String::from("attributes_hash");
+    while members.iter().any(|m| m.name.as_str() == param) {
+        param.push('_');
+    }
+    let declared: Vec<String> = members.iter().map(|m| format!(":{}", m.name.as_str())).collect();
+    let mut source = format!(
+        "unless {param}.nil?\n  {param} = {param}.to_h.transform_keys(&:to_sym)\n  \
+         unknown = {param}.keys - [{}]\n  \
+         raise ArgumentError, \"Unrecognized properties: #{{unknown.join(\", \")}}\" unless unknown.empty?\n",
+        declared.join(", ")
+    );
+    for member in members {
+        let name = member.name.as_str();
+        source.push_str(&format!("  {name} = {param}.fetch(:{name}, {name})\n"));
+    }
+    source.push_str("end\n");
+    let parsed = ruby_prism::parse(source.as_bytes());
+    let node = parsed.node();
+    let program = node.as_program_node()?;
+    let stmt = program.statements().body().iter().next()?;
+    Some((param, ingest_expr(&stmt, "(sorbet struct)").ok()?))
 }
 
 /// `include T::Struct::ActsAsComparable` gives a struct value equality.
@@ -2173,7 +2245,7 @@ fn walk_decl_body_with_visibility<'pr>(
     visibility: &Visibility,
 ) -> IngestResult<DeclBody> {
     let mut out = DeclBody::default();
-    let mut class_attributes: HashSet<Symbol> = HashSet::new();
+    let mut class_attributes: HashSet<Symbol> = HashSet::default();
     let mut class_attr_defaults: IndexMap<Symbol, Expr> = IndexMap::new();
     // `module_function` (called bare inside a module body) marks every
     // subsequent direct `def` as a module-function — both an instance
@@ -2290,7 +2362,7 @@ fn walk_decl_body_with_visibility<'pr>(
             .collect()
     });
     let concern_class_defs: Option<HashSet<String>> = concern_direct_defs.as_ref().map(|_| {
-        let mut names = HashSet::new();
+        let mut names = HashSet::default();
         for stmt in &statements {
             if let Some(m) = stmt.as_module_node()
                 && module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])
@@ -3758,10 +3830,10 @@ fn declares_abstract_class(class: &ruby_prism::ClassNode<'_>) -> bool {
 /// the pre-pass collects, so a chain of any depth resolves.
 #[derive(Debug, Default, Clone)]
 pub struct ModelBases {
-    names: std::collections::HashSet<String>,
+    names: crate::det::HashSet<String>,
     /// Tableless models a subclass extends on the model path (see
     /// `record_tableless`).
-    tableless: std::collections::HashSet<String>,
+    tableless: crate::det::HashSet<String>,
     /// Every `class X < Y` under `app/models`: the child, its lexical
     /// scope, the parent as written, and whether the child writes its
     /// own `initialize`.
@@ -3770,7 +3842,7 @@ pub struct ModelBases {
 
 impl ModelBases {
     pub fn new() -> Self {
-        let mut names = std::collections::HashSet::new();
+        let mut names = crate::det::HashSet::default();
         names.insert("ApplicationRecord".to_string());
         names.insert("ActiveRecord::Base".to_string());
         // Rails' Action Text abstract base (`ActionText::Record <
@@ -4383,7 +4455,7 @@ pub fn ingest_concern_class_method_spans(
     // Framework identity must not depend on which declarations survive
     // library-shape ingestion. This walk records binding barriers only;
     // it neither evaluates constants nor executes class bodies.
-    let mut shadows = HashSet::new();
+    let mut shadows = HashSet::default();
     framework_shadow_scopes(&root, &mut shadows);
     (out, shadows.into_iter().map(|scope| ClassId(Symbol::from(scope.join("::")))).collect())
 }
@@ -5288,7 +5360,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
 /// that includes `T::Props` — flattening that by hand at the sidecar
 /// would be the app asserting something it did not write.
 fn includes_t_props(id: &ClassId, includes: &HashMap<ClassId, Vec<ClassId>>) -> bool {
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::default();
     let mut stack = vec![id.clone()];
     while let Some(current) = stack.pop() {
         if !seen.insert(current.0.as_str().to_string()) {
@@ -5326,8 +5398,15 @@ fn struct_member_from_expr(call: &Expr) -> Option<SorbetStructMember> {
         ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
         _ => return None,
     };
-    // The type is the second argument and belongs to the analyzer.
-    let _ty = args.next();
+    // The type belongs to the analyzer; only `T.nilable(…)` matters here.
+    let nilable = args.next().is_some_and(|ty| {
+        matches!(
+            &*ty.node,
+            ExprNode::Send { recv: Some(r), method, .. }
+                if method.as_str() == "nilable"
+                    && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "T")
+        )
+    });
     let mut default = None;
     for arg in args {
         let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
@@ -5355,7 +5434,7 @@ fn struct_member_from_expr(call: &Expr) -> Option<SorbetStructMember> {
             }
         }
     }
-    Some(SorbetStructMember { name, writable, default })
+    Some(SorbetStructMember { name, writable, default, nilable })
 }
 
 /// Expand `const` / `prop` under a base whose ancestry a sidecar says

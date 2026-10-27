@@ -5,7 +5,7 @@
 //! raises `NameError` while defining it. Cycles cannot be Ruby either; they
 //! keep source order.
 
-use std::collections::HashSet;
+use crate::det::HashSet;
 
 /// Topologically order `items` by dependency names that also appear in the set.
 ///
@@ -20,7 +20,7 @@ pub fn order_by_deps<T>(
 ) -> Vec<T> {
     let names: HashSet<String> = pending.iter().map(|item| name_of(item).to_string()).collect();
     let mut ordered = Vec::with_capacity(pending.len());
-    let mut placed = HashSet::new();
+    let mut placed = HashSet::default();
     while !pending.is_empty() {
         let before = pending.len();
         let mut deferred = Vec::new();

@@ -26,7 +26,7 @@ use crate::ident::Symbol;
 use crate::App;
 
 pub(super) fn inherit_tableless_parents(app: &mut App) {
-    let index: std::collections::HashMap<String, usize> =
+    let index: crate::det::HashMap<String, usize> =
         app.models.iter().enumerate().map(|(i, m)| (m.name.0.as_str().to_string(), i)).collect();
     let resolved = resolved_parents(app, &index);
     let tableless = tableless_flags(app, &resolved);
@@ -73,7 +73,7 @@ pub(super) fn inherit_tableless_parents(app: &mut App) {
 /// emitted subclass is still `< Parent`. A tableless parent is
 /// `inherit_tableless_parents`' own.
 pub(super) fn inherit_abstract_parent_validations(app: &mut App) {
-    let index: std::collections::HashMap<String, usize> =
+    let index: crate::det::HashMap<String, usize> =
         app.models.iter().enumerate().map(|(i, m)| (m.name.0.as_str().to_string(), i)).collect();
     let resolved = resolved_parents(app, &index);
     // Every tableless parent, a chain's middle classes too: their
@@ -111,7 +111,7 @@ pub(super) fn inherit_abstract_parent_validations(app: &mut App) {
 }
 
 /// Each model's parent among the app's models.
-fn resolved_parents(app: &App, index: &std::collections::HashMap<String, usize>) -> Vec<Option<usize>> {
+fn resolved_parents(app: &App, index: &crate::det::HashMap<String, usize>) -> Vec<Option<usize>> {
     app.models.iter().map(|m| resolve_parent(index, m.name.0.as_str(), m.parent.as_ref()?.0.as_str())).collect()
 }
 
@@ -147,7 +147,7 @@ fn inherited_validation(item: &ModelBodyItem) -> bool {
 
 /// `parent` as written in `child`'s file, resolved the way Ruby's
 /// constant lookup walks the child's enclosing modules.
-fn resolve_parent(index: &std::collections::HashMap<String, usize>, child: &str, parent: &str) -> Option<usize> {
+fn resolve_parent(index: &crate::det::HashMap<String, usize>, child: &str, parent: &str) -> Option<usize> {
     if !parent.contains("::") {
         let mut segs: Vec<&str> = child.split("::").collect();
         segs.pop();

@@ -105,6 +105,9 @@ module Db
   end
 end
 
+# boot.rb loads runtime/redis_cable.rb first; on a tree that keeps
+# broadcasts in process that is this no-op facade.
+load "#{root}/runtime/spinel/redis_cable.rb"
 load "#{root}/runtime/spinel/action_cable.rb"   # requires cable.rb
 
 puts "vendor ruby #{RUBY_VERSION}"

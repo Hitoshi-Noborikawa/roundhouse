@@ -12,9 +12,17 @@
 //! some other path starts with it. There's no separate directory entry.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
+use crate::det::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// In-memory path → bytes tree handed to [`MapVfs`] / `ingest_app_from_tree`.
+///
+/// Stays on std's `RandomState` hasher: the tree is public input that is only
+/// looked up, never walked for emit/fixpoint order, and tests/wasm build it
+/// with std. Library maps use [`crate::det::HashMap`] instead.
+pub type FileTree = std::collections::HashMap<PathBuf, Vec<u8>>;
 
 /// Operations the ingester needs from the underlying source tree.
 pub trait Vfs {
@@ -85,11 +93,11 @@ impl Vfs for FsVfs {
 /// are inferred from path prefixes; there are no explicit directory
 /// entries. Used by the wasm transpile entry point.
 pub struct MapVfs {
-    files: HashMap<PathBuf, Vec<u8>>,
+    files: FileTree,
 }
 
 impl MapVfs {
-    pub fn new(files: HashMap<PathBuf, Vec<u8>>) -> Self {
+    pub fn new(files: FileTree) -> Self {
         Self { files }
     }
 }
@@ -174,7 +182,7 @@ struct Facts {
 
 impl<'a, V: Vfs + ?Sized> CachedVfs<'a, V> {
     pub fn new(inner: &'a V) -> Self {
-        Self { inner, facts: RefCell::new(HashMap::new()) }
+        Self { inner, facts: RefCell::new(HashMap::default()) }
     }
 
     fn fact(
@@ -246,7 +254,7 @@ impl<'a, V: Vfs + ?Sized> ScopedVfs<'a, V> {
     /// the walker will ask for them (absolute under the same root).
     pub fn new(inner: &'a V, visible: impl IntoIterator<Item = PathBuf>) -> Self {
         let files: HashSet<PathBuf> = visible.into_iter().collect();
-        let mut dirs = HashSet::new();
+        let mut dirs = HashSet::default();
         for file in &files {
             let mut current = file.parent();
             while let Some(dir) = current {
@@ -343,7 +351,8 @@ mod tests {
     }
 
     fn counting() -> Counting {
-        let files = HashMap::from([(PathBuf::from("/app/lib/a.rb"), b"A = 1".to_vec())]);
+        // MapVfs input is FileTree (std); CachedVfs::facts uses det.
+        let files = FileTree::from_iter([(PathBuf::from("/app/lib/a.rb"), b"A = 1".to_vec())]);
         Counting { inner: MapVfs::new(files), exists: Cell::new(0), is_dir: Cell::new(0) }
     }
 

@@ -707,7 +707,7 @@ pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<()
 /// it to readdir.
 fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), String> {
     use ruby_rbs::node::{MethodDefinitionKind, Node, parse};
-    use std::collections::HashMap;
+    use crate::det::HashMap;
     struct Decl {
         file: usize,
         span: std::ops::Range<usize>,
@@ -838,7 +838,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         Ok(())
     }
     // (qualified class, receiver, method) -> declarations from every runtime .rbs.
-    let mut decls: HashMap<(String, &'static str, String), Vec<Decl>> = HashMap::new();
+    let mut decls: HashMap<(String, &'static str, String), Vec<Decl>> = HashMap::default();
     for (fi, (path, text)) in files.iter().enumerate() {
         if !path.ends_with(".rbs")
             || !(path.starts_with("runtime/") || path.starts_with("sig/runtime/"))
@@ -863,7 +863,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         let reopen = rest != primary;
         (spinel as u8) * 2 + reopen as u8
     };
-    let mut drop: HashMap<usize, Vec<std::ops::Range<usize>>> = HashMap::new();
+    let mut drop: HashMap<usize, Vec<std::ops::Range<usize>>> = HashMap::default();
     let mut undecided = Vec::new();
     for ((class, receiver, method), ds) in &decls {
         let first = &ds[0].sig;
@@ -1923,7 +1923,7 @@ fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
         return;
     }
     use crate::expr::{ExprNode, LValue};
-    fn writes(expr: &crate::expr::Expr, out: &mut std::collections::HashSet<String>) {
+    fn writes(expr: &crate::expr::Expr, out: &mut crate::det::HashSet<String>) {
         match &*expr.node {
             ExprNode::Assign { target: LValue::Ivar { name }, .. } | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
                 out.insert(name.as_str().to_string());
@@ -1939,18 +1939,18 @@ fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
         }
         expr.node.for_each_child(&mut |child| writes(child, out));
     }
-    let own: std::collections::HashMap<&crate::ident::ClassId, std::collections::HashSet<String>> = app
+    let own: crate::det::HashMap<&crate::ident::ClassId, crate::det::HashSet<String>> = app
         .controllers
         .iter()
         .map(|c| {
-            let mut out = std::collections::HashSet::new();
+            let mut out = crate::det::HashSet::default();
             for action in c.actions() {
                 writes(&action.body, &mut out);
             }
             (&c.name, out)
         })
         .collect();
-    let parent_of: std::collections::HashMap<&crate::ident::ClassId, &crate::ident::ClassId> =
+    let parent_of: crate::det::HashMap<&crate::ident::ClassId, &crate::ident::ClassId> =
         app.controllers.iter().filter_map(|c| c.parent.as_ref().map(|p| (&c.name, p))).collect();
     let chain = |start: &crate::ident::ClassId| {
         let mut out = vec![start.clone()];
@@ -1965,13 +1965,13 @@ fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
         out
     };
     for controller in &app.controllers {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen: crate::det::HashSet<String> = crate::det::HashSet::default();
         for id in chain(&controller.name) {
             if let Some(w) = own.get(&id) {
                 seen.extend(w.iter().cloned());
             }
         }
-        let below: std::collections::HashSet<&String> = app
+        let below: crate::det::HashSet<&String> = app
             .controllers
             .iter()
             .filter(|d| d.name != controller.name && chain(&d.name).contains(&controller.name))
@@ -1982,7 +1982,7 @@ fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
         if below.is_empty() {
             continue;
         }
-        fn reads(expr: &crate::expr::Expr, below: &std::collections::HashSet<&String>, target: BuildTarget) {
+        fn reads(expr: &crate::expr::Expr, below: &crate::det::HashSet<&String>, target: BuildTarget) {
             if let ExprNode::Ivar { name } = &*expr.node
                 && below.contains(&name.as_str().to_string())
             {
@@ -2057,7 +2057,7 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
     let Some(lock) = app.gem_lock.as_ref() else { return };
     let census = crate::gems::GemCensus::of(lock);
     let carried = crate::gems::native_extension_gem_namespaces(app);
-    let unknown: std::collections::HashSet<&str> = census
+    let unknown: crate::det::HashSet<&str> = census
         .unknown()
         .filter(|gem| !lock.is_from_git(&gem.name) && !app.extensions.is_rails_dependent(&gem.name))
         .filter(|gem| !carried.contains(&crate::gems::namespace_of(&gem.name)))
@@ -2091,7 +2091,7 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
 /// Every constant the app's classes name that the app does not define itself:
 /// superclasses, and each `Const` in an emitted body.
 fn for_each_app_constant(app: &App, f: &mut dyn FnMut(crate::span::Span, &str)) {
-    let own: std::collections::HashSet<&str> = app
+    let own: crate::det::HashSet<&str> = app
         .models
         .iter()
         .map(|m| m.name.0.as_str())
@@ -2172,7 +2172,7 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
         return;
     }
     // (model, reader) of each collection association: its reader answers a CollectionProxy.
-    let proxies: std::collections::HashSet<(&str, &str)> = app
+    let proxies: crate::det::HashSet<(&str, &str)> = app
         .models
         .iter()
         .flat_map(|m| {
@@ -2185,10 +2185,10 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
             })
         })
         .collect();
-    let models: std::collections::HashSet<&str> = app.models.iter().map(|m| m.name.0.as_str()).collect();
+    let models: crate::det::HashSet<&str> = app.models.iter().map(|m| m.name.0.as_str()).collect();
     struct Records<'a> {
-        proxies: std::collections::HashSet<(&'a str, &'a str)>,
-        models: std::collections::HashSet<&'a str>,
+        proxies: crate::det::HashSet<(&'a str, &'a str)>,
+        models: crate::det::HashSet<&'a str>,
     }
     /// A query chain off a model class or a collection reader (`Post.where(…)`,
     /// `product.subscribers.where(…)`): a Relation or CollectionProxy that types as
@@ -2503,7 +2503,7 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
             .chain(c.include_spans.iter().map(|span| span.file))
             .find(|file| file.0 != 0)
     };
-    let dropped: std::collections::HashSet<String> = app
+    let dropped: crate::det::HashSet<String> = app
         .library_classes
         .iter()
         .filter(|c| file_of_class(c).is_some_and(mounted))
@@ -2784,7 +2784,7 @@ fn target_files_inner(
             if declarations.iter().all(|lc| !lc.has_source_ivar_initializers()) {
                 continue;
             }
-            let mut methods = std::collections::HashSet::new();
+            let mut methods = crate::det::HashSet::default();
             for m in declarations.iter().flat_map(|lc| &lc.methods) {
                 if !methods.insert((m.receiver == crate::dialect::MethodReceiver::Class, &m.name)) {
                     return Err(format!(
@@ -2842,7 +2842,7 @@ fn target_files_inner(
         target,
         BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby
     ) {
-        let mut synth_shakeable: std::collections::HashSet<String> = app
+        let mut synth_shakeable: crate::det::HashSet<String> = app
             .models
             .iter()
             .flat_map(|m| app.schema.tables.get(&m.table.0).into_iter()
@@ -3969,6 +3969,26 @@ fn ruby_family_runtime_files(
     } else {
         String::new()
     };
+    // The Redis broadcast transport: redis-rb has no `Redis.pubsub`, and
+    // a plain connection subscribes there; the gem is required at the
+    // first connect, as for the push. Broadcasts' transport on this lane
+    // takes the String or Hash `Cable::Registry` would, so it encodes
+    // here what spinel's `Cable.publish_raw` is handed encoded.
+    let redis_cable = if cable_redis(app).is_some() {
+        let real = crate::runtime_files::read_to_string(REDIS_CABLE)?;
+        const AT_LOAD: &str = "require \"redis\"\n";
+        const SUBSCRIBER: &str = "    Redis.pubsub(url: url)\n";
+        if !real.contains(AT_LOAD) || !real.contains(SUBSCRIBER) {
+            return Err(format!("{REDIS_CABLE}: the require or the subscriber line moved"));
+        }
+        let mut real = real
+            .replacen(AT_LOAD, "# `require \"redis\"` is at the first connect on this lane.\n", 1)
+            .replacen(SUBSCRIBER, "    require \"redis\"\n    Redis.new(url: url)\n", 1);
+        real.push_str(REDIS_CABLE_RUBY_TRANSPORT);
+        real
+    } else {
+        String::new()
+    };
     for (path, content) in files.iter_mut() {
         if path == "runtime/ipaddr.rb" {
             *content = IPADDR_STDLIB.to_string();
@@ -4080,6 +4100,9 @@ fn ruby_family_runtime_files(
         }
         if path == "runtime/sidekiq_worker.rb" && sidekiq {
             *content = sidekiq_worker.clone();
+        }
+        if path == "runtime/redis_cable.rb" && !redis_cable.is_empty() {
+            *content = redis_cable.clone();
         }
         // `TcpSocketStub`: the table as written, and `TCPSocket.open`
         // reopened to consult it — the seam the strict client asks from
@@ -4522,7 +4545,7 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
 /// distinct entry once (`E`), and per site, locale, environment and key
 /// the index of its entry (`T`), so no entry is spelled per locale.
 fn i18n_table_text(app: &App) -> String {
-    let mut index: std::collections::HashMap<&Vec<String>, usize> = std::collections::HashMap::new();
+    let mut index: crate::det::HashMap<&Vec<String>, usize> = crate::det::HashMap::default();
     let mut entries = String::new();
     let mut lines = String::new();
     let table: Vec<(String, Vec<String>)> = app.i18n_table.iter().flat_map(|site| site.records()).collect();
@@ -5325,6 +5348,19 @@ pub(crate) fn needs_redis(app: &App) -> bool {
 /// it sees files, not the `App`.
 const SIDEKIQ_REGISTRY_FLAG: &str = "  def self.sidekiq?\n    true\n  end\n";
 
+/// Broadcasts' transport for the Ruby lanes' tree on the Redis cable:
+/// `Cable::Registry` takes a String or a Hash and encodes it at delivery,
+/// so this encodes it the same way before it is published.
+const REDIS_CABLE_RUBY_TRANSPORT: &str = "
+module RedisCable
+  class Transport
+    def broadcast(stream, message)
+      RedisCable.publish(stream, JsonBuilder.escape_html_entities(JSON.generate(message)))
+    end
+  end
+end
+";
+
 /// The real Redis connection for a tree on `:sidekiq`, swapped in for the
 /// raising façade at `runtime/sidekiq_redis.rb` on every Ruby-family lane.
 const SIDEKIQ_REDIS_CLIENT: &str = "runtime/spinel/sidekiq/sidekiq_redis.rb";
@@ -5372,6 +5408,35 @@ fn worker_defaults_source(defaults: &crate::app::SidekiqWorkerDefaults) -> Strin
     )
 }
 
+/// Whether the tree sends broadcasts through Redis: on `:sidekiq`
+/// (`needs_redis`), with config/cable.yml's production adapter `redis`.
+fn cable_redis(app: &App) -> Option<&crate::app::CableRedisConfig> {
+    if needs_redis(app) { app.cable_redis.as_ref() } else { None }
+}
+
+/// The `JobRegistry.cable_redis?` body for a tree that [`cable_redis`]
+/// is true for. `spin_shape` keys the transport swap on it.
+const CABLE_REDIS_REGISTRY_FLAG: &str = "  def self.cable_redis?\n    true\n  end\n";
+
+/// The real Redis broadcast transport, swapped in for the façade at
+/// `runtime/redis_cable.rb` on every Ruby-family lane for a tree that
+/// [`cable_redis`] is true for.
+const REDIS_CABLE: &str = "runtime/spinel/sidekiq/redis_cable.rb";
+
+/// `JobRegistry`'s broadcast settings: whether they go through Redis,
+/// where, and Action Cable's channel prefix.
+fn cable_redis_source(app: &App) -> String {
+    use crate::emit::ruby::expr::ruby_str_literal;
+    match cable_redis(app) {
+        None => "\n  def self.cable_redis?\n    false\n  end\n\n  def self.cable_redis_url\n    \"\"\n  end\n\n  def self.cable_channel_prefix\n    \"\"\n  end\n".to_string(),
+        Some(config) => format!(
+            "\n{CABLE_REDIS_REGISTRY_FLAG}\n  def self.cable_redis_url\n    {}\n  end\n\n  def self.cable_channel_prefix\n    {}\n  end\n",
+            redis_setting_source(Some(&config.url)),
+            ruby_str_literal(&config.channel_prefix),
+        ),
+    }
+}
+
 fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "  # >>> generated: job-registry\n";
     const TAIL: &str = "  # <<< generated: job-registry\n";
@@ -5386,6 +5451,7 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
         redis_setting_source(app.sidekiq_redis.password.as_ref()),
         worker_defaults_source(&app.sidekiq_worker),
     );
+    let redis = format!("{redis}{}", cable_redis_source(app));
     let generated = format!(
         "{HEAD}{}\n{flag}{redis}{TAIL}",
         crate::lower::job_payload::registry_source(&app.job_plans, needs_redis(app))
@@ -5766,7 +5832,7 @@ enum RequireTarget {
 
 /// Standard libraries in `ingest::app`'s requirable list that Spinel has
 /// no package or native module for: `spinel` warns "is not available in
-/// Spinel" for each, and an app binary's `--require-gate` (from `spin
+/// Spinel" for each, and an app binary's `--strict-require` (from `spin
 /// flags`) makes that fatal. The spinel tree leaves them out, as it did
 /// before app requires were carried; the ruby family loads them all.
 const SPINEL_LACKS: &[&str] = &[
@@ -6251,7 +6317,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     const HARDCODED: &str = "  def self.instantiate_controller(sym)\n    case sym\n    when :articles then ArticlesController.new\n    when :comments then CommentsController.new\n    else ActiveStorage::Routes.instantiate_controller(sym)\n    end\n  end";
 
     let flat = crate::lower::flatten_routes(app);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::det::HashSet::default();
     let current_classes = &app.current_attribute_classes;
     let mut arms = String::new();
     // Same rule as the routes.rb require header: a route may name a
@@ -6259,7 +6325,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     // under `scope module: "rooms"`). Rails resolves lazily and fails
     // only on request; an eager `require_relative` for a missing file
     // takes the whole process down at boot.
-    let defined: std::collections::HashSet<&str> =
+    let defined: crate::det::HashSet<&str> =
         app.controllers.iter().map(|c| c.name.0.as_str()).collect();
     for r in &flat {
         let class = r.controller.0.as_str();
@@ -7549,7 +7615,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // Sidekiq pushes (queue_adapter :sidekiq): the envelope writer and
     // the Redis façade. `spin_shape` drops the façade's sidecar when it
     // swaps in the real client, whose surface is inferred.
-    for name in ["sidekiq_push", "sidekiq_redis", "sidekiq_envelope", "sidekiq_worker"] {
+    for name in ["sidekiq_push", "sidekiq_redis", "sidekiq_envelope", "sidekiq_worker", "redis_cable"] {
         let src = format!("runtime/spinel/{name}.rbs");
         let rbs = crate::runtime_files::read_to_string(&src).map_err(|e| format!("read {src}: {e}"))?;
         files.push((format!("sig/runtime/{name}.rbs"), rbs));
@@ -9077,7 +9143,7 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     };
     let census = crate::gems::GemCensus::of(lock);
     // Not only the gem's conventional namespace spelled exactly: svg-graph's is `SVG::Graph`.
-    let mut owned = std::collections::HashSet::new();
+    let mut owned = crate::det::HashSet::default();
     for_each_app_constant(app, &mut |_, path| {
         owned.extend(crate::gems::lock_gems_owning_constant(lock, path).into_iter().map(str::to_string));
     });
@@ -10169,7 +10235,7 @@ fn apply_image_processor_wiring(files: &mut [(String, String)]) -> Result<bool, 
 }
 
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
-    use std::collections::HashSet;
+    use crate::det::HashSet;
 
     // 1. sig/ tree → file-adjacent sidecars.
     let mut files: Vec<(String, String)> = files
@@ -10312,7 +10378,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
 
     // Relocations can only collide by construction error — fail loudly.
     {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         for (p, _) in &files {
             if !seen.insert(p.as_str()) {
                 return Err(format!("spin_shape: path collision after reshaping: {p}"));
@@ -10447,6 +10513,22 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
                     is not in the spinel file set")?;
         facade.1 = worker;
         files.retain(|(p, _)| p != "runtime/sidekiq_redis.rbs" && p != "runtime/sidekiq_worker.rbs");
+    }
+    // The Redis broadcast transport, for a tree on :sidekiq whose
+    // config/cable.yml names `adapter: redis` (the registry's
+    // `cable_redis?`).
+    let cable_redis = files
+        .iter()
+        .any(|(p, c)| p == "runtime/job_registry.rb" && c.contains(CABLE_REDIS_REGISTRY_FLAG));
+    if cable_redis {
+        let real = crate::runtime_files::read_to_string(REDIS_CABLE)?;
+        let facade = files
+            .iter_mut()
+            .find(|(p, _)| p == "runtime/redis_cable.rb")
+            .ok_or("spin_shape: the tree sends broadcasts through Redis but runtime/redis_cable.rb \
+                    is not in the spinel file set")?;
+        facade.1 = real;
+        files.retain(|(p, _)| p != "runtime/redis_cable.rbs");
     }
 
     // commonmarker: no façade to swap (Markdowner's own façade stands aside
@@ -10679,7 +10761,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     // drive. It also supplies the `--rbs` root, so the test recipe drops
     // `$(RBS_FLAG)` rather than passing two.
     //
-    // MINUS `--require-gate`, which `spin flags` includes and the app
+    // MINUS `--strict-require` (`--require-gate` before Spinel 6aaec4f41), which `spin flags` includes and the app
     // binary should keep: it turns an unresolvable require into a
     // compile-time refusal. A TEST tree requires gems that have no spinel
     // surface at all — campfire's suite pulls vips, mocha and webmock —
@@ -10694,7 +10776,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         let dep_patches: [(&str, &str); 3] = [
             (
                 "SPINEL ?= spinel",
-                "SPINEL ?= spinel\nSPIN   ?= spin\n\n# Package deps for the per-test compiles, from spin itself.\n# `--require-gate` is stripped: the app binary wants an\n# unresolvable require to be fatal, a test tree requires\n# gems with no spinel surface (vips, mocha, webmock) and\n# must still compile far enough to report its type errors.\nSPIN_TEST_FLAGS = $(shell $(SPIN) flags 2>/dev/null | sed 's/--require-gate //')",
+                "SPINEL ?= spinel\nSPIN   ?= spin\n\n# Package deps for the per-test compiles, from spin itself.\n# `--strict-require` is stripped: the app binary wants an\n# unresolvable require to be fatal, a test tree requires\n# gems with no spinel surface (vips, mocha, webmock) and\n# must still compile far enough to report its type errors.\nSPIN_TEST_FLAGS = $(shell $(SPIN) flags 2>/dev/null | sed -e 's/--strict-require //' -e 's/--require-gate //')",
             ),
             (
                 "\t$(SPINEL) main.rb $(RBS_FLAG) -o $@",
@@ -10817,7 +10899,7 @@ fn test_class_and_count(content: &str, path: &str) -> Result<(String, usize), St
 fn unresolvable_require(
     content: &str,
     path: &str,
-    rb_paths: &std::collections::HashSet<String>,
+    rb_paths: &crate::det::HashSet<String>,
 ) -> Option<String> {
     let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
     content.lines().find_map(|line| {
@@ -10834,7 +10916,7 @@ fn rewrite_requires_for_move(
     content: &str,
     old_dir: &str,
     new_dir: &str,
-    rb_paths: &std::collections::HashSet<String>,
+    rb_paths: &crate::det::HashSet<String>,
 ) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.lines() {
@@ -12281,7 +12363,7 @@ mod tests {
 
     #[test]
     fn move_rewrites_bare_and_relative_requires() {
-        let rb_paths: std::collections::HashSet<String> = [
+        let rb_paths: crate::det::HashSet<String> = [
             "app/models/article.rb",
             "test/fixtures/articles.rb",
             "test/test_helper.rb",

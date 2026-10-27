@@ -151,6 +151,8 @@ class Routing(unittest.TestCase):
             "runtime/ruby/active_job.rb",
             "tests/sidekiq_push_live.rs",
             "tests/sidekiq_push_live/reader.rb",
+            "runtime/spinel/sidekiq/redis_cable.rb",
+            "tests/redis_cable_live/driver.rb",
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])

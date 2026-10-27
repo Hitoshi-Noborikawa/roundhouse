@@ -62,6 +62,10 @@ const PROBE: &str = r#"class Probe
   def negated; !defined?(ActsAsTenant); end
   def compacted; [:a, (:b if defined?(OmniAuth))].compact; end
   def value_of_true; v = defined?(Widget); v; end
+  def trailing_guard; @on && defined?(Widget) && go; end
+  def folded_ternary_label; @on && (defined?(Widget) ? "w" : "x"); end
+  def value_conjunction; @on && defined?(Widget); end
+  def guarded_conjunction; go if @on && defined?(Widget); end
 end
 "#;
 
@@ -166,6 +170,14 @@ fn folded_guards_prune_their_dead_branch() {
     assert!(!conj.contains("defined?") && conj.contains("Rails.respond_to?(:logger)"), "{conj}");
     assert_eq!(b["disabled_conjunction"], "nil");
     assert_eq!(b["negated"], "true");
+    // A folded operand stays truthy without a string literal in a condition.
+    assert_eq!(b["trailing_guard"], "@on && true && go");
+    // A fold that leaves the source's own String keeps its value.
+    assert_eq!(b["folded_ternary_label"], "@on && \"w\"");
+    // `&&` returns its operand: a value keeps `defined?`'s String, a
+    // condition reads only its truth.
+    assert_eq!(b["value_conjunction"], "@on && \"constant\"");
+    assert!(b["guarded_conjunction"].contains("@on && true"), "{}", b["guarded_conjunction"]);
     assert!(!b["compacted"].contains("OmniAuth") && !b["compacted"].contains(":b"), "{}", b["compacted"]);
 }
 
