@@ -78,6 +78,7 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
         })
         .map(|owner| (*owner).clone())
         .collect();
+    let known_module_names = KnownModules::new(&known_modules);
     // Asked twice: whether anything may replace `new` or supply the
     // `initialize` it runs (the owner's whole constructor), and whether
     // anything may replace `new` itself. An own `initialize` shadows what a
@@ -95,16 +96,22 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
             &constructor_owner_aliases,
             &modules_with_custom_new,
             modules_with_custom_initialize,
-            &known_modules,
+            &known_module_names,
             question,
             &mut modules_with_mutating_hooks,
+        );
+        let hook_targets = HookTargets::new(
+            &modules_with_custom_new,
+            modules_with_custom_initialize,
+            &modules_with_mutating_hooks,
         );
         let context = ConstructorMutationContext {
             owner_aliases: &constructor_owner_aliases,
             modules_with_custom_new: &modules_with_custom_new,
             modules_with_custom_initialize,
-            known_modules: &known_modules,
+            known_modules: &known_module_names,
             modules_with_mutating_hooks: &modules_with_mutating_hooks,
+            hook_targets: Some(&hook_targets),
             question,
         };
         let findings = collect_app_lookup_mutations(app, &context);
@@ -295,7 +302,7 @@ fn resolve_mutating_hook_modules(
     owner_aliases: &ConstructorOwnerAliases,
     modules_with_custom_new: &HashSet<ClassId>,
     modules_with_custom_initialize: &HashSet<ClassId>,
-    known_modules: &HashSet<ClassId>,
+    known_modules: &KnownModules,
     question: Question,
     modules_with_mutating_hooks: &mut HashSet<ClassId>,
 ) {
@@ -321,6 +328,7 @@ fn resolve_mutating_hook_modules(
                     modules_with_custom_initialize,
                     known_modules,
                     modules_with_mutating_hooks,
+                    hook_targets: None,
                     question,
                 };
                 let scan = scan_constructor_mutations(
@@ -613,6 +621,7 @@ pub(super) fn scan_constructor_mutations(
                 context.modules_with_custom_initialize,
                 context.known_modules,
                 context.modules_with_mutating_hooks,
+                context.hook_targets,
                 context.question,
             );
             let mutates_callback_receiver = callback_receiver.is_some_and(|callback_receiver| {
@@ -679,9 +688,72 @@ pub(super) struct ConstructorMutationContext<'a> {
     pub(super) owner_aliases: &'a ConstructorOwnerAliases,
     pub(super) modules_with_custom_new: &'a HashSet<ClassId>,
     pub(super) modules_with_custom_initialize: &'a HashSet<ClassId>,
-    pub(super) known_modules: &'a HashSet<ClassId>,
+    pub(super) known_modules: &'a KnownModules,
     pub(super) modules_with_mutating_hooks: &'a HashSet<ClassId>,
+    /// The module sets above, probed by spelling: once they are final.
+    pub(super) hook_targets: Option<&'a HookTargets>,
     pub(super) question: Question,
+}
+
+/// The modules a mixin call names that can change constructor lookup, per
+/// call: `extend` (custom `new`, lookup hooks), `include` (custom
+/// `initialize`, lookup hooks), `prepend` (either, lookup hooks). One probe
+/// per constant instead of a scan of every module per argument.
+pub(super) struct HookTargets {
+    extend: KnownModules,
+    include: KnownModules,
+    prepend: KnownModules,
+}
+
+impl HookTargets {
+    fn new(
+        custom_new: &HashSet<ClassId>,
+        custom_initialize: &HashSet<ClassId>,
+        hooks: &HashSet<ClassId>,
+    ) -> Self {
+        let union = |sets: &[&HashSet<ClassId>]| {
+            KnownModules::new(&sets.iter().flat_map(|set| set.iter().cloned()).collect())
+        };
+        Self {
+            extend: union(&[custom_new, hooks]),
+            include: union(&[custom_initialize, hooks]),
+            prepend: union(&[custom_new, custom_initialize, hooks]),
+        }
+    }
+}
+
+/// "Does a constant name some known module" (`constant_names_class` against
+/// each module) answered by one hash probe: a constant names a module when
+/// its spelling is the module's whole name or a `::`-suffix of it, so every
+/// such suffix of every module is stored.
+pub(super) struct KnownModules {
+    spellings: HashSet<String>,
+    modules: Vec<ClassId>,
+}
+
+impl KnownModules {
+    fn new(modules: &HashSet<ClassId>) -> Self {
+        let mut spellings = HashSet::new();
+        for module in modules {
+            let parts: Vec<_> = module.0.as_str().split("::").collect();
+            for start in 0..parts.len() {
+                spellings.insert(parts[start..].join("::"));
+            }
+        }
+        Self { spellings, modules: modules.iter().cloned().collect() }
+    }
+
+    fn name(&self, constant: &Expr) -> bool {
+        match super::constant_spelling(constant) {
+            None => false,
+            // The empty spelling matches by the scan's own rule.
+            Some(spelling) if spelling.is_empty() => self
+                .modules
+                .iter()
+                .any(|module| super::constant_names_class(constant, module)),
+            Some(spelling) => self.spellings.contains(&spelling),
+        }
+    }
 }
 
 pub(super) struct ConstructorOwnerAliases {
@@ -747,8 +819,9 @@ fn mutates_constructor_lookup_method(
     args: &[Expr],
     modules_with_custom_new: &HashSet<ClassId>,
     modules_with_custom_initialize: &HashSet<ClassId>,
-    known_modules: &HashSet<ClassId>,
+    known_modules: &KnownModules,
     modules_with_mutating_hooks: &HashSet<ClassId>,
+    hook_targets: Option<&HookTargets>,
     question: Question,
 ) -> bool {
     if matches!(method, "send" | "public_send") {
@@ -768,6 +841,7 @@ fn mutates_constructor_lookup_method(
             modules_with_custom_initialize,
             known_modules,
             modules_with_mutating_hooks,
+            hook_targets,
             question,
         );
     }
@@ -778,38 +852,38 @@ fn mutates_constructor_lookup_method(
                 !super::constant_names_class(arg, &ClassId(Symbol::from("ActiveSupport::Concern")))
             })
             .any(|arg| {
-                modules_with_custom_new
-                    .iter()
-                    .chain(modules_with_mutating_hooks)
-                    .any(|module| super::constant_names_class(arg, module))
-                    || !known_modules
+                (match hook_targets {
+                    Some(targets) => targets.extend.name(arg),
+                    None => modules_with_custom_new
                         .iter()
-                        .any(|module| super::constant_names_class(arg, module))
+                        .chain(modules_with_mutating_hooks)
+                        .any(|module| super::constant_names_class(arg, module)),
+                }) || !known_modules.name(arg)
             }),
         "include" => args.iter().any(|arg| {
             if mixin_spelling(arg).is_some_and(|name| catalog_leaves(&name, question)) {
                 return false;
             }
-            modules_with_custom_initialize
-                .iter()
-                .chain(modules_with_mutating_hooks)
-                .any(|module| super::constant_names_class(arg, module))
-                || !known_modules
+            (match hook_targets {
+                Some(targets) => targets.include.name(arg),
+                None => modules_with_custom_initialize
                     .iter()
-                    .any(|module| super::constant_names_class(arg, module))
+                    .chain(modules_with_mutating_hooks)
+                    .any(|module| super::constant_names_class(arg, module)),
+            }) || !known_modules.name(arg)
         }),
         // `prepend` can be written on either an instance class or its
         // singleton class. The normalized call no longer carries that
         // syntactic context, so fail closed for either constructor slot.
         "prepend" => args.iter().any(|arg| {
-            modules_with_custom_new
-                .iter()
-                .chain(modules_with_custom_initialize)
-                .chain(modules_with_mutating_hooks)
-                .any(|module| super::constant_names_class(arg, module))
-                || !known_modules
+            (match hook_targets {
+                Some(targets) => targets.prepend.name(arg),
+                None => modules_with_custom_new
                     .iter()
-                    .any(|module| super::constant_names_class(arg, module))
+                    .chain(modules_with_custom_initialize)
+                    .chain(modules_with_mutating_hooks)
+                    .any(|module| super::constant_names_class(arg, module)),
+            }) || !known_modules.name(arg)
         }),
         "define_method" | "define_singleton_method" => args.first().is_none_or(|arg| {
             literal_method_name(arg).is_none_or(|name| {
@@ -837,7 +911,8 @@ fn mutates_constructor_lookup_method(
 mod tests {
     use std::collections::HashSet;
 
-    use super::constructor_owner_aliases;
+    use super::super::constant_spelling;
+    use super::{KnownModules, constructor_owner_aliases};
     use crate::ident::{ClassId, Symbol};
 
     #[test]
@@ -862,5 +937,50 @@ mod tests {
             .map(|owner| owner.0.as_str())
             .collect();
         assert_eq!(rooted, ["A::Item"]);
+    }
+
+    #[test]
+    fn known_modules_answer_what_the_per_module_scan_answers() {
+        use crate::expr::{Expr, ExprNode};
+        let modules: HashSet<ClassId> = ["A::B::C", "X", "Outer::Concern", "Y::Z"]
+            .iter()
+            .map(|name| ClassId(Symbol::from(*name)))
+            .collect();
+        let known = KnownModules::new(&modules);
+        for spelling in [
+            vec!["A", "B", "C"],
+            vec!["B", "C"],
+            vec!["C"],
+            vec!["A", "B"],
+            vec!["B"],
+            vec!["X"],
+            vec!["", "X"],
+            vec!["", "C"],
+            vec!["Concern"],
+            vec!["Outer", "Concern"],
+            vec!["Z"],
+            vec!["Y", "Z"],
+            vec!["Y"],
+            vec!["W"],
+            vec!["Outer"],
+            vec![],
+            vec![""],
+            vec!["", ""],
+        ] {
+            let path: Vec<_> = spelling.iter().map(|s| Symbol::from(*s)).collect();
+            let constant = Expr::new(crate::span::Span::synthetic(), ExprNode::Const { path });
+            let scan = modules
+                .iter()
+                .any(|module| super::super::constant_names_class(&constant, module));
+            assert_eq!(known.name(&constant), scan, "{spelling:?}");
+            // `constant_names_class` is the allocating formulation, matched from the end.
+            let written = constant_spelling(&constant).unwrap();
+            let reference = modules
+                .iter()
+                .any(|m| m.0.as_str() == written || m.0.as_str().ends_with(&format!("::{written}")));
+            assert_eq!(scan, reference, "{spelling:?}");
+        }
+        let not_const = Expr::new(crate::span::Span::synthetic(), ExprNode::SelfRef);
+        assert!(!known.name(&not_const));
     }
 }
