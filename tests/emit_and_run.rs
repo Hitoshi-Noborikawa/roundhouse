@@ -34,6 +34,8 @@ mod active_model_attribute_alias;
 mod active_model_attributes;
 #[path = "emit_and_run/active_model_attributes_form.rs"]
 mod active_model_attributes_form;
+#[path = "emit_and_run/association_query_arguments.rs"]
+mod association_query_arguments;
 #[path = "emit_and_run/active_model_superclass.rs"]
 mod active_model_superclass;
 #[path = "emit_and_run/arel_nodes.rs"]
