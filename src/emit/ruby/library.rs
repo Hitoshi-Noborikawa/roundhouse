@@ -8428,7 +8428,8 @@ fn emit_library_class_decl_inner(
             }
             let listed = own.iter().any(|c| std::ptr::eq(*c, call))
                 || is_preserved_external_include(call)
-                || crate::lower::job_payload::modelled_class_body_call(app, lc, call);
+                || crate::lower::job_payload::modelled_class_body_call(app, lc, call)
+                || crate::lower::sti_scope::models_class_body_setting(app, lc, call);
             if listed {
                 continue;
             }

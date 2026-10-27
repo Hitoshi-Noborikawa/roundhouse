@@ -21,6 +21,12 @@ const PROBE: &str = r#"class DisabledProbe
     [note.id, sticky.id]
   end
 
+  def self.seed_plain
+    plain = Article.create!(title: "a", body: "a body long enough")
+    sticky = Feature.create!(title: "s", body: "s body long enough")
+    [plain.id, sticky.id]
+  end
+
   def self.loaded(id)
     record = Article.find(id)
     [record.class.name, record.type]
@@ -48,6 +54,12 @@ puts "sti disabled passed"
 "##;
 
 fn app(value: &str) -> emit_and_run::Overlay {
+    app_with(&format!("  self.inheritance_column = {value}\n"), "")
+}
+
+/// real-blog with a `type` column, `article` written into `Article`'s
+/// body and `feature` into `Feature < Article`'s.
+fn app_with(article: &str, feature: &str) -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .edit(
             "db/schema.rb",
@@ -57,9 +69,9 @@ fn app(value: &str) -> emit_and_run::Overlay {
         .edit(
             "app/models/article.rb",
             "  has_many :comments, dependent: :destroy\n",
-            &format!("  self.inheritance_column = {value}\n  has_many :comments, dependent: :destroy\n"),
+            &format!("{article}  has_many :comments, dependent: :destroy\n"),
         )
-        .write("app/models/feature.rb", "class Feature < Article\nend\n")
+        .write("app/models/feature.rb", &format!("class Feature < Article\n{feature}end\n"))
         .write("app/models/disabled_probe.rb", PROBE)
 }
 
@@ -72,6 +84,47 @@ fn a_model_with_sti_turned_off_keeps_type_as_an_attribute_on_ruby() {
     }
 }
 
+const SUBCLASS_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+plain, sticky = DisabledProbe.seed_plain
+check("the subclass filters nothing", DisabledProbe.counts, [2, 2])
+check("the subclass's constructor leaves type alone", DisabledProbe.created_type(sticky), nil)
+puts "sti disabled passed"
+"##;
+
+const STI_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+plain, sticky = DisabledProbe.seed_plain
+check("the subclass is scoped", DisabledProbe.counts, [2, 1])
+check("the subclass's constructor stamps type", DisabledProbe.created_type(sticky), "Feature")
+puts "sti disabled passed"
+"##;
+
+/// The last assignment wins (review): `nil` then `"type"` is STI on,
+/// `"type"` then `nil` is off.
+#[test]
+fn the_last_inheritance_column_assignment_wins_on_ruby() {
+    let on = app_with("  self.inheritance_column = nil\n  self.inheritance_column = \"type\"\n", "").run_ruby(STI_SCRIPT);
+    on.assert_passes();
+    assert!(on.stdout.contains("sti disabled passed"), "nil then type: {}", on.stdout);
+    let off = app_with("  self.inheritance_column = \"type\"\n  self.inheritance_column = nil\n", "").run_ruby(SUBCLASS_SCRIPT);
+    off.assert_passes();
+    assert!(off.stdout.contains("sti disabled passed"), "type then nil: {}", off.stdout);
+}
+
+/// A subclass that sets `nil` itself isn't STI, while its base still is
+/// (review).
+#[test]
+fn a_subclass_that_turns_sti_off_is_a_plain_subclass_on_ruby() {
+    let run = app_with("", "  self.inheritance_column = nil\n").run_ruby(SUBCLASS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("sti disabled passed"), "{}", run.stdout);
+}
+
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn a_model_with_sti_turned_off_keeps_type_as_an_attribute_on_spinel() {
@@ -80,8 +133,12 @@ fn a_model_with_sti_turned_off_keeps_type_as_an_attribute_on_spinel() {
     assert!(run.stdout.contains("sti disabled passed"), "{}", run.stdout);
 }
 
+/// A fresh directory per call: the survey tests run in parallel in one
+/// process, so the pid alone would share one.
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-sti-disabled-{name}-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("roundhouse-sti-disabled-{name}-{}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -94,6 +151,10 @@ fn write(root: &Path, rel: &str, content: &str) {
 }
 
 fn survey(value: &str) -> String {
+    survey_with(&format!("  self.inheritance_column = {value}\n"), "")
+}
+
+fn survey_with(note: &str, sticky: &str) -> String {
     let src = scratch("src");
     let out = scratch("out");
     write(&src, "Gemfile", "source \"https://rubygems.org\"\ngem \"rails\"\n");
@@ -103,8 +164,8 @@ fn survey(value: &str) -> String {
         "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"title\"\n    t.string \"type\"\n  end\nend\n",
     );
     write(&src, "app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n");
-    write(&src, "app/models/note.rb", &format!("class Note < ApplicationRecord\n  self.inheritance_column = {value}\nend\n"));
-    write(&src, "app/models/sticky.rb", "class Sticky < Note\nend\n");
+    write(&src, "app/models/note.rb", &format!("class Note < ApplicationRecord\n{note}end\n"));
+    write(&src, "app/models/sticky.rb", &format!("class Sticky < Note\n{sticky}end\n"));
     write(&src, "app/models/sticky_probe.rb", "class StickyProbe\n  def self.first_title\n    Sticky.first.title\n  end\nend\n");
     let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
         .args(["--target", "ruby", "--allow-unsupported", "--survey", "-o"])
@@ -134,4 +195,16 @@ fn turning_sti_off_is_modelled_and_a_custom_column_is_reported() {
     }
     let stderr = survey("\"kind\"");
     assert!(stderr.contains("inheritance_column= not supported"), "{stderr}");
+}
+
+/// A subclass's own `nil` is modelled too (review): not reported as a
+/// dropped class-body call, and its finder is the warning, naming it.
+#[test]
+fn a_subclass_turning_sti_off_is_modelled() {
+    let stderr = survey_with("", "  self.inheritance_column = nil\n");
+    assert!(!stderr.contains("inheritance_column="), "{stderr}");
+    assert!(
+        stderr.contains("`Sticky.first` on a subclass that turns STI off (`inheritance_column = nil`)"),
+        "{stderr}"
+    );
 }
