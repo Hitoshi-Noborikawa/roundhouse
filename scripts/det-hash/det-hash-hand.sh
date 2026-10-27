@@ -27,7 +27,7 @@ sub src/lower/scope_chain.rs             's/\b(ScopeRegistry|UniqueKeys|AssocCla
 # MapVfs / ingest_app_from_tree take FileTree (std). Keep det::{HashMap,HashSet} on vfs.rs
 # so CachedVfs::facts stays deterministic.
 sub src/vfs.rs 's/^(    files: |    pub fn new\(files: )HashMap<PathBuf, Vec<u8>>/$1FileTree/'
-sub src/ingest/app.rs 's/^(pub fn ingest_app_from_tree\(tree: )HashMap</$1crate::vfs::FileTree</'
+sub src/ingest/app.rs 's/^(pub fn ingest_app_from_tree\(tree: )HashMap<PathBuf, Vec<u8>>/$1crate::vfs::FileTree/'
 # ...so test / helper code that feeds the tree pins FileTree.
 sub src/ide.rs 's/(?:crate::det::)?HashMap<(?:std::path::)?PathBuf, Vec<u8>>/crate::vfs::FileTree/g'
 sub src/analyze/fixpoint_check.rs 's/let tree = HashMap::from_iter\(/let tree = crate::vfs::FileTree::from_iter(/'
