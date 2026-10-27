@@ -14,6 +14,7 @@ const GEMS: &[(&str, &str, &str)] = &[
     ("Faraday", "faraday", "a missing HTTP client"),
     ("Retryable", "retryable", "a missing retry helper"),
     ("JWT", "jwt", "a missing token codec"),
+    ("ElasticAPM", "elastic-apm", "a missing APM agent"),
 ];
 
 /// Targets that run the real gem: Ruby and JRuby load it via

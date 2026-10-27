@@ -568,6 +568,33 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass { name: "JWT::MissingRequiredClaim", class_methods: &[], instance_methods: JWT_ERROR },
     GemClass { name: "JWT::Base64DecodeError", class_methods: &[], instance_methods: JWT_ERROR },
     GemClass { name: "JWT::JWKError", class_methods: &[], instance_methods: JWT_ERROR },
+    // ElasticAPM — the elastic-apm agent. As Faraday: the real gem on
+    // ruby and jruby, refused elsewhere (`lower::ruby_family_gems`). An
+    // app that never starts the agent gets the pass-through it has in
+    // Ruby: no transaction, `with_span` answers its block.
+    GemClass {
+        name: "ElasticAPM",
+        class_methods: &[
+            ("running?", GemTy::Bool),
+            ("current_transaction", GemTy::Untyped),
+            ("current_span", GemTy::Untyped),
+            ("start_transaction", GemTy::Untyped),
+            ("end_transaction", GemTy::Untyped),
+            ("with_transaction", GemTy::Untyped),
+            ("start_span", GemTy::Untyped),
+            ("end_span", GemTy::Untyped),
+            ("with_span", GemTy::Untyped),
+            ("set_label", GemTy::Untyped),
+            ("set_custom_context", GemTy::Untyped),
+            ("set_user", GemTy::Untyped),
+            ("report", GemTy::Untyped),
+            ("report_message", GemTy::Untyped),
+        ],
+        instance_methods: &[],
+    },
+    // `include ElasticAPM::SpanHelpers` gives the includer `span_method`
+    // and `span_class_method`; the Ruby emit replays those calls.
+    GemClass { name: "ElasticAPM::SpanHelpers", class_methods: &[], instance_methods: &[] },
 ];
 
 const FARADAY_FILE_PART: &[(&str, GemTy)] = &[
