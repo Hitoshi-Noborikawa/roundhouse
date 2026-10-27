@@ -337,6 +337,37 @@ fn post_rest_target_reorders_lhs(node: &Node<'_>) -> bool {
     })
 }
 
+/// A String literal a variable holds, in a file without
+/// `# frozen_string_literal: true`: Ruby gives each evaluation a new,
+/// mutable String there (`data = ""; doc.write(data, 0)` appends to it),
+/// so it carries the mutable hint the `+"…"` spelling does. Spinel freezes
+/// every bare literal.
+fn assigned_literal(mut value: Expr, file: &str) -> Expr {
+    if matches!(&*value.node, ExprNode::Lit { value: Literal::Str { .. } })
+        && value.hint().is_none()
+        && super::sources::with_text(file, |text| !freezes_literals(text)).unwrap_or(false)
+    {
+        value.set_hint(Some(crate::expr::IrHint::MutableStringLiteral));
+    }
+    value
+}
+
+/// Does the source's leading comment block say `frozen_string_literal: true`?
+fn freezes_literals(text: &str) -> bool {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(comment) = line.strip_prefix('#') else { return false };
+        let comment = comment.to_ascii_lowercase().replace('-', "_");
+        if let Some(at) = comment.find("frozen_string_literal:") {
+            return comment[at + "frozen_string_literal:".len()..].trim_start().starts_with("true");
+        }
+    }
+    false
+}
+
 fn fresh_reserved_local(loc: &ruby_prism::Location<'_>, stem: &str) -> Symbol {
     let mut name = stem.to_string();
     let mut suffix = 0;
@@ -1806,7 +1837,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let w = n.as_instance_variable_write_node().unwrap();
             let raw = constant_id_str(&w.name());
             let name = raw.strip_prefix('@').unwrap_or(raw);
-            let value = ingest_expr(&w.value(), file)?;
+            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
             let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
             ExprNode::Assign {
                 target: crate::expr::LValue::Ivar { name: Symbol::from(name) },
@@ -1816,7 +1847,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_local_variable_write_node().is_some() => {
             let w = n.as_local_variable_write_node().unwrap();
             let name = Symbol::from(constant_id_str(&w.name()));
-            let value = ingest_expr(&w.value(), file)?;
+            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
             let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
             ExprNode::Assign {
                 target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
@@ -1889,7 +1920,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_local_variable_or_write_node().is_some() => {
             let w = n.as_local_variable_or_write_node().unwrap();
             let name = Symbol::from(constant_id_str(&w.name()));
-            let value = ingest_expr(&w.value(), file)?;
+            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
             ExprNode::OpAssign {
                 target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
                 op: crate::expr::OpAssignOp::OrOr,
@@ -2001,7 +2032,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let w = n.as_instance_variable_or_write_node().unwrap();
             let raw = constant_id_str(&w.name());
             let name = Symbol::from(raw.strip_prefix('@').unwrap_or(raw));
-            let value = ingest_expr(&w.value(), file)?;
+            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
             let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
             ExprNode::OpAssign {
                 target: crate::expr::LValue::Ivar { name },

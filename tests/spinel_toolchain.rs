@@ -208,6 +208,10 @@ mod stdlib_scan_zlib;
 mod stdlib_rexml_include_contract;
 #[path = "spinel_toolchain/stdlib_rexml_include.rs"]
 mod stdlib_rexml_include;
+#[path = "support/mutable_literals.rs"]
+mod mutable_literals_contract;
+#[path = "spinel_toolchain/mutable_literals.rs"]
+mod mutable_literals;
 #[path = "support/auto_source_gem.rs"]
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]

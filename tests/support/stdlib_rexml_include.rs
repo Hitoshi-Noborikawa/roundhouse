@@ -27,8 +27,8 @@ end
 "##;
 
 /// A DocType and REXML's pretty formatter, as svg-graph writes its page
-/// (`doc.write(data, 0)`, `Formatters::Pretty` with `compact`). The buffers
-/// are `+""`: spinel freezes every String literal.
+/// (`doc.write(data, 0)`, `Formatters::Pretty` with `compact`), into a
+/// bare `""` buffer as svg-graph does (see `mutable_literals`).
 pub const SVG_PAGE: &str = r##"class SvgPage
   include REXML
 
@@ -38,7 +38,7 @@ pub const SVG_PAGE: &str = r##"class SvgPage
     doc << DocType.new(%q{svg PUBLIC "-//W3C//DTD SVG 1.0//EN" "http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd"})
     root = doc.add_element("svg", { "width" => "10" })
     root.add_element("rect", { "x" => "1" }).text = "label"
-    data = +""
+    data = ""
     doc.write(data, 0)
     data
   end
@@ -48,7 +48,7 @@ pub const SVG_PAGE: &str = r##"class SvgPage
     root.add_element("text").text = "a"
     f = REXML::Formatters::Pretty.new(0)
     f.compact = true
-    out = +""
+    out = ""
     f.write(root, out)
     out
   end
