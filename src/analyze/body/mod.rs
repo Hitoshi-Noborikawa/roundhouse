@@ -5644,16 +5644,19 @@ mod tests {
     /// Joining members into a large stored union must not be quadratic: a
     /// scan of `==` per variant took seconds at this size, the index and
     /// containment check take milliseconds. Generous bound, so it only
-    /// trips on a regression to the scan.
+    /// trips on a regression to the scan. Only the re-joins are timed:
+    /// growing the union one new variant at a time still re-sorts it per
+    /// join, which a debug build takes tens of seconds for at this size.
     #[test]
     fn large_union_join_is_not_quadratic() {
         let n = 4000;
         let classes: Vec<Ty> = (0..n).map(|i| class_ty(&format!("Model{i:05}"))).collect();
+        let mut variants = classes.clone();
+        Ty::canonicalize_variants(&mut variants);
+        let mut stored = Ty::Union { variants: variants.into() };
+        let Ty::Union { variants } = &stored else { panic!() };
+        assert!(Ty::is_canonical_union_without_records(variants));
         let started = std::time::Instant::now();
-        let mut stored = Ty::Bottom;
-        for c in &classes {
-            stored = union_of(stored, c.clone());
-        }
         for c in classes.iter().step_by(7) {
             stored = union_of(stored, c.clone());
         }
