@@ -14,8 +14,9 @@ module ActiveRecord
   end
 
   class EagerFilter
-    def initialize: (Array[Hash[Symbol, untyped]] conditions, Array[Hash[Symbol, untyped]] negations, Array[Hash[Symbol, untyped]] orders, untyped nested) -> void
-    def nested: () -> untyped
+    type nested_spec = Symbol | Hash[Symbol, Symbol] | Array[Symbol | Hash[Symbol, Symbol]] | nil
+    def initialize: (Array[Hash[Symbol, untyped]] conditions, Array[Hash[Symbol, untyped]] negations, Array[Hash[Symbol, untyped]] orders, nested_spec nested) -> void
+    def nested: () -> nested_spec
     def conditions: () -> Array[Hash[Symbol, untyped]]
     def negations: () -> Array[Hash[Symbol, untyped]]
     def orders: () -> Array[Hash[Symbol, untyped]]

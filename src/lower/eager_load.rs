@@ -97,13 +97,15 @@ struct Chain {
     negations: Vec<(Symbol, Expr)>,
     /// Table-keyed `order` hash entries.
     orders: Vec<(Symbol, Expr)>,
+    /// A `reorder` was seen: the calls before it (later in the walk) no longer order.
+    orders_sealed: bool,
     referenced: Vec<Symbol>,
 }
 
 /// The relation chain `e` tops, rooted at a model constant, or at the
 /// model itself inside its own class-side body (`own`).
 fn chain_of(e: &Expr, models: &[Model], own: Option<&ClassId>) -> Option<Chain> {
-    let mut chain = Chain { model: ClassId(Symbol::from("")), included: Vec::new(), conditions: Vec::new(), negations: Vec::new(), orders: Vec::new(), referenced: Vec::new() };
+    let mut chain = Chain { model: ClassId(Symbol::from("")), included: Vec::new(), conditions: Vec::new(), negations: Vec::new(), orders: Vec::new(), orders_sealed: false, referenced: Vec::new() };
     let mut node = e;
     let mut any = false;
     loop {
@@ -179,16 +181,23 @@ fn step(method: &str, args: &[Expr], chain: &mut Chain, any: &mut bool) -> bool 
             }
         }
         "order" | "reorder" => {
+            if chain.orders_sealed {
+                return true;
+            }
+            let mut terms: Vec<(Symbol, Expr)> = Vec::new();
             for arg in args {
                 match &*arg.node {
                     ExprNode::Array { elements, .. } => {
                         for element in elements {
-                            table_keyed(element, &mut chain.orders);
+                            table_keyed(element, &mut terms);
                         }
                     }
-                    _ => table_keyed(arg, &mut chain.orders),
+                    _ => table_keyed(arg, &mut terms),
                 }
             }
+            // The walk runs from the last call back: an earlier call's terms come first.
+            chain.orders.splice(0..0, terms);
+            chain.orders_sealed = method == "reorder";
         }
         "references" => {
             for arg in args {
