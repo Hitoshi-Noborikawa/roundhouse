@@ -54,7 +54,7 @@ const PROBE: &str = r#"class FeatureProbe
 end
 "#;
 
-fn app(src: &Path, columns: &str) {
+fn app(src: &Path, columns: &str, probe: &str) {
     write(src, "Gemfile", "source \"https://rubygems.org\"\ngem \"rails\"\n");
     write(
         src,
@@ -64,7 +64,7 @@ fn app(src: &Path, columns: &str) {
     write(src, "app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n");
     write(src, "app/models/article.rb", "class Article < ApplicationRecord\n  scope :titled_f, -> { where(title: \"f\") }\nend\n");
     write(src, "app/models/feature.rb", "class Feature < Article\nend\n");
-    write(src, "app/models/feature_probe.rb", PROBE);
+    write(src, "app/models/feature_probe.rb", probe);
 }
 
 fn survey(src: &Path, out: &Path) -> String {
@@ -84,7 +84,7 @@ fn survey(src: &Path, out: &Path) -> String {
 fn a_finder_on_a_subclass_without_a_type_column_is_reported() {
     let src = scratch("plain-src");
     let out = scratch("plain-out");
-    app(&src, "");
+    app(&src, "", PROBE);
     let stderr = survey(&src, &out);
     for call in ["Feature.order", "Feature.where", "Feature.titled_f", "Feature.find"] {
         assert!(
@@ -107,9 +107,66 @@ fn a_finder_on_a_subclass_without_a_type_column_is_reported() {
 fn an_sti_subclass_is_not_reported() {
     let src = scratch("sti-src");
     let out = scratch("sti-out");
-    app(&src, "    t.string \"type\"\n");
+    app(&src, "    t.string \"type\"\n", PROBE);
     let stderr = survey(&src, &out);
     assert!(!stderr.contains("has no `type` column"), "{stderr}");
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+const AGGREGATES: &str = r#"class FeatureProbe
+  def self.nothing
+    Feature.none.to_a
+  end
+
+  def self.counted
+    Feature.where(title: "f").count
+  end
+
+  def self.plucked
+    Feature.order(:id).pluck(:title)
+  end
+
+  def self.found_inside
+    Feature.where(title: Feature.find_by(title: "f").title).exists?
+  end
+end
+"#;
+
+/// `none` loads nothing, and an aggregate's relation (`where(…).count`,
+/// `order(…).pluck`) answers a value, so neither is reported. A finder
+/// in the aggregate's arguments still is.
+#[test]
+fn none_and_an_aggregates_relation_are_not_reported() {
+    let src = scratch("value-src");
+    let out = scratch("value-out");
+    app(&src, "", AGGREGATES);
+    let stderr = survey(&src, &out);
+    for call in ["Feature.none", "Feature.where", "Feature.order"] {
+        assert!(!stderr.contains(&format!("`{call}`")), "{call} loads no record: {stderr}");
+    }
+    assert!(stderr.contains("`Feature.find_by` on a subclass"), "the argument's finder is reported: {stderr}");
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// The STI lowering rewrites test bodies too, so a finder in a test is
+/// reported like one in the app.
+#[test]
+fn a_finder_in_a_test_is_reported() {
+    let src = scratch("test-src");
+    let out = scratch("test-out");
+    app(&src, "", "class FeatureProbe\nend\n");
+    write(
+        &src,
+        "test/models/feature_test.rb",
+        "require \"test_helper\"\n\nclass FeatureTest < ActiveSupport::TestCase\n  test \"finds a feature\" do\n    assert_nil Feature.find_by(title: \"f\")\n  end\nend\n",
+    );
+    let stderr = survey(&src, &out);
+    assert!(
+        stderr.lines().any(|l| l.contains("feature_test.rb") && l.contains("`Feature.find_by` on a subclass")),
+        "{stderr}"
+    );
     fs::remove_dir_all(&src).unwrap();
     fs::remove_dir_all(&out).unwrap();
 }

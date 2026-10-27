@@ -429,9 +429,16 @@ const LOADING_METHODS: &[&str] = &[
     "all", "where", "find", "find_by", "find_by!", "first", "first!", "last", "last!", "take",
     "take!", "sole", "find_sole_by", "find_each", "find_in_batches", "in_batches", "order",
     "reorder", "limit", "offset", "joins", "left_joins", "left_outer_joins", "includes",
-    "preload", "eager_load", "distinct", "select", "group", "having", "none", "unscoped",
+    "preload", "eager_load", "distinct", "select", "group", "having", "unscoped",
     "readonly", "lock", "find_or_create_by", "find_or_create_by!", "find_or_initialize_by",
     "create_or_find_by", "create_or_find_by!",
+];
+
+/// Aggregates that answer a value from a relation, not its records: the
+/// relation they're called on loads nothing (`Feature.where(…).count`).
+const VALUE_METHODS: &[&str] = &[
+    "count", "pluck", "pick", "ids", "sum", "minimum", "maximum", "average", "calculate",
+    "exists?", "any?", "none?", "empty?", "many?", "size", "delete_all", "update_all",
 ];
 
 /// A subclass of a concrete model whose table has no `type` column
@@ -444,6 +451,9 @@ const LOADING_METHODS: &[&str] = &[
 /// Counts and constructors already match. Each call site with the
 /// subclass as its constant receiver and a loading finder, or one of
 /// the base's named scopes, is a warning: the call is still emitted.
+/// Not one that's the relation of an aggregate (`Feature.where(…).count`
+/// answers a value), and the bodies walked are the ones the STI
+/// lowering rewrites, tests included.
 pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::Diagnostic> {
     let (_, untyped) = model_subclasses(app);
     if untyped.is_empty() {
@@ -464,31 +474,57 @@ pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::
             (&m.name, names)
         })
         .collect();
+    // `valued`: `e` is the receiver chain of an aggregate, so its sends
+    // load nothing. Their arguments and blocks are walked as usual.
     fn walk(
         e: &Expr,
+        valued: bool,
         untyped: &HashMap<ClassId, ClassId>,
         scopes: &HashMap<&ClassId, HashSet<&str>>,
         sites: &mut Vec<(Span, ClassId, ClassId, Symbol)>,
     ) {
-        if let ExprNode::Send { recv: Some(recv), method, .. } = &*e.node {
+        let ExprNode::Send { recv, method, args, block, .. } = &*e.node else {
+            e.node.for_each_child(&mut |c| walk(c, false, untyped, scopes, sites));
+            return;
+        };
+        if let Some(recv) = recv {
             if let ExprNode::Const { path } = &*recv.node {
                 let sub = const_class_id(path);
                 if let Some(base) = untyped.get(&sub) {
                     let loads = LOADING_METHODS.contains(&method.as_str())
                         || scopes.get(base).is_some_and(|names| names.contains(method.as_str()));
-                    if loads {
+                    if loads && !valued {
                         sites.push((e.span, sub, base.clone(), method.clone()));
                     }
                 }
             }
+            let chain = valued || VALUE_METHODS.contains(&method.as_str());
+            walk(recv, chain, untyped, scopes, sites);
         }
-        e.node.for_each_child(&mut |c| walk(c, untyped, scopes, sites));
+        for arg in args {
+            walk(arg, false, untyped, scopes, sites);
+        }
+        if let Some(block) = block {
+            walk(block, false, untyped, scopes, sites);
+        }
     }
     let mut sites: Vec<(Span, ClassId, ClassId, Symbol)> = Vec::new();
-    let mut visit = |body: &Expr| walk(body, &untyped, &scopes, &mut sites);
+    let mut visit = |body: &Expr| walk(body, false, &untyped, &scopes, &mut sites);
+    // The bodies `apply_sti_scope_lowering` rewrites.
     super::for_each_hook_body_ref(app, &mut visit);
     for view in &app.views {
         visit(&view.body);
+    }
+    for tm in &app.test_modules {
+        if let Some(setup) = &tm.setup {
+            visit(setup);
+        }
+        for t in &tm.tests {
+            visit(&t.body);
+        }
+        for m in &tm.helpers {
+            visit(&m.body);
+        }
     }
     sites
         .into_iter()

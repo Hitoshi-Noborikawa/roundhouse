@@ -5,12 +5,15 @@
 #
 # Needs activerecord 8.1.4 and sqlite3. Without the column it isn't
 # STI: the subclass shares the table, its finders filter nothing, and
-# every row they load is the subclass's class. It prints:
+# every row they load is the subclass's class. `none` loads nothing,
+# and an aggregate (`count`, `pluck`, `exists?`) answers a value, not
+# records. It prints:
 #
 #   {table: "articles", base: "Article"}
 #   {count: [2, 2]}
 #   {first: "Feature", find: "Feature", all: ["Feature", "Feature"], where: ["Feature"], find_by: "Feature", scope: ["Feature"]}
 #   {new: "Feature", create: "Feature"}
+#   {none: [], count: 1, pluck: ["f"], exists: true}
 #   SQL: SELECT "articles".* FROM "articles" WHERE "articles"."title" = 'f'
 gem "activerecord", "8.1.4"
 require "active_record"
@@ -36,4 +39,6 @@ p first: Feature.order(:id).first.class.name, find: Feature.find(article.id).cla
   all: names.(Feature.order(:id)), where: names.(Feature.where(title: "f")),
   find_by: Feature.find_by(title: "f").class.name, scope: names.(Feature.titled_f)
 p new: Feature.new.class.name, create: Feature.create!(title: "n").class.name
+p none: Feature.none.to_a, count: Feature.where(title: "f").count,
+  pluck: Feature.where(title: "f").pluck(:title), exists: Feature.where(title: "f").exists?
 puts "SQL: #{Feature.where(title: "f").to_sql}"
