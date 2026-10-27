@@ -890,7 +890,11 @@ class Routing(unittest.TestCase):
             "runtime/spinel/db_pg.rbs": ["spinel_pg_db"],
             "runtime/spinel/pg_errors.rb": ["spinel_pg_db"],
             "runtime/spinel/pg_errors.rbs": ["spinel_pg_db"],
-            "tests/spinel_pg_db_cases.rb": ["spinel_pg_db"],
+            # The Db contract suite feeds the Spinel lanes that run its files.
+            "tests/db_contract/contract_cases.rb": ["spinel_pg_db"],
+            "tests/db_contract/postgres_cases.rb": ["spinel_pg_db"],
+            "tests/db_contract/db_pg_lane.rb": ["spinel_pg_db"],
+            "tests/support/db_contract.rs": ["spinel_pg_db"],
             "runtime/ruby/db.rbs": [
                 "framework_tests_spinel",
                 "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",

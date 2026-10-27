@@ -219,7 +219,17 @@ PG_DB_INPUTS = {
     "runtime/ruby/db.rbs",
     "runtime/spinel/active_support_time_parsing.rb",
     "runtime/spinel/active_support_time_parsing.rbs",
-    "tests/spinel_pg_db_cases.rb",
+}
+# The Db contract suite (tests/support/db_contract.rs): the Spinel lanes
+# each of its files feeds.
+DB_CONTRACT_INPUTS = {
+    "tests/db_contract/support.rb": ("spinel_pg_db",),
+    "tests/db_contract/contract_cases.rb": ("spinel_pg_db",),
+    "tests/db_contract/spinel_prelude.rb": ("spinel_pg_db",),
+    "tests/db_contract/postgres_cases.rb": ("spinel_pg_db",),
+    "tests/db_contract/postgres_main.rb": ("spinel_pg_db",),
+    "tests/db_contract/db_pg_lane.rb": ("spinel_pg_db",),
+    "tests/support/db_contract.rs": ("spinel_pg_db",),
 }
 GENERATED_COLUMNS_SPINEL_INPUTS = {
     "src/emit/ruby/library.rs",
@@ -491,6 +501,7 @@ def native_coverage(path):
         suites.add("param_binds")
     if path in PG_DB_INPUTS:
         suites.add("spinel_pg_db")
+    suites.update(DB_CONTRACT_INPUTS.get(path, ()))
     if path in {
         "tests/support/emit_and_run.rs",
         "src/lower/model_to_library/adapter_emit.rs",
