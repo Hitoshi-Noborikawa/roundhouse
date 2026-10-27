@@ -12,7 +12,7 @@ fn rexml_classes_named_through_include_run_after_emission() {
 #[test]
 fn rexml_is_reported_where_no_runtime_has_it() {
     let (_emitted, errors) = contract::app().emit(BuildTarget::Typescript);
-    for name in ["REXML::Document", "REXML::Comment", "REXML::CData"] {
+    for name in ["REXML::Document", "REXML::Comment", "REXML::CData", "REXML::DocType", "REXML::Formatters::Pretty"] {
         let want = format!("bundled_constant not supported (typescript): {name} is not available");
         assert!(errors.iter().any(|e| e.contains(&want)), "{name}: {errors:?}");
     }

@@ -26,14 +26,45 @@ pub const SVG_DOC: &str = r##"class SvgDoc
 end
 "##;
 
+/// A DocType and REXML's pretty formatter, as svg-graph writes its page
+/// (`doc.write(data, 0)`, `Formatters::Pretty` with `compact`). The buffers
+/// are `+""`: spinel freezes every String literal.
+pub const SVG_PAGE: &str = r##"class SvgPage
+  include REXML
+
+  def self.render
+    doc = Document.new
+    doc << XMLDecl.new
+    doc << DocType.new(%q{svg PUBLIC "-//W3C//DTD SVG 1.0//EN" "http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd"})
+    root = doc.add_element("svg", { "width" => "10" })
+    root.add_element("rect", { "x" => "1" }).text = "label"
+    data = +""
+    doc.write(data, 0)
+    data
+  end
+
+  def self.compact
+    root = Element.new("g")
+    root.add_element("text").text = "a"
+    f = REXML::Formatters::Pretty.new(0)
+    f.compact = true
+    out = +""
+    f.write(root, out)
+    out
+  end
+end
+"##;
+
 pub const ASSERTIONS: &str = r##"want = "<?xml version='1.0'?><svg width='10' xmlns='http://www.w3.org/2000/svg'><!-- made here --><style type='text/css'><![CDATA[rect { fill: red }]]></style><rect x='1'>a &lt; b</rect></svg>"
 got = SvgDoc.render
 raise "render #{got.inspect}" unless got == want
 raise "parsed" unless SvgDoc.parsed_name == "1"
+raise "page #{SvgPage.render.inspect}" unless SvgPage.render == "<?xml version='1.0'?>\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.0//EN\" \"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd\">\n<svg width='10'>\n<rect x='1'>\nlabel\n</rect>\n</svg>"
+raise "compact #{SvgPage.compact.inspect}" unless SvgPage.compact == "<g>\n<text>a</text>\n</g>"
 puts "rexml passed"
 "##;
 
 #[allow(dead_code)]
 pub fn app() -> emit_and_run::Overlay {
-    emit_and_run::real_blog().write("app/models/svg_doc.rb", SVG_DOC)
+    emit_and_run::real_blog().write("app/models/svg_doc.rb", SVG_DOC).write("app/models/svg_page.rb", SVG_PAGE)
 }

@@ -223,6 +223,11 @@ module REXML\n\
   class Comment < Child\n  end\n\
   class Instruction < Child\n  end\n\
   class XMLDecl < Child\n  end\n\
+  class DocType < Parent\n  end\n\
+  module Formatters\n\
+    class Default\n    end\n\
+    class Pretty < Default\n    end\n\
+  end\n\
   class Attribute\n  end\n\
   class Attributes\n  end\n\
   class Elements\n  end\n\
