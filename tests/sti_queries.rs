@@ -19,6 +19,8 @@ const FEATURE: &str = include_str!("sti_queries/feature.rb");
 const SPECIAL_FEATURE: &str = include_str!("sti_queries/special_feature.rb");
 const STI_PROBE: &str = include_str!("sti_queries/probe.rb");
 const SCRIPT: &str = include_str!("sti_queries/script.rb");
+const HOOKED: &str = include_str!("sti_queries/hooked.rb");
+const HOOK: &str = "  after_initialize :mark_hooked\n\n  def mark_hooked\n    @hooked = true\n  end\n\n  def hooked\n    @hooked\n  end\n\n";
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
@@ -42,6 +44,18 @@ fn an_sti_subclasss_queries_are_scoped_to_it_and_its_subclasses_on_ruby() {
     let run = app().run_ruby(SCRIPT);
     run.assert_passes();
     assert!(run.stdout.contains("sti queries passed"), "{}", run.stdout);
+}
+
+// With `after_initialize` the base hydrates through
+// `Article.new(ActiveRecord::Base::HYDRATE_ATTRS)`, and each row is
+// still built as its own class.
+#[test]
+fn a_hooked_sti_bases_rows_are_built_as_their_class_on_ruby() {
+    let run = app()
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", &format!("{HOOK}  validates :title, presence: true\n"))
+        .run_ruby(&format!("{SCRIPT}{HOOKED}"));
+    run.assert_passes();
+    assert!(run.stdout.contains("hooked sti queries passed"), "{}", run.stdout);
 }
 
 #[test]

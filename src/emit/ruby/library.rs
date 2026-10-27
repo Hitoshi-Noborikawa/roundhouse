@@ -2380,16 +2380,21 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
                 let ExprNode::Assign { target: LValue::Var { .. }, value } = &mut *e.node else {
                     continue;
                 };
-                let is_base_new = matches!(&*value.node,
+                // A model with an `after_initialize` hook builds through
+                // `Base.new(ActiveRecord::Base::HYDRATE_ATTRS)` so
+                // `initialize` skips the hook; every arm passes it on.
+                let new_args = match &*value.node {
                     ExprNode::Send { recv: Some(r), method, args, .. }
                         if method.as_str() == "new"
-                            && args.is_empty()
+                            && (args.is_empty() || (args.len() == 1 && is_hydrate_attrs(&args[0])))
                             && matches!(&*r.node, ExprNode::Const { path }
-                                if const_path_is(path, &base)));
-                if !is_base_new {
-                    continue;
-                }
-                *value = sti_dispatch(&type_read, subs, value.span);
+                                if const_path_is(path, &base)) =>
+                    {
+                        args.clone()
+                    }
+                    _ => continue,
+                };
+                *value = sti_dispatch(&type_read, subs, &new_args, value.span);
                 break;
             }
         }
@@ -2408,13 +2413,20 @@ fn self_from_row(body: &mut Expr, base: &ClassId) {
     }
 }
 
+/// `ActiveRecord::Base::HYDRATE_ATTRS`, the sentinel a hooked model's
+/// hydration factory passes to `new`.
+fn is_hydrate_attrs(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Const { path }
+        if path.iter().map(|s| s.as_str()).eq(["ActiveRecord", "Base", "HYDRATE_ATTRS"]))
+}
+
 fn const_path_is(path: &[Symbol], id: &ClassId) -> bool {
     let joined: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
     joined.join("::") == id.0.as_str()
 }
 
-/// `case <type_read> when "<Sub>" then <Sub>.new … else self.new end`
-fn sti_dispatch(type_read: &Expr, subs: &[ClassId], span: Span) -> Expr {
+/// `case <type_read> when "<Sub>" then <Sub>.new(<args>) … else self.new(<args>) end`
+fn sti_dispatch(type_read: &Expr, subs: &[ClassId], new_args: &[Expr], span: Span) -> Expr {
     let mut arms: Vec<crate::expr::Arm> = subs
         .iter()
         .map(|sub| crate::expr::Arm {
@@ -2432,7 +2444,7 @@ fn sti_dispatch(type_read: &Expr, subs: &[ClassId], span: Span) -> Expr {
                         },
                     )),
                     method: Symbol::from("new"),
-                    args: vec![],
+                    args: new_args.to_vec(),
                     block: None,
                     parenthesized: true,
                 },
@@ -2452,7 +2464,7 @@ fn sti_dispatch(type_read: &Expr, subs: &[ClassId], span: Span) -> Expr {
             ExprNode::Send {
                 recv: Some(Expr::new(span, ExprNode::SelfRef)),
                 method: Symbol::from("new"),
-                args: vec![],
+                args: new_args.to_vec(),
                 block: None,
                 parenthesized: true,
             },
