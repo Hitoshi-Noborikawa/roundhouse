@@ -82,18 +82,23 @@ module SidekiqWorker
   CONTROL_LOCK = Mutex.new
 
   USAGE = "usage: sidekiq [-c CONCURRENCY] [-q QUEUE[,WEIGHT]]... [-t TIMEOUT]\n" \
-    "  -c, --concurrency INT   processor threads to use (default 5, or RAILS_MAX_THREADS)\n" \
-    "  -q, --queue QUEUE[,WEIGHT]  queues to process, with optional weights (default: default)\n" \
-    "  -t, --timeout NUM       shutdown timeout in seconds (default 25)\n"
+    "  -c, --concurrency INT   processor threads to use (default: config/sidekiq.yml, RAILS_MAX_THREADS or 5)\n" \
+    "  -q, --queue QUEUE[,WEIGHT]  queues to process, with optional weights (default: config/sidekiq.yml or default)\n" \
+    "  -t, --timeout NUM       shutdown timeout in seconds (default: config/sidekiq.yml or 25)\n"
 
   # ---- command line --------------------------------------------------
 
   # Read the options, Sidekiq's way. Answers "" or what is wrong.
+  # Sidekiq's order: the command line, then config/sidekiq.yml (read at
+  # compile time into JobRegistry), then RAILS_MAX_THREADS, then the
+  # defaults.
   def self.parse(argv)
     CONCURRENCY[0] = DEFAULT_CONCURRENCY
     env_threads = ENV["RAILS_MAX_THREADS"].to_s
     CONCURRENCY[0] = env_threads.to_i if env_threads.length > 0 && env_threads.to_i > 0
+    CONCURRENCY[0] = JobRegistry.sidekiq_worker_concurrency if JobRegistry.sidekiq_worker_concurrency > 0
     TIMEOUT[0] = DEFAULT_TIMEOUT
+    TIMEOUT[0] = JobRegistry.sidekiq_worker_timeout if JobRegistry.sidekiq_worker_timeout >= 0
     names = []
     weights = []
     i = 0
@@ -118,6 +123,13 @@ module SidekiqWorker
         i += 2
       else
         return "unknown option " + arg
+      end
+    end
+    if names.length == 0
+      JobRegistry.sidekiq_worker_queues.split(" ").each do |word|
+        parts = word.split(",")
+        names.push(parts[0])
+        weights.push(parts.length > 1 ? parts[1].to_i : 0)
       end
     end
     if names.length == 0
