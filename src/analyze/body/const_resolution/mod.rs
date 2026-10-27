@@ -101,6 +101,9 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     // `URI::RFC2396_PARSER.escape(url)` — lobsters' webmention job. The
     // uri library's on the ruby family, spinel's `packages/uri` on spinel;
     // DEFAULT_PARSER is RFC 3986's, as on Ruby 3.4.
+    // `Math.cos(deg * Math::PI / 180)` — svg-graph's label rotation.
+    ("Math", "PI", || Ty::Float),
+    ("Math", "E", || Ty::Float),
     ("URI", "DEFAULT_PARSER", uri_rfc3986_parser),
     ("URI", "RFC3986_PARSER", uri_rfc3986_parser),
     ("URI", "RFC2396_PARSER", uri_rfc2396_parser),
@@ -115,7 +118,7 @@ fn uri_rfc3986_parser() -> Ty {
 }
 
 /// Owners of value Consts that Ruby defines as modules, not classes.
-const CORE_VALUE_MODULES: &[&str] = &["URI"];
+const CORE_VALUE_MODULES: &[&str] = &["URI", "Math"];
 
 /// Ruby's top-level value Consts: `STDERR.puts "…"` (discourse's
 /// warnings) reads the process's own stream, which `$stderr` is only

@@ -6673,6 +6673,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
+        // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
+        | "StringScanner" | "Zlib::GzipWriter"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
@@ -6722,6 +6724,11 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
 /// only by a ruby-family/spinel runtime file is gated the same way.
 const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("Zlib", "gzip"),
+    ("Zlib", "gunzip"),
+    ("Zlib", "deflate"),
+    ("Zlib", "inflate"),
+    ("Zlib", "adler32"),
+    ("Zlib", "zlib_version"),
     // Answered from the Db shim (`runtime/spinel/
     // active_record_db_config.rb`); a strict target's Db glue has none.
     ("ActiveRecord::Base", "connection_db_config"),
@@ -9895,7 +9902,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 29] = [
+const BUNDLED: [(&str, &str); 30] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -9921,6 +9928,9 @@ const BUNDLED: [(&str, &str); 29] = [
     ("Set", "set"),
     ("StringIO", "stringio"),
     ("StringScanner", "strscan"),
+    // `Zlib::GzipWriter` / `Zlib.deflate`: a default gem on CRuby/JRuby that
+    // an app requires by hand; spinel takes `packages/zlib`.
+    ("Zlib", "zlib"),
     ("URI", "uri"),
     // `Net::HTTP` — a REAL client on both lanes, so unlike IPAddr there
     // is nothing for roundhouse to port: CRuby resolves this to its own
