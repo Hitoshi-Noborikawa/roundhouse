@@ -87,6 +87,7 @@ SPINEL_TESTS = [
     "spinel_net_http_start",
     "rails_compat_vectors_spinel",
     "spinel_pg_db",
+    "spinel_db_contract",
     "generated_columns_spinel",
     "postgres_json_types_spinel",
     "array_column_storage_spinel",
@@ -221,15 +222,17 @@ PG_DB_INPUTS = {
     "runtime/spinel/active_support_time_parsing.rbs",
 }
 # The Db contract suite (tests/support/db_contract.rs): the Spinel lanes
-# each of its files feeds.
+# each of its files feeds. cruby_prelude.rb feeds only the CRuby lane,
+# which the unit job runs.
 DB_CONTRACT_INPUTS = {
-    "tests/db_contract/support.rb": ("spinel_pg_db",),
-    "tests/db_contract/contract_cases.rb": ("spinel_pg_db",),
-    "tests/db_contract/spinel_prelude.rb": ("spinel_pg_db",),
+    "tests/db_contract/support.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "tests/db_contract/contract_cases.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "tests/db_contract/spinel_prelude.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "tests/db_contract/sqlite_main.rb": ("spinel_db_contract",),
     "tests/db_contract/postgres_cases.rb": ("spinel_pg_db",),
     "tests/db_contract/postgres_main.rb": ("spinel_pg_db",),
     "tests/db_contract/db_pg_lane.rb": ("spinel_pg_db",),
-    "tests/support/db_contract.rs": ("spinel_pg_db",),
+    "tests/support/db_contract.rs": ("spinel_db_contract", "spinel_pg_db"),
 }
 GENERATED_COLUMNS_SPINEL_INPUTS = {
     "src/emit/ruby/library.rs",
@@ -549,6 +552,7 @@ def native_coverage(path):
                     "spinel_stmt_cache_lru",
                     "stmt_stats",
                     "db_sqlite_concurrency",
+                    "spinel_db_contract",
                 )
             )
         if any(word in name for word in ("param", "multipart", "request")):

@@ -7,17 +7,19 @@
 //!   contract_cases.rb  — the Db contract (runtime/ruby/db.rbs), every lane
 //!   postgres_cases.rb  — what any PostgreSQL Db adds, PostgreSQL lanes
 //!   <shim>_lane.rb     — a PostgreSQL lane's hook and its shim's own cases
-//!   postgres_main.rb   — the program a PostgreSQL lane runs
+//!   sqlite_main.rb / postgres_main.rb — the programs a lane runs
 //!
 //! A lane copies its shim in as `db.rb`, the runtime's prelude
-//! (`spinel_prelude.rb`) as `prelude.rb`, and the lane file as `lane.rb`,
-//! then compiles the backend's main file with Spinel. Each suite prints
+//! (`cruby_prelude.rb` or `spinel_prelude.rb`) as `prelude.rb`, and the
+//! lane file as `lane.rb`, then runs the backend's main file: under
+//! `ruby` for CRuby, compiled by Spinel for Spinel. Each suite prints
 //! `<suite>: N checks passed`, and every lane must report exactly the
 //! counts below, so a lane that skipped a case fails rather than passes.
 //!
 //! Pointing a new shim at the suite is one row in `LANES`. The tests that
 //! run lanes select them by runtime and backend, so the row is picked up
-//! by tests/spinel_pg_db.rs. A PostgreSQL row names a lane file;
+//! by tests/db_contract.rs (CRuby) or tests/spinel_db_contract.rs and
+//! tests/spinel_pg_db.rs (Spinel). A PostgreSQL row names a lane file;
 //! db_pg_lane.rb shows the one hook it must define.
 #![allow(dead_code)]
 
@@ -61,29 +63,59 @@ pub struct Lane {
     pub lane_checks: usize,
 }
 
-pub const LANES: &[Lane] = &[Lane {
-    name: "db_pg",
-    shim: "runtime/spinel/db_pg.rb",
-    runtime: Runtime::Spinel,
-    backend: Backend::Postgres,
-    requires: &[
-        "runtime/spinel/pg_errors.rb",
-        "runtime/spinel/active_support_time_parsing.rb",
-        "runtime/spinel/active_support_interval.rb",
-        "runtime/spinel/active_support_duration.rb",
-    ],
-    rbs: &[
-        "runtime/spinel/db_pg.rbs",
-        "runtime/spinel/pg_errors.rbs",
-        "runtime/ruby/db.rbs",
-        "runtime/spinel/active_support_time_parsing.rbs",
-        "runtime/spinel/active_support_interval.rbs",
-        "runtime/spinel/active_support_duration.rbs",
-    ],
-    include_env: Some(("SPINEL_PG_DIR", "a spinel-pg checkout")),
-    lane_file: Some("tests/db_contract/db_pg_lane.rb"),
-    lane_checks: 104,
-}];
+const SPINEL_TIME: &[&str] = &[
+    "runtime/spinel/active_support_time_parsing.rb",
+    "runtime/spinel/active_support_interval.rb",
+    "runtime/spinel/active_support_duration.rb",
+];
+
+pub const LANES: &[Lane] = &[
+    Lane {
+        name: "db_cruby",
+        shim: "runtime/spinel/db_cruby.rb",
+        runtime: Runtime::Cruby,
+        backend: Backend::Sqlite,
+        requires: &[],
+        rbs: &[],
+        include_env: None,
+        lane_file: None,
+        lane_checks: 0,
+    },
+    Lane {
+        name: "db",
+        shim: "runtime/spinel/db.rb",
+        runtime: Runtime::Spinel,
+        backend: Backend::Sqlite,
+        requires: SPINEL_TIME,
+        rbs: &[],
+        include_env: None,
+        lane_file: None,
+        lane_checks: 0,
+    },
+    Lane {
+        name: "db_pg",
+        shim: "runtime/spinel/db_pg.rb",
+        runtime: Runtime::Spinel,
+        backend: Backend::Postgres,
+        requires: &[
+            "runtime/spinel/pg_errors.rb",
+            "runtime/spinel/active_support_time_parsing.rb",
+            "runtime/spinel/active_support_interval.rb",
+            "runtime/spinel/active_support_duration.rb",
+        ],
+        rbs: &[
+            "runtime/spinel/db_pg.rbs",
+            "runtime/spinel/pg_errors.rbs",
+            "runtime/ruby/db.rbs",
+            "runtime/spinel/active_support_time_parsing.rbs",
+            "runtime/spinel/active_support_interval.rbs",
+            "runtime/spinel/active_support_duration.rbs",
+        ],
+        include_env: Some(("SPINEL_PG_DIR", "a spinel-pg checkout")),
+        lane_file: Some("tests/db_contract/db_pg_lane.rb"),
+        lane_checks: 104,
+    },
+];
 
 /// The lanes one test runs.
 pub fn lanes(runtime: Runtime, backend: Backend) -> impl Iterator<Item = &'static Lane> {

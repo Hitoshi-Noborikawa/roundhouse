@@ -85,6 +85,12 @@ in `src/project.rs`. Shape notes worth knowing:
   `scaffold/` tree overlaid into
   every emitted Ruby/Spinel project, and a `test/` tree of
   target-specific test files.
+- The Ruby-family `Db` shims but the JRuby one run one contract suite,
+  `tests/db_contract/`: `db_cruby.rb` under CRuby, `db.rb` and
+  `db_pg.rb` under Spinel. `contract_cases.rb` holds what every shim
+  must do, `postgres_cases.rb` what every PostgreSQL shim adds, and a
+  PostgreSQL shim's lane file its own implementation checks. A new shim
+  is one row in `LANES` (`tests/support/db_contract.rs`).
 - `runtime/spinel/db_pg.rb` implements the same `Db` contract over
   PostgreSQL, on the pure-Ruby spinel-pg driver (no libpq). No target
   selects it yet. `tests/spinel_pg_db.rs` compiles it with Spinel and
