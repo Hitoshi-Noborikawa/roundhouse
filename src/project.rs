@@ -5227,9 +5227,21 @@ fn apply_cable_actions(files: &mut [(String, String)], app: &App) {
 /// active_record_db_config.rb): one arm per model, by the name
 /// `record.class.name` answers for it, and an STI subclass name the
 /// base hydrates. See `lower::record_snapshot`.
+///
+/// NO-OP when nothing in the tree calls it (every app without a
+/// snapshot rebuild): the default body raises. Spinel compiles the
+/// method whether or not it is called, and with no caller to type
+/// `attributes` its arms handed every model's `instantiate` an untyped
+/// row, widening each `<Model>Row.from_raw` to the boxed path.
 fn apply_instantiate_named(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "      # >>> generated: instantiate-named\n";
     const TAIL: &str = "      # <<< generated: instantiate-named\n";
+    let called = files.iter().any(|(path, content)| {
+        !path.ends_with("active_record_db_config.rb") && content.contains("instantiate_named")
+    });
+    if !called {
+        return;
+    }
     let mut arms: Vec<(String, String)> = Vec::new();
     for model in &app.models {
         // Only a class with a table has rows to snapshot, and only it has
