@@ -116,13 +116,46 @@ fn the_last_inheritance_column_assignment_wins_on_ruby() {
     assert!(off.stdout.contains("sti disabled passed"), "type then nil: {}", off.stdout);
 }
 
+/// `Sticky < Article`, a sibling of a `Feature` that turns STI off, and
+/// the checks that `Article` still is STI.
+const SIBLING_PROBE: &str = r#"class SiblingProbe
+  def self.seed
+    Sticky.create!(title: "t", body: "t body long enough").id
+  end
+
+  def self.counts
+    [Article.count, Feature.count, Sticky.count]
+  end
+
+  def self.loaded(id)
+    record = Article.find(id)
+    [record.class.name, record.type]
+  end
+end
+"#;
+
+const SIBLING_SCRIPT: &str = r##"
+sibling = SiblingProbe.seed
+check("a sibling is scoped", SiblingProbe.counts, [3, 3, 1])
+check("a sibling's row is its class", SiblingProbe.loaded(sibling), ["Sticky", "Sticky"])
+puts "sibling sti passed"
+"##;
+
+/// `app_with` plus the sibling.
+fn app_with_sibling(article: &str, feature: &str) -> emit_and_run::Overlay {
+    app_with(article, feature)
+        .write("app/models/sticky.rb", "class Sticky < Article\nend\n")
+        .write("app/models/sibling_probe.rb", SIBLING_PROBE)
+}
+
 /// A subclass that sets `nil` itself isn't STI, while its base still is
-/// (review).
+/// (review): a sibling without the setting is scoped and stamps its type.
 #[test]
 fn a_subclass_that_turns_sti_off_is_a_plain_subclass_on_ruby() {
-    let run = app_with("", "  self.inheritance_column = nil\n").run_ruby(SUBCLASS_SCRIPT);
+    let run = app_with_sibling("", "  self.inheritance_column = nil\n").run_ruby(&format!("{SUBCLASS_SCRIPT}{SIBLING_SCRIPT}"));
     run.assert_passes();
     assert!(run.stdout.contains("sti disabled passed"), "{}", run.stdout);
+    assert!(run.stdout.contains("sibling sti passed"), "{}", run.stdout);
 }
 
 /// The setting is inherited from an abstract parent model (review): an

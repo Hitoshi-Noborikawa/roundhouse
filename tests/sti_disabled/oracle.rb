@@ -18,10 +18,12 @@
 #   {nil_then_type: {ic: "type", counts: [1, 1], stamped: "Pin"}}
 #   {type_then_nil: {ic: "", counts: [1, 1], stamped: nil}}
 #   {subclass_off: {ic: "", counts: [2, 2], stamped: nil, first: "Opted", base_rows: ["Post", "Post"]}}
+#   {sibling_on: {counts: [3, 3, 1], row: ["Tacked", "Tacked"]}}
 #   {abstract_off: {ic: "", counts: [2, 2], stamped: nil, first: "Wide2"}}
 #
 # The last assignment wins (`nil` then `"type"` is STI on), and a
-# subclass that sets `nil` itself isn't STI while its base still is.
+# subclass that sets `nil` itself isn't STI while its base still is: a
+# sibling without the setting is scoped and stamps its type.
 # An abstract parent's setting is inherited.
 gem "activerecord", "8.1.4"
 require "active_record"
@@ -76,6 +78,10 @@ Post.create!(title: "p")
 opted = Opted.create!(title: "o")
 p subclass_off: { ic: Opted.inheritance_column, counts: [Post.count, Opted.count], stamped: opted.type,
   first: Opted.order(:id).first.class.name, base_rows: Post.order(:id).map { |r| r.class.name } }
+class Tacked < Post
+end
+tacked = Tacked.create!(title: "t")
+p sibling_on: { counts: [Post.count, Opted.count, Tacked.count], row: [Post.find(tacked.id).class.name, Post.find(tacked.id).type] }
 class LegacyRecord < ActiveRecord::Base
   self.abstract_class = true
   self.inheritance_column = nil
