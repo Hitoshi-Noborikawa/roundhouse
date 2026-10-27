@@ -50,6 +50,7 @@ pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
 pub mod controller;
+mod class_new_factory;
 mod data_factory;
 mod module_factory;
 mod define_method_loop;
