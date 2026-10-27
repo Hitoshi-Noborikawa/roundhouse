@@ -6,7 +6,6 @@
 //! defined after it — otherwise Ruby NameErrors at load or call time.
 
 use crate::det::{HashMap, HashSet};
-
 use crate::dialect::LibraryClass;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::Symbol;
