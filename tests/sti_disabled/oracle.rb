@@ -18,9 +18,11 @@
 #   {nil_then_type: {ic: "type", counts: [1, 1], stamped: "Pin"}}
 #   {type_then_nil: {ic: "", counts: [1, 1], stamped: nil}}
 #   {subclass_off: {ic: "", counts: [2, 2], stamped: nil, first: "Opted", base_rows: ["Post", "Post"]}}
+#   {abstract_off: {ic: "", counts: [2, 2], stamped: nil, first: "Wide2"}}
 #
 # The last assignment wins (`nil` then `"type"` is STI on), and a
 # subclass that sets `nil` itself isn't STI while its base still is.
+# An abstract parent's setting is inherited.
 gem "activerecord", "8.1.4"
 require "active_record"
 ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
@@ -74,3 +76,17 @@ Post.create!(title: "p")
 opted = Opted.create!(title: "o")
 p subclass_off: { ic: Opted.inheritance_column, counts: [Post.count, Opted.count], stamped: opted.type,
   first: Opted.order(:id).first.class.name, base_rows: Post.order(:id).map { |r| r.class.name } }
+class LegacyRecord < ActiveRecord::Base
+  self.abstract_class = true
+  self.inheritance_column = nil
+end
+class Legacy < LegacyRecord
+  self.table_name = "legacies"
+end
+class Wide2 < Legacy
+end
+ActiveRecord::Schema.define { create_table(:legacies) { |t| t.string :title; t.string :type } }
+wide2 = Wide2.create!(title: "w")
+Legacy.create!(title: "l")
+p abstract_off: { ic: Legacy.inheritance_column, counts: [Legacy.count, Wide2.count], stamped: wide2.type,
+  first: Wide2.order(:id).first.class.name }

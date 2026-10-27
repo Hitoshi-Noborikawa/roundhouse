@@ -125,6 +125,22 @@ fn a_subclass_that_turns_sti_off_is_a_plain_subclass_on_ruby() {
     assert!(run.stdout.contains("sti disabled passed"), "{}", run.stdout);
 }
 
+/// The setting is inherited from an abstract parent model (review): an
+/// `ApplicationRecord` that sets `nil` turns STI off for `Article`, so
+/// `Feature < Article` is a plain subclass.
+#[test]
+fn an_abstract_parents_setting_is_inherited_on_ruby() {
+    let run = app_with("", "")
+        .edit(
+            "app/models/application_record.rb",
+            "  primary_abstract_class\n",
+            "  primary_abstract_class\n  self.inheritance_column = nil\n",
+        )
+        .run_ruby(SUBCLASS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("sti disabled passed"), "{}", run.stdout);
+}
+
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn a_model_with_sti_turned_off_keeps_type_as_an_attribute_on_spinel() {

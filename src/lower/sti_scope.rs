@@ -475,7 +475,23 @@ fn model_subclasses(app: &App) -> Subclasses {
                 break;
             }
             if let Some(base) = model_named(&parent) {
-                let setting = setting.or_else(|| sti_setting(base).map(|value| (value, false)));
+                // The model's own setting, else its nearest model parent's
+                // (an abstract `ApplicationRecord` that sets `nil`).
+                let setting = setting.or_else(|| {
+                    let mut model = Some(base);
+                    let mut up = 0;
+                    while let Some(m) = model {
+                        if let Some(value) = sti_setting(m) {
+                            return Some((value, false));
+                        }
+                        if up > 8 {
+                            break;
+                        }
+                        model = m.parent.as_ref().and_then(|p| model_named(p));
+                        up += 1;
+                    }
+                    None
+                });
                 // An abstract base has no table, so its subclasses are
                 // neither. With STI turned off they're plain subclasses.
                 if let Some(table) = app.schema.tables.get(&base.table.0) {
