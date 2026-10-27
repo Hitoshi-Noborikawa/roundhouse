@@ -68,6 +68,12 @@ Roundhouse reads `test/test_helper.rb`, `test/test_helpers/`, and
 Transpiled projects include tests from the default folders and these
 folders.
 
+A file in these folders that defines a module and no test class is a
+test helper (`test_paths: [test/support]` with `module ArgsHelper`). A
+test class that includes the module gets it in its own emitted file,
+with the module's assertions lowered like the test's own, and runs the
+module's `test_*` methods as its tests, as Minitest does.
+
 ### RSpec specs
 
 A file whose name ends in `_spec.rb` in one of these folders is read as
