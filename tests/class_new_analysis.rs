@@ -1464,6 +1464,29 @@ fn other_file_level_factories_stay_unresolved_constants() {
 }
 
 #[test]
+fn file_level_constants_hoist_onto_a_class_new_only_file() {
+    // A library file of only Class.new factories still needs sibling
+    // constants on Object; hoist them onto the first factory.
+    let files = [(
+        "app/models/limit_errors.rb",
+        "TIMEOUT = 5\nBaseError = Class.new(StandardError)\nLimitError = Class.new(BaseError) do\n  def self.code = TIMEOUT\nend\n",
+    )];
+    let (app, analyzer) = analyzed(ingest_files(&files), true);
+    assert!(errors(&app).is_empty(), "{:?}", errors(&app));
+    let base = app
+        .library_classes
+        .iter()
+        .find(|class| class.name.0.as_str() == "BaseError")
+        .expect("BaseError");
+    assert!(
+        base.constants.iter().any(|(name, _)| name.as_str() == "TIMEOUT"),
+        "TIMEOUT missing on BaseError: {:?}",
+        base.constants.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(class_method_return(&analyzer, "LimitError", "code"), Ty::Int);
+}
+
+#[test]
 fn a_file_level_factory_follows_its_in_file_parent_class() {
     // `NotFound = Class.new(AppError)` after `class AppError` must not
     // prepend the factory ahead of AppError: Ruby resolves the superclass

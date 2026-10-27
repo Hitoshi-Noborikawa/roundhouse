@@ -120,3 +120,19 @@ fn a_factory_subclassing_an_in_file_class_loads() {
         .run_ruby(SAME_FILE_PARENT_ASSERTIONS)
         .assert_passes();
 }
+
+#[test]
+fn a_class_new_only_file_keeps_sibling_constants() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/limit_errors.rb",
+            "TIMEOUT = 5\nBaseError = Class.new(StandardError)\nLimitError = Class.new(BaseError) do\n  def self.code = TIMEOUT\nend\n",
+        )
+        .run_ruby(
+            r##"got = LimitError.code
+raise got.inspect unless got == 5
+puts "class-new-only sibling constants passed"
+"##,
+        )
+        .assert_passes();
+}

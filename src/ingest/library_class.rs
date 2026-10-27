@@ -201,17 +201,28 @@ fn ingest_library_classes_impl(
         }
         _ => Vec::new(),
     };
-    if let Some(first) = out.first_mut() {
-        let mut file_constants = file_level_constants(&root, file, &made)?;
-        if !file_constants.is_empty() {
-            file_constants.extend(std::mem::take(&mut first.constants));
-            first.constants = file_constants;
-        }
+    // Hoist remaining file-level constants into the first class of the
+    // file — including when that first class is a Class.new factory and
+    // the file has no ordinary `class`/`module`. Otherwise a
+    // Class.new-only library file drops `TIMEOUT = 5` beside the
+    // factories, and a refused factory that should stay a constant has
+    // nowhere to land.
+    let file_constants = if nested_in.is_none() {
+        file_level_constants(&root, file, &made)?
+    } else {
+        Vec::new()
+    };
+    let mut factories: Vec<LibraryClass> = made.into_iter().map(|(_, c)| c).collect();
+    if !file_constants.is_empty() {
+        let host = out
+            .first_mut()
+            .or_else(|| factories.first_mut())
+            .expect("file_level_constants nonempty implies a host class or factory");
+        let mut consts = file_constants;
+        consts.extend(std::mem::take(&mut host.constants));
+        host.constants = consts;
     }
-    Ok(super::class_new_factory::order_with_file_classes(
-        made.into_iter().map(|(_, c)| c).collect(),
-        out,
-    ))
+    Ok(super::class_new_factory::order_with_file_classes(factories, out))
 }
 
 /// The block of `NAME = Data.define(:a, :b) do def … end end`, when that
