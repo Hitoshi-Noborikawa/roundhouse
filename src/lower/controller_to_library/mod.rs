@@ -2404,8 +2404,11 @@ fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[
 fn body_renders_partial(e: &Expr) -> bool {
     if let ExprNode::Send { recv: None, method, args, .. } = &*e.node
         && matches!(method.as_str(), "render" | "render_to_string")
-        && args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { entries, .. }
+        && (args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { entries, .. }
             if entries.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"))))
+            // `render "shared/_pager"`: the String form names the partial by its file.
+            || args.first().is_some_and(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Str { value } }
+                if value.rsplit('/').next().is_some_and(|leaf| leaf.starts_with('_')))))
     {
         return true;
     }

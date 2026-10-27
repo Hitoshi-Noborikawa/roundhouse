@@ -361,8 +361,12 @@ fn freezes_literals(text: &str) -> bool {
         }
         let Some(comment) = line.strip_prefix('#') else { return false };
         let comment = comment.to_ascii_lowercase().replace('-', "_");
-        if let Some(at) = comment.find("frozen_string_literal:") {
-            return comment[at + "frozen_string_literal:".len()..].trim_start().starts_with("true");
+        // Ruby allows space before the colon too (`frozen_string_literal : true`).
+        if let Some(at) = comment.find("frozen_string_literal") {
+            let rest = comment[at + "frozen_string_literal".len()..].trim_start();
+            if let Some(value) = rest.strip_prefix(':') {
+                return value.trim_start().starts_with("true");
+            }
         }
     }
     false

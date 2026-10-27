@@ -121,7 +121,14 @@ pub(super) fn partial_view_call_with_record(
                     ExprNode::Send { recv: None, method: Symbol::from("action_name"), args: vec![], block: None, parenthesized: false },
                 ),
             }),
-            "controller_name" => Some(str_lit(span, controller)),
+            // Not a helper's own controller: an inherited one (ApplicationController's) renders for the subclass the request reached.
+            "controller_name" => Some(match action {
+                Some(_) if !controller.is_empty() => str_lit(span, controller),
+                _ => Expr::new(
+                    span,
+                    ExprNode::Send { recv: None, method: Symbol::from("controller_path"), args: vec![], block: None, parenthesized: false },
+                ),
+            }),
             "path_parameters" => Some(ivar("path_parameters", span)),
             _ => None,
         }
