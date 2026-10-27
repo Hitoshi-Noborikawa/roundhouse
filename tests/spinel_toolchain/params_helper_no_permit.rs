@@ -93,6 +93,9 @@ fn a_no_permit_guard_filter_builds_and_runs_on_spinel() {
     let pager = server.get("/finds/pager?q=rails");
     assert_eq!(pager.status, 200, "{}", pager.body);
     assert!(pager.body.contains("href=\"/finds/pager?page=3&amp;q=rails\""), "{}", pager.body);
+    let helper = server.get("/finds/helper_pager?q=rails");
+    assert_eq!(helper.status, 200, "{}", helper.body);
+    assert!(helper.body.contains("href=\"/finds/helper_pager?page=3&amp;q=rails\""), "{}", helper.body);
     let bare = server.get("/finds");
     assert_eq!(bare.status, 200, "{}", bare.body);
     assert!(bare.body.contains("<p id=\"log\">(All)|||1|0</p>"), "{}", bare.body);

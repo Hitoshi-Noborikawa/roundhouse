@@ -1061,7 +1061,7 @@ fn subclass_template_hooks(
                         parenthesized: true,
                     },
                 );
-                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, &[])
+                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, &[])
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -1407,6 +1407,34 @@ fn build_methods(
             &deferred_renders, &mut deferred_tails,
         ));
     }
+    if let Some((preamble, wraps)) = pending_dispatcher {
+        let rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
+        let reads = reads_action_name(
+            controller,
+            all_controllers,
+            &dispatcher_bodies(&preamble, &wraps, &rescues),
+        );
+        let mut dispatcher = synthesize_process_action(
+            &preamble,
+            &publics_inlined,
+            &inherited,
+            controller.name.0.clone(),
+            &deferred_tails,
+            &rescues,
+            &wraps,
+            reads,
+            &missing,
+        );
+        // Block-form filters are inlined into `process_action` after
+        // `rewrite_controller_route_helpers` has already run on action
+        // bodies. A CSP block calls `service_worker_path(format: :js)`,
+        // which `route_format_suffix` renamed. The rewrite is idempotent
+        // on nodes it has already touched, so every dispatcher gets it —
+        // the next block filter that names a helper would otherwise stay bare.
+        dispatcher.body =
+            rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
+        methods.insert(dispatcher_at, dispatcher);
+    }
     // The empty set for both non-public loops below: `is_public: false`
     // already suppresses the implicit render, so there is never one to
     // defer.
@@ -1434,36 +1462,6 @@ fn build_methods(
         ));
     }
 
-    // After the private and helper methods: the dispatcher's `action_name` decision reads their lowered bodies too.
-    if let Some((preamble, wraps)) = pending_dispatcher {
-        let rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
-        // So does a lowered body that reads it: a partial render passes the request's `action_name` on.
-        let reads = reads_action_name(
-            controller,
-            all_controllers,
-            &dispatcher_bodies(&preamble, &wraps, &rescues),
-        ) || methods.iter().any(|m| body_calls_method(&m.body, &Symbol::from("action_name")));
-        let mut dispatcher = synthesize_process_action(
-            &preamble,
-            &publics_inlined,
-            &inherited,
-            controller.name.0.clone(),
-            &deferred_tails,
-            &rescues,
-            &wraps,
-            reads,
-            &missing,
-        );
-        // Block-form filters are inlined into `process_action` after
-        // `rewrite_controller_route_helpers` has already run on action
-        // bodies. A CSP block calls `service_worker_path(format: :js)`,
-        // which `route_format_suffix` renamed. The rewrite is idempotent
-        // on nodes it has already touched, so every dispatcher gets it —
-        // the next block filter that names a helper would otherwise stay bare.
-        dispatcher.body =
-            rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
-        methods.insert(dispatcher_at, dispatcher);
-    }
     // `helper_method :name` exposes a controller method to templates.
     // The lowered views are module functions with no controller
     // instance, so each ARG-PURE marked method (no ivar reads — the
@@ -2389,9 +2387,11 @@ fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[
     let reads = |e: &Expr| body_calls_method(e, &action_name);
     let mut chain = ancestor_chain(controller, all);
     chain.push(controller);
+    // A method that renders a partial passes the request's `action_name` on to it, outside an action too (a helper, an inherited one).
+    let renders_partial = |e: &Expr| body_renders_partial(e);
     dispatched.iter().any(|e| reads(e))
         || chain.iter().any(|c| {
-            c.actions().any(|a| reads(&a.body))
+            c.actions().any(|a| reads(&a.body) || renders_partial(&a.body))
                 || c.filters().any(|f| {
                     [&f.block, &f.if_cond_expr, &f.unless_cond_expr]
                         .into_iter()
@@ -2399,6 +2399,19 @@ fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[
                         .any(reads)
                 })
         })
+}
+
+fn body_renders_partial(e: &Expr) -> bool {
+    if let ExprNode::Send { recv: None, method, args, .. } = &*e.node
+        && matches!(method.as_str(), "render" | "render_to_string")
+        && args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { entries, .. }
+            if entries.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"))))
+    {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || body_renders_partial(c));
+    found
 }
 
 /// Does this filter body contain a respond-capable call (render /
@@ -3227,6 +3240,7 @@ fn lower_action_body(
             view_ivars,
             partials,
             action_name,
+            is_public,
             inheritor_modules,
         )
     };

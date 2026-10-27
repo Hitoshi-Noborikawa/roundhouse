@@ -18,6 +18,9 @@ class FindsControllerTest < ActionDispatch::IntegrationTest
     get "/finds/pager", params: { q: "rails" }
     assert_response :success
     assert_includes response.body, 'href="/finds/pager?page=3&amp;q=rails"'
+    get "/finds/helper_pager", params: { q: "rails" }
+    assert_response :success
+    assert_includes response.body, 'href="/finds/helper_pager?page=3&amp;q=rails"'
   end
 
   test "absent keys take the fallbacks" do

@@ -3832,115 +3832,98 @@ fn try_ingest_method_ref(
 /// evaluates to nil. A `next` or `redo` aimed at the loop itself is
 /// refused: in the source `next` goes to the test, and here it would
 /// skip it.
-/// `for x in coll; body; end` as a `while`, not `coll.each { |x| … }`:
-/// a `for` opens no scope, so `x` and the locals its body assigns stay
-/// visible after the loop, as they do in a `while`. The value is `coll`.
-///
-///   __for = coll.to_a; __i = 0
-///   while __i < __for.length; x = __for[__i]; __i += 1; body; end
-///
-/// A range literal from an Integer counts with `succ` instead of building the Array:
-///
-///   __i = a; __e = b
-///   while __i <= __e; x = __i; __i = __i.succ; body; end
-///
-/// The index moves before the body so `next` cannot skip it.
+/// `for x in coll; body; end` is `coll.each { |e| x = e; body }` with
+/// every local it writes declared first (`x = x`, nil when new, its value
+/// kept when not). Not a plain block: a `for` opens no scope, so the loop
+/// variable and the locals its body assigns stay visible after the loop,
+/// which a block's own locals would not. The rest is `each`'s: the loop's
+/// value, `break value`, `next`, `redo`, a lazy or each-only collection.
 fn ingest_for(f: &ruby_prism::ForNode<'_>, span: Span, file: &str) -> IngestResult<ExprNode> {
-    // Not `break value`: the desugar answers the collection after the loop, so the value would be lost.
-    if f.statements().is_some_and(|body| breaks_with_value(&body.as_node())) {
-        return Err(IngestError::Unsupported {
-            file: file.into(),
-            message: "`break` with a value inside a `for` loop".into(),
-        });
-    }
     let loc = f.as_node().location();
-    let local = |stem: &str| fresh_reserved_local(&loc, &format!("{stem}_{}", loc.start_offset()));
-    let (coll, index) = (local("__for"), local("__for_i"));
+    let element = fresh_reserved_local(&loc, &format!("__for_e_{}", loc.start_offset()));
     let var = |name: &Symbol| Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
-    let assign = |target: crate::expr::LValue, value: Expr| Expr::new(span, ExprNode::Assign { target, value });
     let local_target = |name: &Symbol| crate::expr::LValue::Var { id: crate::ident::VarId(0), name: name.clone() };
-    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
-        Expr::new(span, ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true })
+    let mut written: Vec<Symbol> = Vec::new();
+    for_written_locals(&f.index(), &mut written);
+    if let Some(body) = f.statements() {
+        for_written_locals(&body.as_node(), &mut written);
+    }
+    let mut exprs: Vec<Expr> = written
+        .iter()
+        .map(|name| Expr::new(span, ExprNode::Assign { target: local_target(name), value: var(name) }))
+        .collect();
+    let target = f.index();
+    let mut step = match target.as_multi_target_node() {
+        Some(mt) => destructure_target(&mt, var(&element), span, file)?,
+        None => vec![Expr::new(span, ExprNode::Assign { target: multi_write_target(&target, file)?, value: var(&element) })],
     };
-    let int = |value: i64| Expr::new(span, ExprNode::Lit { value: Literal::Int { value } });
-    // `x` or `a, b`: the element is written to the loop's target as an assignment would.
-    let bind = |element: Expr| -> IngestResult<Vec<Expr>> {
-        let target = f.index();
-        match target.as_multi_target_node() {
-            Some(mt) => destructure_target(&mt, element, span, file),
-            None => Ok(vec![assign(multi_write_target(&target, file)?, element)]),
-        }
-    };
-    let body = match f.statements() {
-        Some(s) => ingest_expr(&s.as_node(), file)?,
-        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
-    };
-    let collection = f.collection();
-    let range = collection
-        .as_range_node()
-        .or_else(|| collection.as_parentheses_node().and_then(|p| p.body()).and_then(|b| {
-            b.as_statements_node().and_then(|st| st.body().iter().next()).and_then(|n| n.as_range_node())
-        }));
-    let mut exprs: Vec<Expr> = Vec::new();
-    // The range's value, from its ends evaluated once.
-    let mut counted_range: Option<Expr> = None;
-    // Not a String or other range: `succ` and `<=` count an Integer range only; the rest go through `to_a`, which is `Range#each`.
-    let (cond, mut step) = match range.filter(|r| r.left().is_some_and(|l| l.as_integer_node().is_some())) {
-        Some(r) => {
-            let begin_local = local("__for_begin");
-            exprs.push(assign(local_target(&begin_local), ingest_expr(&r.left().unwrap(), file)?));
-            exprs.push(assign(local_target(&index), var(&begin_local)));
-            let (cond, end) = match r.right() {
-                Some(end) => {
-                    let end_local = local("__for_end");
-                    exprs.push(assign(local_target(&end_local), ingest_expr(&end, file)?));
-                    (send(var(&index), if r.is_exclude_end() { "<" } else { "<=" }, vec![var(&end_local)]), Some(var(&end_local)))
-                }
-                None => (Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: true } }), None),
-            };
-            counted_range = Some(Expr::new(
-                span,
-                ExprNode::Range { begin: Some(var(&begin_local)), end, exclusive: r.is_exclude_end() },
-            ));
-            let mut step = bind(var(&index))?;
-            step.push(assign(local_target(&index), send(var(&index), "succ", vec![])));
-            (cond, step)
-        }
-        None => {
-            exprs.push(assign(local_target(&coll), send(ingest_expr(&collection, file)?, "to_a", vec![])));
-            exprs.push(assign(local_target(&index), int(0)));
-            let cond = send(var(&index), "<", vec![send(var(&coll), "length", vec![])]);
-            let mut step = bind(send(var(&coll), "[]", vec![var(&index)]))?;
-            step.push(assign(local_target(&index), send(var(&index), "+", vec![int(1)])));
-            (cond, step)
-        }
-    };
-    step.push(body);
+    if let Some(s) = f.statements() {
+        step.push(ingest_expr(&s.as_node(), file)?);
+    }
+    let block = Expr::new(
+        span,
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: vec![element],
+            block_param: None,
+            body: Expr::new(span, ExprNode::Seq { exprs: step }),
+            block_style: crate::expr::BlockStyle::Do,
+        },
+    );
     exprs.push(Expr::new(
         span,
-        ExprNode::While { cond, body: Expr::new(span, ExprNode::Seq { exprs: step }), until_form: false },
+        ExprNode::Send {
+            recv: Some(ingest_expr(&f.collection(), file)?),
+            method: Symbol::from("each"),
+            args: Vec::new(),
+            block: Some(block),
+            parenthesized: false,
+        },
     ));
-    exprs.push(counted_range.unwrap_or_else(|| var(&coll)));
     Ok(ExprNode::Seq { exprs })
 }
 
-/// A `break value` that leaves this loop (not one of a nested block or loop).
-fn breaks_with_value(node: &Node<'_>) -> bool {
-    struct Breaks(bool);
-    impl<'pr> ruby_prism::Visit<'pr> for Breaks {
-        fn visit_break_node(&mut self, node: &ruby_prism::BreakNode<'pr>) {
-            self.0 |= node.arguments().is_some();
+/// The locals `node` writes in its own scope, in order, once each: not
+/// those of a block, lambda, `def` or class body inside it.
+fn for_written_locals(node: &Node<'_>, out: &mut Vec<Symbol>) {
+    struct Writes<'a>(&'a mut Vec<Symbol>);
+    impl Writes<'_> {
+        fn add(&mut self, name: &[u8]) {
+            let name = Symbol::from(String::from_utf8_lossy(name).as_ref());
+            if !self.0.contains(&name) {
+                self.0.push(name);
+            }
+        }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Writes<'_> {
+        fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+            self.add(node.name().as_slice());
+            ruby_prism::visit_local_variable_write_node(self, node);
+        }
+        fn visit_local_variable_target_node(&mut self, node: &ruby_prism::LocalVariableTargetNode<'pr>) {
+            self.add(node.name().as_slice());
+        }
+        fn visit_local_variable_operator_write_node(&mut self, node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>) {
+            self.add(node.name().as_slice());
+            ruby_prism::visit_local_variable_operator_write_node(self, node);
+        }
+        fn visit_local_variable_or_write_node(&mut self, node: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+            self.add(node.name().as_slice());
+            ruby_prism::visit_local_variable_or_write_node(self, node);
+        }
+        fn visit_local_variable_and_write_node(&mut self, node: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
+            self.add(node.name().as_slice());
+            ruby_prism::visit_local_variable_and_write_node(self, node);
         }
         fn visit_block_node(&mut self, _: &ruby_prism::BlockNode<'pr>) {}
         fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
-        fn visit_while_node(&mut self, _: &ruby_prism::WhileNode<'pr>) {}
-        fn visit_until_node(&mut self, _: &ruby_prism::UntilNode<'pr>) {}
-        fn visit_for_node(&mut self, _: &ruby_prism::ForNode<'pr>) {}
         fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+        fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {}
+        fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {}
+        fn visit_singleton_class_node(&mut self, _: &ruby_prism::SingletonClassNode<'pr>) {}
     }
-    let mut breaks = Breaks(false);
-    ruby_prism::Visit::visit(&mut breaks, node);
-    breaks.0
+    ruby_prism::Visit::visit(&mut Writes(out), node);
 }
 
 fn do_loop(

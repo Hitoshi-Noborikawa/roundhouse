@@ -6,7 +6,8 @@ use super::emit_and_run;
 /// A `for` over an Array (with `next`), over a Range literal (the loop
 /// variable and a body local stay visible after the loop, nil when it
 /// never ran), an exclusive range, Hash pairs into two targets (with
-/// `break`), the loop's own value (its collection), and `"#@tag"`.
+/// `break`), the loop's own value (its collection, a Hash kept a Hash),
+/// `break` with a value, and `"#@tag"`.
 pub const METHODS: &str = r##"  validates :title, presence: true
 
   def self.for_sum(xs)
@@ -58,6 +59,18 @@ pub const METHODS: &str = r##"  validates :title, presence: true
     r
   end
 
+  def self.for_hash_value(h)
+    r = for k, v in h
+    end
+    r
+  end
+
+  def self.for_break(xs)
+    for x in xs
+      break x * 10 if x > 1
+    end
+  end
+
   def tagged
     @tag = "T"
     "#@tag:#{title}"
@@ -72,6 +85,8 @@ raise "range0 #{Article.for_range(0).inspect}" unless Article.for_range(0) == [[
 raise "excl #{Article.for_exclusive.inspect}" unless Article.for_exclusive == [0, 1, 2]
 raise "pairs #{Article.for_pairs({ "a" => 1, "b" => 2, "stop" => 3, "c" => 4 }).inspect}" unless Article.for_pairs({ "a" => 1, "b" => 2, "stop" => 3, "c" => 4 }) == ["a=1", "b=2"]
 raise "value #{Article.for_value([5, 6]).inspect}" unless Article.for_value([5, 6]) == [5, 6]
+raise "hash value" unless Article.for_hash_value({ "a" => 1 }) == { "a" => 1 }
+raise "break #{Article.for_break([1, 2, 3]).inspect}" unless Article.for_break([1, 2, 3]) == 20
 raise "tag" unless Article.new(title: "x", body: "a body that is long enough").tagged == "T:x"
 puts "for loops passed"
 "##;
