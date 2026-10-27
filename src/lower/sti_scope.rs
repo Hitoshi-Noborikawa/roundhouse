@@ -678,11 +678,14 @@ fn rewrite(
     let span = expr.span;
     let str_lit = |value: &str| Expr::new(span, ExprNode::Lit { value: Literal::Str { value: value.to_string() } });
     let type_names = sti.names.get(&named).map(Vec::as_slice).unwrap_or_default();
+    // The value's span is synthetic: it marks the `where` as this
+    // rewrite's, so the Ruby family's relation seed can read the queried
+    // class back off it ([`sti_queried_class`]).
     let lookup_value = if type_names.len() <= 1 {
-        str_lit(named.0.as_str())
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: named.0.as_str().to_string() } })
     } else {
         Expr::new(
-            span,
+            Span::synthetic(),
             ExprNode::Array { elements: type_names.iter().map(|n| str_lit(n)).collect(), style: Default::default() },
         )
     };
@@ -697,7 +700,11 @@ fn rewrite(
             return;
         }
     }
-    let type_value = if seeding { str_lit(named.0.as_str()) } else { lookup_value };
+    let type_value = if seeding {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: named.0.as_str().to_string() } })
+    } else {
+        lookup_value
+    };
     let scoped = Expr::new(
         span,
         ExprNode::Send {
@@ -739,6 +746,35 @@ fn rewrite(
         span,
         ExprNode::Send { recv: Some(scoped), method, args, block, parenthesized },
     );
+}
+
+/// The subclass a `<Base>.where(type: …)` written by this rewrite
+/// queries: the first name in its marked `type:` value (the subclass's
+/// own, then its descendants'). activerecord 8.1.4 builds a row whose
+/// projection has no `type` as the queried class, so the Ruby family
+/// seeds that relation with it (`lower::scope_chain`) and hydration
+/// falls back to the relation's class. A `where(type: …)` the app wrote
+/// itself isn't marked, and keeps its model.
+pub(crate) fn sti_queried_class(method: &str, args: &[Expr]) -> Option<ClassId> {
+    if method != "where" {
+        return None;
+    }
+    let [arg] = args else { return None };
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+    let [(key, value)] = entries.as_slice() else { return None };
+    if !matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == INHERITANCE_COLUMN)
+        || !value.span.is_synthetic()
+    {
+        return None;
+    }
+    let first = match &*value.node {
+        ExprNode::Array { elements, .. } => elements.first()?,
+        _ => value,
+    };
+    match &*first.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(ClassId(Symbol::from(value.as_str()))),
+        _ => None,
+    }
 }
 
 /// `Feature.find_or_create_by(title: "s")` ->

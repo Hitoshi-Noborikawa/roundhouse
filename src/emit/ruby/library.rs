@@ -2301,7 +2301,7 @@ fn invalidate_on_fk_write(lc: &mut LibraryClass, name: &Symbol, fk: &Symbol) {
 /// instance = case row.type
 ///            when "Rooms::Open" then Rooms::Open.new
 ///            when "Rooms::Closed" then Rooms::Closed.new
-///            else Room.new
+///            else self.new
 ///            end
 /// ```
 ///
@@ -2340,6 +2340,14 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
         let Some(subs) = subs_of.get(&lc.name) else { continue };
         let base = lc.name.clone();
         for m in lc.methods.iter_mut() {
+            // `instantiate` builds through the class it's called on, so a
+            // subclass's relation (`Relation.new(Feature)`, whose `select`
+            // rows `instantiate`) reaches `from_row` with `self` the
+            // subclass, and a row without `type` is built as it.
+            if m.name.as_str() == "instantiate" && m.receiver == crate::dialect::MethodReceiver::Class {
+                self_from_row(&mut m.body, &base);
+                continue;
+            }
             if !matches!(m.name.as_str(), "from_stmt" | "from_row") {
                 continue;
             }
@@ -2381,9 +2389,21 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
                 if !is_base_new {
                     continue;
                 }
-                *value = sti_dispatch(value.clone(), &type_read, subs, value.span);
+                *value = sti_dispatch(&type_read, subs, value.span);
                 break;
             }
+        }
+    }
+}
+
+/// `<Base>.from_row(…)` -> `self.from_row(…)`, anywhere in `body`.
+fn self_from_row(body: &mut Expr, base: &ClassId) {
+    body.node.for_each_child_mut(&mut |c| self_from_row(c, base));
+    if let ExprNode::Send { recv: Some(r), method, .. } = &mut *body.node {
+        if method.as_str() == "from_row"
+            && matches!(&*r.node, ExprNode::Const { path } if const_path_is(path, base))
+        {
+            *r = Expr::new(r.span, ExprNode::SelfRef);
         }
     }
 }
@@ -2393,8 +2413,8 @@ fn const_path_is(path: &[Symbol], id: &ClassId) -> bool {
     joined.join("::") == id.0.as_str()
 }
 
-/// `case <type_read> when "<Sub>" then <Sub>.new … else <base_new> end`
-fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) -> Expr {
+/// `case <type_read> when "<Sub>" then <Sub>.new … else self.new end`
+fn sti_dispatch(type_read: &Expr, subs: &[ClassId], span: Span) -> Expr {
     let mut arms: Vec<crate::expr::Arm> = subs
         .iter()
         .map(|sub| crate::expr::Arm {
@@ -2419,13 +2439,24 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
             ),
         })
         .collect();
-    // `else` — a row whose type names no known subclass (or is empty)
-    // stays the base class, which is what Rails does for a blank
-    // inheritance column.
+    // `else` — a row whose type names no known subclass, is empty, or
+    // wasn't selected is the class `from_row` is called on: the base
+    // for the base's relation, the subclass for a subclass's scope (its
+    // relation holds the subclass, `lower::scope_chain`). Rails builds
+    // such a row as the queried class.
     arms.push(crate::expr::Arm {
         pattern: crate::expr::Pattern::Wildcard,
         guard: None,
-        body: base_new,
+        body: Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                method: Symbol::from("new"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        ),
     });
     Expr::new(span, ExprNode::Case { scrutinee: type_read.clone(), arms })
 }
