@@ -20,10 +20,10 @@ use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 /// Hash methods that yield one `[key, value]` pair (CRuby 4.0.5). The
 /// others `block_params_for` types for a Hash (`select`, `filter`,
 /// `reject`) yield two values, so a lone parameter gets the key.
-const HASH_PAIR_METHODS: [&str; 18] = [
+const HASH_PAIR_METHODS: [&str; 19] = [
     "each", "each_pair", "map", "collect", "flat_map", "collect_concat", "any?", "all?",
     "none?", "count", "find", "detect", "sort_by", "min_by", "max_by", "group_by",
-    "partition", "filter_map",
+    "partition", "sum", "filter_map",
 ];
 
 impl<'a> BodyTyper<'a> {

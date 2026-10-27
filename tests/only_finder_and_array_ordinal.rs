@@ -187,6 +187,18 @@ fn a_one_param_hash_block_binds_the_pair() {
     assert!(!src.contains(".second"), "no `second` should survive:\n{src}");
 }
 
+/// `sum` yields the pair too (CRuby 4.0.5: `{a: 1}.sum { |pair| pair[1] }`
+/// is 1), so a lone parameter is the pair there as well.
+#[test]
+fn a_one_param_hash_sum_binds_the_pair() {
+    let src = emit_lib(
+        "class GadgetTotal\n  def self.total\n    { \"small\" => [1, 2], \"large\" => [3] }.sum { |pair| pair.second.length }\n  end\nend\n",
+        "gadget_total",
+    );
+    assert!(src.contains("sum { |pair| pair[1].length }"), "one-param Hash sum:\n{src}");
+    assert!(!src.contains(".second"), "no `second` should survive:\n{src}");
+}
+
 // ── conversions type through an untyped receiver ─────────────────────
 
 /// `x.to_s` is a String whatever `x` is, and saying so is what lets a
