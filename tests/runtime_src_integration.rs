@@ -1231,7 +1231,11 @@ fn every_runtime_method_body_concretely_typed() {
     // `ActiveRecord::Bounds` element (`where(created_at: [nil, 7.days.ago..])`),
     // and the element read off the untyped Array reaches `bounds_predicate`
     // through it (+2 in active_record/relation.rb, 884 -> 886).
-    const CEILING: usize = 886;
+    // MEASURED 888 on 2026-10-27 (on 886): `restore_attribute!` hands the
+    // column's original value, whatever its type, to the column's writer
+    // and `clear_attribute_change` stores the current one in the baseline
+    // (+2 in active_record/connection.rb, 886 -> 888).
+    const CEILING: usize = 888;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
