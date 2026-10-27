@@ -5,9 +5,11 @@
 //! Like ordinary classes, a factory does not lose those facts for
 //! unrelated or unresolved reflection. Literal mutations of the factory, its
 //! ancestry, or the Class constructor still make that identity uncertain.
-//! Nonempty blocks stay excluded: ingest currently erases their methods.
-//! Ordinary class headers define the superclass parity bar. Constructor
-//! mutations need separate checks because those headers never call Class.new.
+//! Nonempty blocks of class-body statements are ingested as ordinary
+//! library classes (`ingest::class_new_factory`); other nonempty blocks stay
+//! excluded here. Ordinary class headers define the superclass parity bar.
+//! Constructor mutations need separate checks because those headers never
+//! call Class.new.
 
 use std::collections::{HashMap, HashSet};
 

@@ -133,7 +133,7 @@ fn ingest_library_classes_impl(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, class.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
-        let made = class_new_constant_classes(Some(&owner), class.body(), file);
+        let made = super::class_new_factory::constant_classes(Some(&owner), class.body(), file);
         lc.constants.retain(|(name, _)| !made.iter().any(|(s, _)| s == name));
         out.extend(super::data_factory::collect(class.body(), &owner, file)?);
         out.push(lc);
@@ -159,7 +159,7 @@ fn ingest_library_classes_impl(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, module.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
-        let made = class_new_constant_classes(Some(&owner), module.body(), file);
+        let made = super::class_new_factory::constant_classes(Some(&owner), module.body(), file);
         lc.constants.retain(|(name, _)| !made.iter().any(|(s, _)| s == name));
         out.extend(super::data_factory::collect(module.body(), &owner, file)?);
         out.push(lc);
@@ -196,7 +196,9 @@ fn ingest_library_classes_impl(
     // those classes. The nested walk (`nested_in`) takes no top-level
     // declaration.
     let made = match (nested_in, root.as_program_node()) {
-        (None, Some(program)) => class_new_constant_classes(None, Some(program.statements().as_node()), file),
+        (None, Some(program)) => {
+            super::class_new_factory::constant_classes(None, Some(program.statements().as_node()), file)
+        }
         _ => Vec::new(),
     };
     if let Some(first) = out.first_mut() {
@@ -206,48 +208,10 @@ fn ingest_library_classes_impl(
             first.constants = file_constants;
         }
     }
-    Ok(order_same_file_by_parents(
+    Ok(super::class_new_factory::order_with_file_classes(
         made.into_iter().map(|(_, c)| c).collect(),
         out,
     ))
-}
-
-/// Combine file-level `Class.new` factories with the file's other classes
-/// so a same-file superclass is defined before any subclass that names it.
-/// Factories whose parents are outside the file still precede classes that
-/// depend on them; a cycle cannot be Ruby either and keeps source order.
-fn order_same_file_by_parents(factories: Vec<LibraryClass>, rest: Vec<LibraryClass>) -> Vec<LibraryClass> {
-    if factories.is_empty() {
-        return rest;
-    }
-    let mut pending = factories;
-    pending.extend(rest);
-    let names: HashSet<String> = pending.iter().map(|class| class.name.0.as_str().to_string()).collect();
-    let mut ordered = Vec::with_capacity(pending.len());
-    let mut placed = HashSet::new();
-    while !pending.is_empty() {
-        let before = pending.len();
-        let mut deferred = Vec::new();
-        for class in pending.drain(..) {
-            let waits_for = class
-                .parent
-                .iter()
-                .chain(class.includes.iter())
-                .any(|dep| names.contains(dep.0.as_str()) && !placed.contains(dep.0.as_str()));
-            if waits_for {
-                deferred.push(class);
-                continue;
-            }
-            placed.insert(class.name.0.as_str().to_string());
-            ordered.push(class);
-        }
-        if deferred.len() == before {
-            ordered.extend(deferred);
-            break;
-        }
-        pending = deferred;
-    }
-    ordered
 }
 
 /// The block of `NAME = Data.define(:a, :b) do def … end end`, when that
@@ -1620,132 +1584,6 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
 /// the constant names they replace.
-/// `Error = Class.new(StandardError)` in a class or module body: the
-/// class it defines, as `class Error < StandardError; end` would, under
-/// the owner (`Owner::Error`). At file level (no owner) Ruby sets the
-/// constant on Object, so the class is the top-level `Error`, as the
-/// same `class` written there would be. A parent written bare that
-/// names an earlier such class of the same owner
-/// (`FunctionExecutionError = Class.new(Error)`) is that one, as Ruby's
-/// lexical lookup finds it. Only one constant argument, with no block or
-/// with a block of class-body statements (`class_new_factory`): Ruby runs
-/// that block in the new class, so its `def`s, accessors and mixins are
-/// the class's, as in a `class` body.
-fn class_new_constant_classes(owner: Option<&ClassId>, body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<(Symbol, LibraryClass)> {
-    let mut out: Vec<(Symbol, LibraryClass)> = Vec::new();
-    let Some(body) = body else { return out };
-    let qualified = |name: &str| match owner {
-        Some(owner) => format!("{}::{name}", owner.0.as_str()),
-        None => name.to_string(),
-    };
-    for stmt in flatten_statements(body) {
-        let Some(ClassNewFactory { name, parent: parent_node, body: block_body }) = class_new_factory(&stmt) else { continue };
-        let Some(written) = constant_path_of(&parent_node) else { continue };
-        let rooted = parent_node.as_constant_path_node().is_some_and(|p| super::util::constant_path_is_rooted(&p));
-        let written: Vec<String> = written.into_iter().filter(|s| !s.is_empty()).collect();
-        let parent = match written.as_slice() {
-            [one] if !rooted && out.iter().any(|(n, _)| n.as_str() == one) => qualified(one),
-            // Kept `::`-rooted: emitted inside the owner, a bare name would resolve to the sibling.
-            _ if rooted && owner.is_some() => format!("::{}", written.join("::")),
-            _ => written.join("::"),
-        };
-        let id = ClassId(Symbol::from(qualified(name.as_str())));
-        // A block the class-body walk refuses stays a constant, as before.
-        let Ok(DeclBody { includes, include_spans, methods, constants, unknown_calls, class_initializers, class_attributes: _ }) =
-            walk_decl_body(block_body, &id, file, DeclBodyMode::Instance)
-        else {
-            continue;
-        };
-        out.push((
-            name,
-            LibraryClass {
-                name: id,
-                is_module: false,
-                parent: Some(ClassId(Symbol::from(parent))),
-                parent_span: super::util::node_span(&parent_node, file),
-                includes,
-                include_spans,
-                methods,
-                nullable_columns: Vec::new(),
-                origin: None,
-                constants,
-                unknown_calls,
-                class_ivar_initializers: class_initializers,
-            },
-        ));
-    }
-    out
-}
-
-/// `NAME = Class.new(Parent)` with one constant argument, and no block
-/// or a parameterless block of class-body statements (`body`, see
-/// `class_body_statement`): the class a `class NAME < Parent` with that
-/// body makes. An empty block stays a constant, which the checker's
-/// `Class.new` pass (`analyze::class_new`) admits under its mutation
-/// guards.
-struct ClassNewFactory<'pr> {
-    name: Symbol,
-    parent: ruby_prism::Node<'pr>,
-    body: Option<ruby_prism::Node<'pr>>,
-}
-
-fn class_new_factory<'pr>(stmt: &ruby_prism::Node<'pr>) -> Option<ClassNewFactory<'pr>> {
-    let cw = stmt.as_constant_write_node()?;
-    let call = cw.value().as_call_node()?;
-    if constant_id_str(&call.name()) != "new"
-        || constant_path_of(&call.receiver()?)?.into_iter().filter(|s| !s.is_empty()).ne(["Class".to_string()])
-    {
-        return None;
-    }
-    let mut args = call.arguments()?.arguments().iter();
-    let (Some(parent), None) = (args.next(), args.next()) else { return None };
-    constant_path_of(&parent)?;
-    let body = match call.block() {
-        None => None,
-        Some(block) => {
-            let block = block.as_block_node()?;
-            let body = block.body()?;
-            let statements = body.as_statements_node()?.body();
-            if block.parameters().is_some()
-                || statements.iter().next().is_none()
-                || !statements.iter().all(|stmt| class_body_statement(&stmt))
-            {
-                return None;
-            }
-            Some(body)
-        }
-    };
-    Some(ClassNewFactory { name: Symbol::from(constant_id_str(&cw.name())), parent, body })
-}
-
-/// A statement that does in a `Class.new` block what it does in a `class`
-/// body. Ruby runs the block with the new class as `self`, so a `def`, an
-/// `attr_*` accessor, a visibility marker, an `include` or `extend` of a
-/// constant, or an alias acts on that class. A constant, a class variable
-/// or a `class`/`module` written in the block belongs to the enclosing
-/// scope instead, so a block with one of those, or with any other
-/// statement, does not make the class a `class` body makes.
-fn class_body_statement(stmt: &ruby_prism::Node<'_>) -> bool {
-    if stmt.as_def_node().is_some() || stmt.as_alias_method_node().is_some() {
-        return true;
-    }
-    let Some(call) = stmt.as_call_node() else { return false };
-    if call.receiver().is_some() || call.block().is_some() {
-        return false;
-    }
-    let args: Vec<_> = call.arguments().map(|args| args.arguments().iter().collect()).unwrap_or_default();
-    let symbols = |args: &[ruby_prism::Node<'_>]| args.iter().all(|arg| symbol_value(arg).is_some());
-    match constant_id_str(&call.name()) {
-        "attr_reader" | "attr_writer" | "attr_accessor" => !args.is_empty() && symbols(&args),
-        "private" | "protected" | "public" => {
-            symbols(&args) || matches!(args.as_slice(), [def] if def.as_def_node().is_some())
-        }
-        "include" | "extend" => !args.is_empty() && args.iter().all(|arg| constant_path_of(arg).is_some()),
-        "alias_method" => args.len() == 2 && symbols(&args),
-        _ => false,
-    }
-}
-
 fn struct_constant_classes(
     owner: &ClassId,
     body: Option<ruby_prism::Node<'_>>,
@@ -1836,7 +1674,7 @@ fn take_class_ivar_initializers(calls: &mut Vec<Expr>) -> Vec<Expr> {
 /// The declaration context determines which receivers/accessors are
 /// synthesized and whether include-like calls affect the class side.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DeclBodyMode {
+pub(super) enum DeclBodyMode {
     Instance,
     ClassMethods,
     /// `class << self`. `included_hook` is set only for a module's own
@@ -1853,18 +1691,18 @@ impl DeclBodyMode {
     }
 }
 #[derive(Default)]
-struct DeclBody {
-    includes: Vec<ClassId>,
+pub(super) struct DeclBody {
+    pub(super) includes: Vec<ClassId>,
     /// Parallel to `includes`: the span of each `include` call, so an
     /// unresolved one can be pointed at.
-    include_spans: Vec<Span>,
-    methods: Vec<MethodDef>,
-    constants: Vec<(Symbol, Expr)>,
-    unknown_calls: Vec<Expr>,
-    class_initializers: Vec<Expr>,
+    pub(super) include_spans: Vec<Span>,
+    pub(super) methods: Vec<MethodDef>,
+    pub(super) constants: Vec<(Symbol, Expr)>,
+    pub(super) unknown_calls: Vec<Expr>,
+    pub(super) class_initializers: Vec<Expr>,
     /// `mattr_*` / `cattr_*` attribute names declared in this body —
     /// used when folding ClassMethods seeds onto the enclosing module.
-    class_attributes: HashSet<Symbol>,
+    pub(super) class_attributes: HashSet<Symbol>,
 }
 
 impl DeclBody {
@@ -2267,7 +2105,7 @@ fn reject_conditional_accessor(node: &ruby_prism::Node<'_>, file: &str) -> Inges
     Ok(())
 }
 
-fn walk_decl_body<'pr>(
+pub(super) fn walk_decl_body<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
     file: &str,
@@ -4176,10 +4014,8 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
             return Some(ClassKind::LibraryClass);
         }
         // `ExampleError = Class.new(StandardError)`: the file declares a
-        // class, not a model (see `class_new_constant_classes`).
-        if root.as_program_node().is_some_and(|program| {
-            flatten_statements(program.statements().as_node()).iter().any(|stmt| class_new_factory(stmt).is_some())
-        }) {
+        // class, not a model (see `class_new_factory::constant_classes`).
+        if super::class_new_factory::file_has_factory(&root) {
             return Some(ClassKind::LibraryClass);
         }
         return None;
