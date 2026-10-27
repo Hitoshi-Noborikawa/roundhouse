@@ -88,6 +88,10 @@ mod source_gem_autoload;
 mod for_loops_contract;
 #[path = "emit_and_run/for_loops.rs"]
 mod for_loops;
+#[path = "support/block_macros.rs"]
+mod block_macros_contract;
+#[path = "emit_and_run/block_macros.rs"]
+mod block_macros;
 #[path = "support/auto_source_gem.rs"]
 mod auto_source_gem_contract;
 #[path = "emit_and_run/auto_source_gem.rs"]

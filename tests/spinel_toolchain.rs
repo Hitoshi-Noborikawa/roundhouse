@@ -196,6 +196,10 @@ mod representable;
 mod for_loops_contract;
 #[path = "spinel_toolchain/for_loops.rs"]
 mod for_loops;
+#[path = "support/block_macros.rs"]
+mod block_macros_contract;
+#[path = "spinel_toolchain/block_macros.rs"]
+mod block_macros;
 #[path = "support/auto_source_gem.rs"]
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]
