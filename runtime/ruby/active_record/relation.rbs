@@ -14,7 +14,8 @@ module ActiveRecord
   end
 
   class EagerFilter
-    def initialize: (Array[Hash[Symbol, untyped]] conditions, Array[Hash[Symbol, untyped]] negations, Array[Hash[Symbol, untyped]] orders) -> void
+    def initialize: (Array[Hash[Symbol, untyped]] conditions, Array[Hash[Symbol, untyped]] negations, Array[Hash[Symbol, untyped]] orders, untyped nested) -> void
+    def nested: () -> untyped
     def conditions: () -> Array[Hash[Symbol, untyped]]
     def negations: () -> Array[Hash[Symbol, untyped]]
     def orders: () -> Array[Hash[Symbol, untyped]]

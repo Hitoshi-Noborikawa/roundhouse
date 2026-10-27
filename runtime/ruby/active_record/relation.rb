@@ -50,10 +50,15 @@ module ActiveRecord
   # holds only the matching rows, in that order. The preload arm reads
   # the same conditions and order against the association's table.
   class EagerFilter
-    def initialize(conditions, negations, orders)
+    def initialize(conditions, negations, orders, nested)
       @conditions = conditions
       @negations = negations
       @orders = orders
+      @nested = nested
+    end
+
+    def nested
+      @nested
     end
 
     def conditions

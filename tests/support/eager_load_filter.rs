@@ -11,7 +11,7 @@ use super::emit_and_run;
 pub const METHODS: &str = r#"  validates :title, presence: true
 
   def self.with_comments_by(name)
-    includes(:comments)
+    includes(:comments, comments: :article)
       .where(comments: { commenter: name })
       .where(comments: { body: ["one", "three", "four", "five"] })
       .where.not(comments: { body: "one" })
@@ -30,8 +30,8 @@ Comment.create!(article: b, commenter: "Ann", body: "three")
 Comment.create!(article: b, commenter: "Bob", body: "four")
 Comment.create!(article: a, commenter: "Ann", body: "four")
 Comment.create!(article: c, commenter: "Bob", body: "five")
-got = Article.with_comments_by("Ann").to_a.map { |art| [art.title, art.comments.map { |cm| cm.body }] }
-want = [["Alpha", ["four"]], ["Beta", ["three"]]]
+got = Article.with_comments_by("Ann").to_a.map { |art| [art.title, art.comments.map { |cm| cm.body + "@" + cm.article.title }] }
+want = [["Alpha", ["four@Alpha"]], ["Beta", ["three@Beta"]]]
 raise "eager: #{got.inspect}" unless got == want
 puts "eager load passed"
 "#;

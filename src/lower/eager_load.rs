@@ -6,7 +6,7 @@
 //!
 //! The chain is rewritten on the ruby family:
 //!
-//!   Category.includes(tags: ActiveRecord::EagerFilter.new([{ tags: { active: true } }], [], [{ tags: { tag: :asc } }]))
+//!   Category.includes(tags: ActiveRecord::EagerFilter.new([{ tags: { active: true } }], [], [{ tags: { tag: :asc } }], nil))
 //!     .left_outer_joins(:tags).distinct.where(…).order(…)
 //!
 //! The join and `distinct` filter the parents. The EagerFilter rides the
@@ -150,13 +150,26 @@ fn step(method: &str, args: &[Expr], chain: &mut Chain, any: &mut bool) -> bool 
     };
     match method {
         "includes" | "eager_load" => {
+            let mut names: Vec<Symbol> = Vec::new();
             for arg in args {
-                if let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node {
-                    chain.included.push(value.clone());
-                    if method == "eager_load" {
-                        chain.referenced.push(value.clone());
+                match &*arg.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => names.push(value.clone()),
+                    // `comments: :user`: the association is loaded too, its own preloads riding along.
+                    ExprNode::Hash { entries, .. } => {
+                        for (k, _) in entries {
+                            if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
+                                names.push(value.clone());
+                            }
+                        }
                     }
+                    _ => {}
                 }
+            }
+            for name in names {
+                if method == "eager_load" {
+                    chain.referenced.push(name.clone());
+                }
+                chain.included.push(name);
             }
             *any = true;
         }
@@ -201,6 +214,9 @@ fn apply(e: &mut Expr, chain: &Chain, models: &[Model]) {
     let loadable = eager_loadable(model);
     let mut eager: Vec<(Symbol, Expr)> = Vec::new();
     for name in &chain.included {
+        if eager.iter().any(|(n, _)| n == name) {
+            continue;
+        }
         let Some((_, target, _)) = loadable.iter().find(|(n, _, _)| n == name) else { continue };
         let Some(table) = models.iter().find(|m| &m.name == target).map(|m| m.table.0.clone()) else { continue };
         // Rails keys a `where`/`order` on the table; the association's name reads the same table here.
@@ -228,6 +244,7 @@ fn apply(e: &mut Expr, chain: &Chain, models: &[Model]) {
                 args: [conditions, negations, orders]
                     .into_iter()
                     .map(|elements| Expr::new(e.span, ExprNode::Array { elements, style: Default::default() }))
+                    .chain(std::iter::once(Expr::new(e.span, ExprNode::Lit { value: Literal::Nil })))
                     .collect(),
                 block: None,
                 parenthesized: true,
@@ -252,21 +269,50 @@ fn rewrite_includes(e: &mut Expr, eager: &[(Symbol, Expr)]) {
         return;
     }
     let span = e.span;
+    // The preloads a Hash names under an eager-loaded association (`comments: :user`) run on the rows it loads.
+    let mut nested: Vec<(Symbol, Expr)> = Vec::new();
+    for arg in args.iter_mut() {
+        if let ExprNode::Hash { entries, .. } = &mut *arg.node {
+            entries.retain(|(k, v)| match &*k.node {
+                ExprNode::Lit { value: Literal::Sym { value } } if eager.iter().any(|(n, _)| n == value) => {
+                    nested.push((value.clone(), v.clone()));
+                    false
+                }
+                _ => true,
+            });
+        }
+    }
+    let mut present: Vec<Symbol> = nested.iter().map(|(n, _)| n.clone()).collect();
     let mut kept: Vec<Expr> = Vec::new();
+    for arg in args.drain(..) {
+        let consumed = match &*arg.node {
+            ExprNode::Lit { value: Literal::Sym { value } } if eager.iter().any(|(n, _)| n == value) => {
+                present.push(value.clone());
+                true
+            }
+            ExprNode::Hash { entries, .. } => entries.is_empty(),
+            _ => false,
+        };
+        if !consumed {
+            kept.push(arg);
+        }
+    }
     let mut pairs: Vec<(Expr, Expr)> = Vec::new();
     let mut joined: Vec<Symbol> = Vec::new();
-    for arg in args.drain(..) {
-        let eager_one = match &*arg.node {
-            ExprNode::Lit { value: Literal::Sym { value } } => eager.iter().find(|(n, _)| n == value),
-            _ => None,
-        };
-        match eager_one {
-            Some((name, filter)) => {
-                pairs.push((sym(span, name), filter.clone()));
-                joined.push(name.clone());
+    for (name, filter) in eager.iter().filter(|(n, _)| present.contains(n)) {
+        let mut filter = filter.clone();
+        let inner: Vec<Expr> = nested.iter().filter(|(n, _)| n == name).map(|(_, v)| v.clone()).collect();
+        if !inner.is_empty() {
+            if let ExprNode::Send { args, .. } = &mut *filter.node {
+                args[3] = if inner.len() == 1 {
+                    inner.into_iter().next().unwrap()
+                } else {
+                    Expr::new(span, ExprNode::Array { elements: inner, style: Default::default() })
+                };
             }
-            None => kept.push(arg),
         }
+        pairs.push((sym(span, name), filter));
+        joined.push(name.clone());
     }
     if !pairs.is_empty() {
         kept.push(Expr::new(span, ExprNode::Hash { entries: pairs, kwargs: true }));
