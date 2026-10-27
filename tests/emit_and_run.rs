@@ -82,6 +82,10 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "support/auto_source_gem.rs"]
+mod auto_source_gem_contract;
+#[path = "emit_and_run/auto_source_gem.rs"]
+mod auto_source_gem;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]

@@ -2067,7 +2067,7 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
         return;
     }
     // The longest-matching gem across the whole lockfile, so `Rack::Utils` stays rack's while `Rack::MiniProfiler` is rack-mini-profiler's
-    let ported = spinel_runtime_constants();
+    let ported = crate::gems::spinel_runtime_constants();
     let owner = |path: &str| -> Option<String> {
         if ported.contains(path) {
             return None;
@@ -2125,44 +2125,6 @@ fn for_each_app_constant(app: &App, f: &mut dyn FnMut(crate::span::Span, &str)) 
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, f));
 }
 
-/// Every class and module `runtime/spinel/*.rb` declares, by full name: a gem's
-/// constant ported there (`Net::HTTP::Persistent`) runs on the Spinel tree.
-fn spinel_runtime_constants() -> &'static std::collections::HashSet<String> {
-    static NAMES: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
-    NAMES.get_or_init(|| {
-        struct Declared {
-            nesting: Vec<String>,
-            out: std::collections::HashSet<String>,
-        }
-        impl Declared {
-            fn enter(&mut self, path: &ruby_prism::Node<'_>) {
-                let name = String::from_utf8_lossy(path.location().as_slice()).trim_start_matches("::").to_string();
-                self.nesting.push(name);
-                self.out.insert(self.nesting.join("::"));
-            }
-        }
-        impl<'pr> ruby_prism::Visit<'pr> for Declared {
-            fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
-                self.enter(&node.constant_path());
-                ruby_prism::visit_module_node(self, node);
-                self.nesting.pop();
-            }
-            fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
-                self.enter(&node.constant_path());
-                ruby_prism::visit_class_node(self, node);
-                self.nesting.pop();
-            }
-        }
-        let mut files = Vec::new();
-        let _ = crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files);
-        let mut declared = Declared { nesting: Vec::new(), out: std::collections::HashSet::new() };
-        for (_, source) in &files {
-            let parsed = ruby_prism::parse(source.as_bytes());
-            ruby_prism::Visit::visit(&mut declared, &parsed.node());
-        }
-        declared.out
-    })
-}
 
 /// Not left to the runtime's raise: `scope_chain` needs the receiver's model to write the join's SQL.
 fn report_dynamic_association_joins(app: &App, target: BuildTarget) {
@@ -2514,11 +2476,69 @@ pub fn target_files(
     target_files_inner(app, fixture, target)
 }
 
+/// The ruby family runs an automatically sourced gem as the real gem,
+/// through its Gemfile and require (`ingest::auto_source_gems`): its
+/// compiled classes leave this tree, and the gem reads as the unknown
+/// boundary the Gemfile wiring declares.
+fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
+    if app.auto_source_gems.is_empty() || !matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        return None;
+    }
+    let lock = app.gem_lock.as_ref();
+    let mounted = |file: crate::span::FileId| {
+        app.source_path(file).is_some_and(|path| {
+            app.auto_source_gems.iter().any(|gem| {
+                lock.and_then(|l| l.version_of(gem)).is_some_and(|v| crate::ingest::source_gems::file_of(path, gem, v))
+            })
+        })
+    };
+    let mut trimmed = app.clone();
+    // A class records no span of its own: the first real file among its parts names where it was written.
+    let file_of_class = |c: &crate::dialect::LibraryClass| {
+        c.methods
+            .iter()
+            .map(|m| m.body.span.file)
+            .chain(c.constants.iter().map(|(_, value)| value.span.file))
+            .chain(std::iter::once(c.parent_span.file))
+            .chain(c.include_spans.iter().map(|span| span.file))
+            .find(|file| file.0 != 0)
+    };
+    let dropped: std::collections::HashSet<String> = app
+        .library_classes
+        .iter()
+        .filter(|c| file_of_class(c).is_some_and(mounted))
+        .map(|c| c.name.0.to_string())
+        .collect();
+    // A partless class (a bare namespace reopening, a `Struct.new` constant) has no file to tell, so the gem's own namespace decides.
+    let under_dropped = |name: &str| {
+        let outer = name.rsplit_once("::").map_or(name, |(outer, _)| outer);
+        dropped.contains(name) || dropped.contains(outer) || dropped.iter().any(|d| d.starts_with(&format!("{name}::")))
+    };
+    trimmed.library_classes.retain(|c| match file_of_class(c) {
+        Some(file) => !mounted(file),
+        None => !under_dropped(c.name.0.as_str()),
+    });
+    trimmed.models.retain(|m| !mounted(m.parent_span.file));
+    if let Some(lock) = trimmed.gem_lock.as_mut() {
+        lock.source.retain(|gem| !app.auto_source_gems.contains(gem));
+    }
+    trimmed.auto_source_gems.clear();
+    Some(trimmed)
+}
+
 fn target_files_inner(
     app: &App,
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    let without_auto_sources;
+    let app = match without_auto_source_gems(app, target) {
+        Some(trimmed) => {
+            without_auto_sources = trimmed;
+            &without_auto_sources
+        }
+        None => app,
+    };
     let without_health;
     let app = match without_rails_health_controller(app, target) {
         Some(trimmed) => {

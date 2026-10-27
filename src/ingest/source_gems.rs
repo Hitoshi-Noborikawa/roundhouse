@@ -5,7 +5,14 @@ use std::path::{Path, PathBuf};
 use crate::gems::Lockfile;
 use crate::vfs::Vfs;
 
-pub(super) const MOUNT: &str = ".roundhouse/source_gems";
+pub(crate) const MOUNT: &str = ".roundhouse/source_gems";
+
+/// Is `path` a file of `gem` at `version`, compiled from source? The
+/// file is recorded at its installed path or under the app's mount.
+pub(crate) fn file_of(path: &str, gem: &str, version: &str) -> bool {
+    let dir = format!("{gem}-{version}");
+    path.contains(&format!("/gems/{dir}/")) || path.contains(&format!("{MOUNT}/{dir}/"))
+}
 
 pub(super) struct SourceGem {
     pub mount: PathBuf,

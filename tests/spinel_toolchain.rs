@@ -192,6 +192,10 @@ mod stdlib_rnp;
 mod representable_decorator;
 #[path = "spinel_toolchain/representable.rs"]
 mod representable;
+#[path = "support/auto_source_gem.rs"]
+mod auto_source_gem_contract;
+#[path = "spinel_toolchain/auto_source_gem.rs"]
+mod auto_source_gem;
 #[path = "support/active_model_serializer.rs"]
 mod active_model_serializer_app;
 #[path = "spinel_toolchain/active_model_serializer.rs"]
