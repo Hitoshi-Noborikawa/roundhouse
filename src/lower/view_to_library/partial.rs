@@ -196,7 +196,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 let mut call_args = vec![record];
                 call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
                 if let Some(decl) = strict_decl {
-                    if let Some(hash) = strict_kwargs(&decl[1..], &lookup) {
+                    if let Some(hash) = strict_kwargs(&decl[1..], &lookup, context_kwargs(ctx, &module_camel, &method_sym)) {
                         call_args.push(hash);
                     }
                 }
@@ -241,10 +241,12 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
 fn strict_kwargs(
     kw_locals: &[crate::dialect::Param],
     lookup: &impl Fn(&str) -> Option<Expr>,
+    context: Vec<(Expr, Expr)>,
 ) -> Option<Expr> {
     let entries: Vec<(Expr, Expr)> = kw_locals
         .iter()
         .filter_map(|p| lookup(p.name.as_str()).map(|v| (lit_sym(p.name.clone()), v)))
+        .chain(context)
         .collect();
     if entries.is_empty() {
         return None;
@@ -1002,7 +1004,7 @@ pub(super) fn named_partial_call_with_record(
                 // the record (index 0) rode positionally as `arg_expr` and
                 // the closure ivars followed. Omitted optionals fall to the
                 // header defaults.
-                if let Some(hash) = strict_kwargs(&decl[1..], &lookup_local) {
+                if let Some(hash) = strict_kwargs(&decl[1..], &lookup_local, context_kwargs(ctx, &module_camel, &method_sym)) {
                     call_args.push(hash);
                 }
             } else {
@@ -1103,6 +1105,7 @@ fn locals_extra_args(
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
     let entries = locals.unwrap_or_default();
+    let strict = ctx.strict_locals.contains_key(&(module_camel.to_string(), method_sym.to_string()));
     let Some(extras) = ctx
         .partial_extras
         .get(&(module_camel.to_string(), method_sym.to_string()))
@@ -1122,18 +1125,39 @@ fn locals_extra_args(
                 })
                 // The request context a run-time url Hash reads passes on from the rendering view (`request_context_views`).
                 .or_else(|| {
-                    (matches!(name.as_str(), "action_name" | "controller_name" | "path_parameters")
+                    (!strict
+                        && matches!(name.as_str(), "action_name" | "controller_name" | "path_parameters")
                         && ctx.locals.iter().any(|l| l == name))
                     .then(|| var_ref(Symbol::from(name.as_str())))
                 })
         })
         .collect();
-    let Some(last) = bound.iter().rposition(|b| b.is_some()) else {
-        return Vec::new();
+    let mut out: Vec<Expr> = match bound.iter().rposition(|b| b.is_some()) {
+        Some(last) => bound.into_iter().take(last + 1).map(|b| b.unwrap_or_else(nil_lit)).collect(),
+        None => Vec::new(),
     };
-    bound
+    if strict {
+        let context = context_kwargs(ctx, module_camel, method_sym);
+        if !context.is_empty() {
+            out.push(Expr::new(Span::synthetic(), ExprNode::Hash { entries: context, kwargs: true }));
+        }
+    }
+    out
+}
+
+/// The request context a strict-locals partial takes as keywords
+/// (`request_context_views`), bound from the rendering view's own.
+fn context_kwargs(ctx: &ViewCtx, module: &str, method: &str) -> Vec<(Expr, Expr)> {
+    let key = (module.to_string(), method.to_string());
+    let Some(declared) = ctx.strict_locals.get(&key) else { return Vec::new() };
+    let Some(extras) = ctx.partial_extras.get(&key) else { return Vec::new() };
+    ["action_name", "controller_name", "path_parameters"]
         .into_iter()
-        .take(last + 1)
-        .map(|b| b.unwrap_or_else(nil_lit))
+        .filter(|n| {
+            extras.iter().any(|e| e == n)
+                && !declared.iter().any(|p| p.name.as_str() == *n)
+                && ctx.locals.iter().any(|l| l == n)
+        })
+        .map(|n| (lit_sym(Symbol::from(n)), var_ref(Symbol::from(n))))
         .collect()
 }

@@ -488,7 +488,9 @@ fn untyped_subexpressions_baseline() {
     // carries an eager load's conditions and orders to the preload
     // walker; its parameters and readers are vars on this RBS-less probe
     // (+5 in active_record/relation.rb); the RBS-paired gate types them.
-    const CEILING: usize = 1110;
+    // MEASURED 1112 on 2026-10-27 (on 1110): the filter's `where.not`
+    // list, its parameter and reader (+2 in the same file).
+    const CEILING: usize = 1112;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

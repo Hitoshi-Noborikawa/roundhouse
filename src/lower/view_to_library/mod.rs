@@ -724,6 +724,25 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
                 kind: ParamKind::Keyword { required: p.default.is_none() },
             });
         }
+        // Keywords, not positional extras: a strict partial's callers bind by name, and an omitted one stays nil.
+        if lx.request_context.contains(view.name.as_str()) {
+            for name in ["action_name", "controller_name", "path_parameters"] {
+                if declared.contains(name) {
+                    continue;
+                }
+                new_params.push(Param::keyword(Symbol::from(name), Some(nil_lit())));
+                let ty = if name == "path_parameters" {
+                    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }
+                } else {
+                    Ty::Str
+                };
+                sig_params.push(TyParam {
+                    name: Symbol::from(name),
+                    ty: Ty::Union { variants: vec![ty, Ty::Nil].into() }.into(),
+                    kind: ParamKind::Keyword { required: false },
+                });
+            }
+        }
         params = new_params;
         // Nullable-for-predicates: nil-defaulted keyword locals PLUS any
         // Untyped record/closure param. Built BEFORE sig_params is moved
@@ -754,6 +773,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         locals = std::iter::once(record_name.clone())
             .chain(closure.iter().cloned())
             .chain(kw_locals.iter().map(|p| p.name.as_str().to_string()))
+            .chain(
+                ["action_name", "controller_name", "path_parameters"]
+                    .into_iter()
+                    .filter(|n| lx.request_context.contains(view.name.as_str()) && !declared.contains(n))
+                    .map(str::to_string),
+            )
             .collect();
     }
 

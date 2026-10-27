@@ -58,11 +58,18 @@ const VIEW: &str = r#"<% @pairs.each do |pair| %>
 <p id="log"><%= @who %>|<%= @stories %>|<%= @bogus %>|<%= @page %>|<%= @count %></p>
 <p><%= link_to "next", @paging.merge(page: 2), id: "next" %></p>
 <%= render "shared/pager" %>
+<%= render "shared/strict_pager", label: "last" %>
 "#;
 
 /// A partial outside the controller's directory, so the request's
 /// controller and action reach it from the view rendering it.
-pub const PAGER: &str = r#"<p><%= link_to "later", @paging.merge(page: 3), id: "later" %></p>
+const PAGER: &str = r#"<p><%= link_to "later", @paging.merge(page: 3), id: "later" %></p>
+"#;
+
+/// The same through a strict-locals partial, which takes the request
+/// context as keywords.
+const STRICT_PAGER: &str = r#"<%# locals: (label: "end") -%>
+<p><%= link_to label, @paging.merge(page: 4), id: "strict" %></p>
 "#;
 
 #[allow(dead_code)]
@@ -85,4 +92,5 @@ pub fn apply(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
         .write("app/models/finder.rb", FINDER)
         .write("app/views/finds/index.html.erb", VIEW)
         .write("app/views/shared/_pager.html.erb", PAGER)
+        .write("app/views/shared/_strict_pager.html.erb", STRICT_PAGER)
 }
