@@ -275,8 +275,20 @@ module ActionMailer
     # `headers("X-Priority" => "1")` adds them; `headers["X"] = value`
     # adds one through the answer.
     def headers(values = nil)
-      values.each { |name, value| __add_header(name, value) } unless values.nil?
+      values.each { |name, value| __add_header(name, __header_text(name, value)) } unless values.nil?
       Headers.new(self)
+    end
+
+    # A list value as the mail gem writes it: a message-id list
+    # (`References`, `In-Reply-To`) folds one id per line, any other
+    # field joins with ", " (lobsters' reply mail sets `References` to the
+    # thread's ids).
+    def __header_text(name, value)
+      return value.to_s unless value.is_a?(Array)
+      parts = []
+      value.each { |part| parts << part.to_s }
+      separator = name == "References" || name == "In-Reply-To" ? "\r\n " : ", "
+      parts.join(separator)
     end
 
     def __headers
