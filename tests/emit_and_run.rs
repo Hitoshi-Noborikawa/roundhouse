@@ -19852,6 +19852,8 @@ mod route_record_to_param;
 mod module_factory;
 #[path = "emit_and_run/spinel_unknown_gem.rs"]
 mod spinel_unknown_gem;
+#[path = "emit_and_run/json_column_name.rs"]
+mod json_column_name;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

@@ -248,7 +248,7 @@ pub(super) fn push_schema_methods(
         }
         if slot.is_json() {
             // Hydration writes stored JSON text without dump; the public
-            // `<col>=` writer always goes through JsonColumn.dump.
+            // `<col>=` writer always goes through RoundhouseJsonColumn.dump.
             methods.push(synth_json_storage_writer(owner, col));
         }
         if slot.is_temporal() {
@@ -1528,7 +1528,7 @@ pub(crate) fn array_load_method(col: &Column) -> &'static str {
 }
 
 /// Internal JSON hydration writes already-serialized DB text into the
-/// String slot without `JsonColumn.dump` (which would double-encode).
+/// String slot without `RoundhouseJsonColumn.dump` (which would double-encode).
 fn synth_json_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
     let value = Symbol::from("value");
     let slot_ty = super::ty_of_column_slot(col);
@@ -3456,7 +3456,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     // `attributes` and the raw Date reader still expose stored text.
     // JSON columns are another exception: a
     // `has_json` declaration builds its typed Hash from the flat readers; a
-    // schema-less column decodes through `JsonColumn.load`.
+    // schema-less column decodes through `RoundhouseJsonColumn.load`.
     let arms: Vec<crate::expr::Arm> = table
         .columns
         .iter()

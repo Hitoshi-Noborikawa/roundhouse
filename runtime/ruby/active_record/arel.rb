@@ -7,8 +7,12 @@
 # WHERE as a correlated subquery (`where.not(<rel>.arel.exists)`).
 module Arel
   # A bind that does not match the fragment. Rails raises this from
-  # `Arel.sql` before the SQL is handed to the connection.
-  class BindError < StandardError
+  # `Arel.sql` before the SQL is handed to the connection. Its parent is
+  # Rails' (arel/errors.rb), so `rescue Arel::ArelError` catches it.
+  class ArelError < StandardError
+  end
+
+  class BindError < ArelError
   end
 
   # A caller-authored fragment. With no binds this is that text, wrapped

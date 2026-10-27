@@ -5,9 +5,13 @@
 # Hydration writes stored text directly to the backing slot (never
 # through dump); application assignment always JSON-encodes, including
 # String values, so `"true"` round-trips as a string rather than bool.
+#
+# Named `RoundhouseJsonColumn`, not `JsonColumn`: that is a common name for
+# an app's own `serialize` coder class, and a runtime module of the same
+# name made the app's `class JsonColumn` fail to load ("is not a class").
 require "json"
 
-module JsonColumn
+module RoundhouseJsonColumn
   def self.load(serialized)
     return nil if serialized.nil?
     JSON.parse(serialized)
