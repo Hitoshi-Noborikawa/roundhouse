@@ -6704,7 +6704,10 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
         | "Enumerator::Product" | "Enumerator::Lazy" | "Enumerator::Chain"
         | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
-        | "UNIXServer" | "UNIXSocket" | "Open3" | "Find");
+        | "UNIXServer" | "UNIXSocket" | "Open3" | "Find")
+        // The rexml gem on the ruby family, spinel's `packages/rexml`.
+        || name == "REXML"
+        || name.starts_with("REXML::");
     if !bundled {
         return None;
     }

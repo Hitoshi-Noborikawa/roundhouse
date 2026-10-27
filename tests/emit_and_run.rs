@@ -96,6 +96,10 @@ mod block_macros;
 mod stdlib_scan_zlib_contract;
 #[path = "emit_and_run/stdlib_scan_zlib.rs"]
 mod stdlib_scan_zlib;
+#[path = "support/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include_contract;
+#[path = "emit_and_run/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include;
 #[path = "support/auto_source_gem.rs"]
 mod auto_source_gem_contract;
 #[path = "emit_and_run/auto_source_gem.rs"]

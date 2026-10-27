@@ -201,10 +201,33 @@ fn core_rbs() -> &'static str {
             out.push_str(name);
             out.push_str(": String\n");
         }
+        out.push_str(STDLIB_NAMESPACES_RBS);
         out
     })
     .as_str()
 }
+
+/// Library namespaces an app `include`s to name their classes bare
+/// (svg-graph's `include REXML`, then `Document.new`, `Comment.new`): Ruby
+/// looks the name up in the included module before `Object`, so the app's
+/// own top-level `Comment` model is not the one meant. Only the classes
+/// spinel's package defines too (`packages/rexml`).
+const STDLIB_NAMESPACES_RBS: &str = "\
+module REXML\n\
+  class Child\n  end\n\
+  class Parent < Child\n  end\n\
+  class Element < Parent\n  end\n\
+  class Document < Element\n  end\n\
+  class Text < Child\n  end\n\
+  class CData < Text\n  end\n\
+  class Comment < Child\n  end\n\
+  class Instruction < Child\n  end\n\
+  class XMLDecl < Child\n  end\n\
+  class Attribute\n  end\n\
+  class Attributes\n  end\n\
+  class Elements\n  end\n\
+  class ParseException < StandardError\n  end\n\
+end\n";
 
 /// The type of a value constant `core_rbs()` declares, as Ruby defines it.
 fn core_value_type(name: &str) -> Option<Ty> {
