@@ -17,6 +17,15 @@ use crate::ty::Ty;
 
 use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 
+/// Hash methods that yield one `[key, value]` pair (CRuby 4.0.5). The
+/// others `block_params_for` types for a Hash (`select`, `filter`,
+/// `reject`) yield two values, so a lone parameter gets the key.
+const HASH_PAIR_METHODS: [&str; 19] = [
+    "each", "each_pair", "map", "collect", "flat_map", "collect_concat", "any?", "all?",
+    "none?", "count", "find", "detect", "sort_by", "min_by", "max_by", "group_by",
+    "partition", "sum", "filter_map",
+];
+
 impl<'a> BodyTyper<'a> {
     /// `record[:column]` / `read_attribute(:column)` (and their writer
     /// twins) are schema-indexed APIs.  The generic ActiveRecord catalog
@@ -473,6 +482,25 @@ impl<'a> BodyTyper<'a> {
             }
             return new_ctx;
         }
+        // A Hash yields ONE `[key, value]` Array to these methods, which a
+        // two-parameter block destructures and a one-parameter block
+        // receives whole. `block_params_for` answers the destructured
+        // pair, so a lone parameter would otherwise bind the key. Only a
+        // lone REQUIRED one: an optional or a rest after it makes Ruby
+        // splat the pair (`|k, v = 0|` binds the key). Keywords don't.
+        let splats = matches!(&*block.node, ExprNode::Lambda { rest_param, extra_params, .. }
+            if rest_param.is_some() || extra_params.iter().any(|p| !p.keyword && !p.rest));
+        if let ([name], false) = (params.as_slice(), splats) {
+            if let Some(Ty::Hash { key, value }) = recv_ty.map(super::narrowing::remove_nil) {
+                if HASH_PAIR_METHODS.contains(&method.as_str()) {
+                    new_ctx.local_bindings.insert(
+                        name.clone(),
+                        Ty::Tuple { elems: vec![(*key).clone(), (*value).clone()].into() },
+                    );
+                    return new_ctx;
+                }
+            }
+        }
         let Some(param_tys) = self.block_params_for(recv_ty, method, class_object_receiver) else {
             return new_ctx;
         };
@@ -634,7 +662,9 @@ impl<'a> BodyTyper<'a> {
                 "each" | "each_pair" | "map" | "collect"
                 | "flat_map" | "collect_concat"
                 | "select" | "filter" | "reject"
-                | "any?" | "all?" | "none?" => {
+                | "any?" | "all?" | "none?"
+                | "count" | "find" | "detect" | "sort_by" | "min_by" | "max_by"
+                | "group_by" | "partition" | "sum" | "filter_map" => {
                     Some(vec![(**key).clone(), (**value).clone()])
                 }
                 // `transform_values { |v| ... }` — block receives just the value.
