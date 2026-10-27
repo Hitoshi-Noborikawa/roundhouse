@@ -54,10 +54,16 @@
 //! attribute hash — without it `Rooms::Open.create!` wrote a row
 //! belonging to no subclass, which the read half above then correctly
 //! could not see. A hand-written class method on the subclass
-//! (`Rooms::Direct.find_or_create_for`) is the subclass's own; and
-//! `find` is left alone because the arel pass inlines `<Model>.find` to
-//! a primary-key SELECT — re-rooting it would move that work onto the
-//! Relation path for no scoping gain a primary key can use.
+//! (`Rooms::Direct.find_or_create_for`) is the subclass's own.
+//!
+//! **A subclass's rows include its own subclasses'** (#1415, activerecord
+//! 8.1.4): `Feature.count` with `SpecialFeature < Feature` counts both,
+//! as Rails' `type_condition` filters on `type IN ('Feature',
+//! 'SpecialFeature')`. A subclass with descendants is scoped by that
+//! list, one without by its name, as before. `find` is scoped too: Rails
+//! raises RecordNotFound for another type's id, and the relation's `find`
+//! does, where the base's primary-key SELECT answered the row. The base
+//! model's named scopes, called on a subclass, are scoped like the rest.
 
 use std::collections::{HashMap, HashSet};
 
@@ -73,8 +79,17 @@ use crate::ty::Ty;
 const STI_RELATION_METHODS: &[&str] = &[
     "all", "count", "pluck", "ids", "where", "find_by", "find_by!", "first", "last", "exists?",
     "any?", "none?", "empty?", "order", "limit", "offset", "joins", "includes", "distinct",
-    "group", "maximum", "minimum", "destroy_all", "delete_all", "update_all",
+    "group", "maximum", "minimum", "destroy_all", "delete_all", "update_all", "sum", "take",
+    "pick", "select", "none", "find_each", "find",
 ];
+
+/// Find-or-build on a subclass: Rails' `find_by(attrs) || create(attrs)`,
+/// looked up in the subclass's whole scope (a deeper subclass's row is
+/// found) and built as the subclass ([`seeding_lookup`]). An argument
+/// that isn't a literal Hash of pure reads is filtered on the subclass's
+/// own name instead, since `where` seeds a new record's `type` from an
+/// equality only: there a deeper subclass's row isn't found.
+const STI_SEEDING_METHODS: &[&str] = &["find_or_create_by", "find_or_create_by!", "find_or_initialize_by"];
 
 /// Construction on a subclass, which has to STAMP the type column
 /// rather than filter on it. `Rooms::Open.create!(name: …)` wrote a row
@@ -91,11 +106,64 @@ const INHERITANCE_COLUMN: &str = "type";
 /// The synthesized recast entry point `becomes!` lowers to.
 const BECOMES_FROM: &str = "becomes_from";
 
+/// What the call-site rewrite needs of each STI subclass.
+struct Sti {
+    /// Subclass -> its base model.
+    bases: HashMap<ClassId, ClassId>,
+    /// Subclass -> the `type` names its rows carry: its own, then its
+    /// descendants', sorted.
+    names: HashMap<ClassId, Vec<String>>,
+    /// Base model -> its named scopes.
+    scopes: HashMap<ClassId, HashSet<String>>,
+}
+
+impl Sti {
+    fn new(app: &App, bases: HashMap<ClassId, ClassId>) -> Self {
+        let parent_of: HashMap<&ClassId, &ClassId> =
+            app.library_classes.iter().filter_map(|lc| Some((&lc.name, lc.parent.as_ref()?))).collect();
+        let mut names: HashMap<ClassId, Vec<String>> = HashMap::new();
+        for sub in bases.keys() {
+            // Every subclass whose parent chain reaches `sub`.
+            let mut own: Vec<String> = bases
+                .keys()
+                .filter(|other| *other != sub)
+                .filter(|other| {
+                    let mut cursor = parent_of.get(other).copied();
+                    let mut hops = 0;
+                    while let Some(p) = cursor {
+                        if p == sub {
+                            return true;
+                        }
+                        hops += 1;
+                        if hops > 8 {
+                            break;
+                        }
+                        cursor = parent_of.get(p).copied();
+                    }
+                    false
+                })
+                .map(|c| c.0.as_str().to_string())
+                .collect();
+            own.sort();
+            own.insert(0, sub.0.as_str().to_string());
+            names.insert(sub.clone(), own);
+        }
+        let scopes = app
+            .models
+            .iter()
+            .filter(|m| bases.values().any(|b| *b == m.name))
+            .map(|m| (m.name.clone(), m.scopes().map(|s| s.name.as_str().to_string()).collect()))
+            .collect();
+        Sti { bases, names, scopes }
+    }
+}
+
 pub fn apply_sti_scope_lowering(app: &mut App) {
     let bases = sti_bases(app);
     if bases.is_empty() {
         return;
     }
+    let sti = Sti::new(app, bases.clone());
     // Subclasses a `becomes!` call site actually names. Only these grow
     // the synthesized `becomes_from`: a class method nobody calls is
     // dead weight on every target, and on the strict ones it is dead
@@ -120,19 +188,19 @@ pub fn apply_sti_scope_lowering(app: &mut App) {
             }
         }
     }
-    super::for_each_hook_body(app, &mut |e| rewrite(e, &bases, &mut recast));
+    super::for_each_hook_body(app, &mut |e| rewrite(e, &sti, &mut recast));
     for view in &mut app.views {
-        rewrite(&mut view.body, &bases, &mut recast);
+        rewrite(&mut view.body, &sti, &mut recast);
     }
     for tm in &mut app.test_modules {
         if let Some(setup) = &mut tm.setup {
-            rewrite(setup, &bases, &mut recast);
+            rewrite(setup, &sti, &mut recast);
         }
         for t in &mut tm.tests {
-            rewrite(&mut t.body, &bases, &mut recast);
+            rewrite(&mut t.body, &sti, &mut recast);
         }
         for m in &mut tm.helpers {
-            rewrite(&mut m.body, &bases, &mut recast);
+            rewrite(&mut m.body, &sti, &mut recast);
         }
     }
     push_becomes_from(app, &bases, &recast);
@@ -375,7 +443,15 @@ fn no_arg_send(recv: Expr, method: &str) -> Expr {
 /// parent walk and the inheritance-column check that would drift from
 /// this one.
 pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
-    let mut out = HashMap::new();
+    model_subclasses(app).0
+}
+
+/// Every library class whose `parent` chain reaches a Model with a
+/// table, split on that table's inheritance column: STI subclasses
+/// (with one) and plain subclasses (without one) → their base model.
+fn model_subclasses(app: &App) -> (HashMap<ClassId, ClassId>, HashMap<ClassId, ClassId>) {
+    let mut typed = HashMap::new();
+    let mut untyped = HashMap::new();
     // Name -> the FIRST model / library class of that name, the same
     // element the linear `find`s this replaced answered. Indexed once:
     // a scan per parent hop is |classes|^2 on a large app.
@@ -396,15 +472,14 @@ pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
                 break;
             }
             if let Some(base) = model_named(&parent) {
-                let has_type = app
-                    .schema
-                    .tables
-                    .get(&base.table.0)
-                    .is_some_and(|t| {
-                        t.columns.iter().any(|c| c.name.as_str() == INHERITANCE_COLUMN)
-                    });
-                if has_type {
-                    out.insert(lc.name.clone(), base.name.clone());
+                // An abstract base has no table, so its subclasses are
+                // neither.
+                if let Some(table) = app.schema.tables.get(&base.table.0) {
+                    if table.columns.iter().any(|c| c.name.as_str() == INHERITANCE_COLUMN) {
+                        typed.insert(lc.name.clone(), base.name.clone());
+                    } else {
+                        untyped.insert(lc.name.clone(), base.name.clone());
+                    }
                 }
                 break;
             }
@@ -412,23 +487,148 @@ pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
             hops += 1;
         }
     }
-    out
+    (typed, untyped)
+}
+
+/// The finders that load a subclass's records, or a relation of them.
+/// Value answers (`count`, `pluck`, `sum`, …) and the constructors are
+/// already Rails' without a `type` column.
+const LOADING_METHODS: &[&str] = &[
+    "all", "where", "find", "find_by", "find_by!", "first", "first!", "last", "last!", "take",
+    "take!", "sole", "find_sole_by", "find_each", "find_in_batches", "in_batches", "order",
+    "reorder", "limit", "offset", "joins", "left_joins", "left_outer_joins", "includes",
+    "preload", "eager_load", "distinct", "select", "group", "having", "unscoped",
+    "readonly", "lock", "find_or_create_by", "find_or_create_by!", "find_or_initialize_by",
+    "create_or_find_by", "create_or_find_by!",
+];
+
+/// Aggregates that answer a value from a relation, not its records: the
+/// relation they're called on loads nothing (`Feature.where(…).count`).
+const VALUE_METHODS: &[&str] = &[
+    "count", "pluck", "pick", "ids", "sum", "minimum", "maximum", "average", "calculate",
+    "exists?", "any?", "none?", "empty?", "many?", "size", "delete_all", "update_all",
+];
+
+/// A subclass of a concrete model whose table has no `type` column
+/// (#1415). That isn't STI: activerecord 8.1.4 shares the table, filters
+/// nothing, and loads every row a subclass's finder answers as the
+/// subclass (`Feature.first.class` is `Feature`, `Feature.count` counts
+/// every row). Here the finder is the base's, inherited, and its rows
+/// are the base's class: `Feature.first.class` is `Article`, so a
+/// method only the subclass defines raises NoMethodError on them.
+/// Counts and constructors already match. Each call site with the
+/// subclass as its constant receiver and a loading finder, or one of
+/// the base's named scopes, is a warning: the call is still emitted.
+/// Not one that's the relation of an aggregate (`Feature.where(…).count`
+/// answers a value), and the bodies walked are the ones the STI
+/// lowering rewrites, tests included.
+pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::Diagnostic> {
+    let (_, untyped) = model_subclasses(app);
+    if untyped.is_empty() {
+        return Vec::new();
+    }
+    let scopes: HashMap<&ClassId, HashSet<&str>> = app
+        .models
+        .iter()
+        .map(|m| {
+            let names = m
+                .body
+                .iter()
+                .filter_map(|item| match item {
+                    crate::dialect::ModelBodyItem::Scope { scope, .. } => Some(scope.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            (&m.name, names)
+        })
+        .collect();
+    // `valued`: `e` is the receiver chain of an aggregate, so its sends
+    // load nothing. Their arguments and blocks are walked as usual.
+    fn walk(
+        e: &Expr,
+        valued: bool,
+        untyped: &HashMap<ClassId, ClassId>,
+        scopes: &HashMap<&ClassId, HashSet<&str>>,
+        sites: &mut Vec<(Span, ClassId, ClassId, Symbol)>,
+    ) {
+        let ExprNode::Send { recv, method, args, block, .. } = &*e.node else {
+            e.node.for_each_child(&mut |c| walk(c, false, untyped, scopes, sites));
+            return;
+        };
+        if let Some(recv) = recv {
+            if let ExprNode::Const { path } = &*recv.node {
+                let sub = const_class_id(path);
+                if let Some(base) = untyped.get(&sub) {
+                    let loads = LOADING_METHODS.contains(&method.as_str())
+                        || scopes.get(base).is_some_and(|names| names.contains(method.as_str()));
+                    if loads && !valued {
+                        sites.push((e.span, sub, base.clone(), method.clone()));
+                    }
+                }
+            }
+            let chain = valued || VALUE_METHODS.contains(&method.as_str());
+            walk(recv, chain, untyped, scopes, sites);
+        }
+        for arg in args {
+            walk(arg, false, untyped, scopes, sites);
+        }
+        if let Some(block) = block {
+            walk(block, false, untyped, scopes, sites);
+        }
+    }
+    let mut sites: Vec<(Span, ClassId, ClassId, Symbol)> = Vec::new();
+    let mut visit = |body: &Expr| walk(body, false, &untyped, &scopes, &mut sites);
+    // The bodies `apply_sti_scope_lowering` rewrites.
+    super::for_each_hook_body_ref(app, &mut visit);
+    for view in &app.views {
+        visit(&view.body);
+    }
+    for tm in &app.test_modules {
+        if let Some(setup) = &tm.setup {
+            visit(setup);
+        }
+        for t in &tm.tests {
+            visit(&t.body);
+        }
+        for m in &tm.helpers {
+            visit(&m.body);
+        }
+    }
+    sites
+        .into_iter()
+        .map(|(span, sub, base, method)| {
+            let (sub, base) = (sub.0.as_str(), base.0.as_str());
+            let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                span,
+                None,
+                format!("`{sub}.{}` on a subclass of a model whose table has no `type` column", method.as_str()),
+                format!("Rails loads its records as `{sub}`; this build loads them as `{base}`, whose finder it inherits"),
+            );
+            diagnostic.severity = crate::diagnostic::Severity::Warning;
+            let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
+            crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                file,
+                message: diagnostic.message.clone(),
+            });
+            diagnostic
+        })
+        .collect()
 }
 
 fn rewrite(
     expr: &mut Expr,
-    bases: &HashMap<ClassId, ClassId>,
+    sti: &Sti,
     recast: &mut HashSet<ClassId>,
 ) {
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, bases, recast));
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, sti, recast));
+    let bases = &sti.bases;
     if rewrite_becomes(expr, bases, recast) {
         return;
     }
     let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node else { return };
     let constructing = STI_CONSTRUCTORS.contains(&method.as_str());
-    if !constructing && !STI_RELATION_METHODS.contains(&method.as_str()) {
-        return;
-    }
+    let seeding = STI_SEEDING_METHODS.contains(&method.as_str());
+    let method_name = method.as_str().to_string();
     let ExprNode::Const { path } = &*r.node else { return };
     let named = ClassId(Symbol::from(
         path.iter()
@@ -436,13 +636,38 @@ fn rewrite(
             .collect::<Vec<_>>()
             .join("::"),
     ));
-    let Some(_) = bases.get(&named) else { return };
+    let Some(base) = bases.get(&named) else { return };
+    let base_scope = sti.scopes.get(base).is_some_and(|s| s.contains(&method_name));
+    if !constructing && !seeding && !base_scope && !STI_RELATION_METHODS.contains(&method_name.as_str()) {
+        return;
+    }
     if constructing {
         stamp_type(expr, &named);
         return;
     }
-    let base = bases.get(&named).expect("checked above");
     let span = expr.span;
+    let str_lit = |value: &str| Expr::new(span, ExprNode::Lit { value: Literal::Str { value: value.to_string() } });
+    let type_names = sti.names.get(&named).map(Vec::as_slice).unwrap_or_default();
+    let lookup_value = if type_names.len() <= 1 {
+        str_lit(named.0.as_str())
+    } else {
+        Expr::new(
+            span,
+            ExprNode::Array { elements: type_names.iter().map(|n| str_lit(n)).collect(), style: Default::default() },
+        )
+    };
+    // A find-or-build with a literal Hash of pure reads is Rails' own
+    // definition, `find_by(attrs) || create(attrs)`: the lookup is the
+    // subclass's whole scope, descendants included, and the record it
+    // builds is the subclass, stamped with its name. Anything else is
+    // filtered on the subclass's own name, so `where` seeds its `type`.
+    if seeding {
+        if let Some(found) = seeding_lookup(expr, base, &named, lookup_value.clone()) {
+            *expr = found;
+            return;
+        }
+    }
+    let type_value = if seeding { str_lit(named.0.as_str()) } else { lookup_value };
     let scoped = Expr::new(
         span,
         ExprNode::Send {
@@ -463,12 +688,7 @@ fn rewrite(
                                 value: Literal::Sym { value: Symbol::from(INHERITANCE_COLUMN) },
                             },
                         ),
-                        Expr::new(
-                            span,
-                            ExprNode::Lit {
-                                value: Literal::Str { value: named.0.as_str().to_string() },
-                            },
-                        ),
+                        type_value,
                     )],
                     kwargs: true,
                 },
@@ -489,6 +709,58 @@ fn rewrite(
         span,
         ExprNode::Send { recv: Some(scoped), method, args, block, parenthesized },
     );
+}
+
+/// `Feature.find_or_create_by(title: "s")` ->
+/// `Article.where(type: ["Feature", "SpecialFeature"]).find_by(title: "s")
+/// || Feature.create(title: "s", type: "Feature")`, and `create!` / `new`
+/// for `find_or_create_by!` / `find_or_initialize_by`. The block, if any,
+/// goes to the constructor, as Rails passes it to `create`. None unless
+/// the one argument is a literal Hash of pure reads: it is evaluated
+/// twice.
+fn seeding_lookup(expr: &Expr, base: &ClassId, sub: &ClassId, lookup_value: Expr) -> Option<Expr> {
+    let ExprNode::Send { method, args, block, parenthesized, .. } = &*expr.node else { return None };
+    let [attrs] = args.as_slice() else { return None };
+    let ExprNode::Hash { entries, .. } = &*attrs.node else { return None };
+    if !entries.iter().all(|(k, v)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } }) && super::case_lambda::is_pure_read(v)
+    }) {
+        return None;
+    }
+    let constructor = match method.as_str() {
+        "find_or_create_by" => "create",
+        "find_or_create_by!" => "create!",
+        _ => "new",
+    };
+    let span = expr.span;
+    let send = |recv: Expr, method: &str, args: Vec<Expr>, block: Option<Expr>| {
+        Expr::new(
+            span,
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block, parenthesized: *parenthesized },
+        )
+    };
+    let scope = send(
+        class_const(base),
+        "where",
+        vec![Expr::new(
+            span,
+            ExprNode::Hash {
+                entries: vec![(
+                    Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(INHERITANCE_COLUMN) } }),
+                    lookup_value,
+                )],
+                kwargs: true,
+            },
+        )],
+        None,
+    );
+    let found = send(scope, "find_by", vec![attrs.clone()], None);
+    let mut built = send(class_const(sub), constructor, vec![attrs.clone()], block.clone());
+    stamp_type(&mut built, sub);
+    Some(Expr::new(
+        span,
+        ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, surface: Default::default(), left: found, right: built },
+    ))
 }
 
 /// `room.becomes!(Rooms::Open)` -> `Rooms::Open.becomes_from(room)`.

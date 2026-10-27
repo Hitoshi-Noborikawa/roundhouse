@@ -594,6 +594,13 @@ pub struct App {
     /// this is the only record that an includer's reader `x` is replaced.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_included_redefs: HashMap<ClassId, Vec<Symbol>>,
+    /// `validates_with` calls an STI subclass declares, moved onto its
+    /// model ancestor's body (`ingest::sti_validations`): each call's
+    /// position and the subclass, whose `is_a?` guards the `validate` the
+    /// call expands into. A list, not a map keyed by the position: JSON
+    /// takes only string keys, and the ingested App round-trips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validates_with_guards: Vec<ValidatesWithGuard>,
     /// Classes that were `ActiveSupport::CurrentAttributes` subclasses
     /// before `ingest::current_attributes` flattened them. Recorded
     /// because that pass CLEARS the parent — nothing downstream could
@@ -1143,6 +1150,7 @@ impl App {
             concern_model_items: HashMap::new(),
             concern_guarded_items: HashMap::new(),
             concern_included_redefs: HashMap::new(),
+            validates_with_guards: Vec::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),
             view_feeders: HashMap::new(),
@@ -1234,4 +1242,13 @@ pub enum RedisSetting {
     Literal(String),
     Env(String),
     EnvFetch { name: String, default: Option<String> },
+}
+
+/// A `validates_with` an STI subclass declares, by its call's position
+/// (file id and start offset), and that subclass (`App::validates_with_guards`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatesWithGuard {
+    pub file: u32,
+    pub start: u32,
+    pub class: String,
 }
