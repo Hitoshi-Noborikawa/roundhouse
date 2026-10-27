@@ -473,9 +473,11 @@ fn model_subclasses(app: &App) -> (HashMap<ClassId, ClassId>, HashMap<ClassId, C
             }
             if let Some(base) = model_named(&parent) {
                 // An abstract base has no table, so its subclasses are
-                // neither.
+                // neither. One that turns STI off has plain subclasses.
                 if let Some(table) = app.schema.tables.get(&base.table.0) {
-                    if table.columns.iter().any(|c| c.name.as_str() == INHERITANCE_COLUMN) {
+                    if sti_turned_off(base).is_none()
+                        && table.columns.iter().any(|c| c.name.as_str() == INHERITANCE_COLUMN)
+                    {
                         typed.insert(lc.name.clone(), base.name.clone());
                     } else {
                         untyped.insert(lc.name.clone(), base.name.clone());
@@ -488,6 +490,32 @@ fn model_subclasses(app: &App) -> (HashMap<ClassId, ClassId>, HashMap<ClassId, C
         }
     }
     (typed, untyped)
+}
+
+/// `self.inheritance_column = nil` (or `false`): activerecord 8.1.4
+/// turns STI off for the model, `type` is a plain attribute, and its
+/// subclasses are plain subclasses (`false` becomes the column name
+/// "false", which no table has). The value as written, `nil` or `false`.
+pub(crate) fn turns_sti_off(expr: &Expr) -> Option<&'static str> {
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node else { return None };
+    if !matches!(&*recv.node, ExprNode::SelfRef) || method.as_str() != "inheritance_column=" {
+        return None;
+    }
+    match args.as_slice() {
+        [arg] => match &*arg.node {
+            ExprNode::Lit { value: Literal::Nil } => Some("nil"),
+            ExprNode::Lit { value: Literal::Bool { value: false } } => Some("false"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn sti_turned_off(model: &crate::dialect::Model) -> Option<&'static str> {
+    model.body.iter().find_map(|item| match item {
+        crate::dialect::ModelBodyItem::Unknown { expr, .. } => turns_sti_off(expr),
+        _ => None,
+    })
 }
 
 /// The finders that load a subclass's records, or a relation of them.
@@ -627,11 +655,19 @@ pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::
     sites
         .into_iter()
         .map(|(span, sub, base, method)| {
+            let off = app.models.iter().find(|m| m.name == base).and_then(sti_turned_off);
             let (sub, base) = (sub.0.as_str(), base.0.as_str());
+            let construct = match off {
+                Some(value) => format!(
+                    "`{sub}.{}` on a subclass of a model with STI turned off (`inheritance_column = {value}`)",
+                    method.as_str()
+                ),
+                None => format!("`{sub}.{}` on a subclass of a model whose table has no `type` column", method.as_str()),
+            };
             let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
                 span,
                 None,
-                format!("`{sub}.{}` on a subclass of a model whose table has no `type` column", method.as_str()),
+                construct,
                 format!("Rails loads its records as `{sub}`; this build loads them as `{base}`, whose finder it inherits"),
             );
             diagnostic.severity = crate::diagnostic::Severity::Warning;

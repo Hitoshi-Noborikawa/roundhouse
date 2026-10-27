@@ -1,0 +1,137 @@
+//! `self.inheritance_column = nil` (or `false`) on a model with a `type`
+//! column: activerecord 8.1.4 turns STI off for it. `type` is a plain
+//! attribute, and a subclass is the plain subclass of a concrete model
+//! (`tests/sti_untyped.rs`): it shares the table, filters nothing, and
+//! its constructor leaves `type` alone. Its oracle:
+//!
+//!     ruby tests/sti_disabled/oracle.rb
+
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const PROBE: &str = r#"class DisabledProbe
+  def self.seed
+    note = Article.create!(title: "a", body: "a body long enough", type: "Whatever")
+    sticky = Feature.create!(title: "s", body: "s body long enough")
+    [note.id, sticky.id]
+  end
+
+  def self.loaded(id)
+    record = Article.find(id)
+    [record.class.name, record.type]
+  end
+
+  def self.counts
+    [Article.count, Feature.count]
+  end
+
+  def self.created_type(id)
+    Article.find(id).type
+  end
+end
+"#;
+
+const SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+note, sticky = DisabledProbe.seed
+check("a row's type is its own", DisabledProbe.loaded(note), ["Article", "Whatever"])
+check("the subclass filters nothing", DisabledProbe.counts, [2, 2])
+check("the subclass's constructor leaves type alone", DisabledProbe.created_type(sticky), nil)
+puts "sti disabled passed"
+"##;
+
+fn app(value: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"title\"\n",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"title\"\n    t.string \"type\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy\n",
+            &format!("  self.inheritance_column = {value}\n  has_many :comments, dependent: :destroy\n"),
+        )
+        .write("app/models/feature.rb", "class Feature < Article\nend\n")
+        .write("app/models/disabled_probe.rb", PROBE)
+}
+
+#[test]
+fn a_model_with_sti_turned_off_keeps_type_as_an_attribute_on_ruby() {
+    for value in ["nil", "false"] {
+        let run = app(value).run_ruby(SCRIPT);
+        run.assert_passes();
+        assert!(run.stdout.contains("sti disabled passed"), "{value}: {}", run.stdout);
+    }
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_model_with_sti_turned_off_keeps_type_as_an_attribute_on_spinel() {
+    let run = app("nil").run_spinel_with_db(SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("sti disabled passed"), "{}", run.stdout);
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("roundhouse-sti-disabled-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write(root: &Path, rel: &str, content: &str) {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, content).unwrap();
+}
+
+fn survey(value: &str) -> String {
+    let src = scratch("src");
+    let out = scratch("out");
+    write(&src, "Gemfile", "source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(
+        &src,
+        "db/schema.rb",
+        "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"title\"\n    t.string \"type\"\n  end\nend\n",
+    );
+    write(&src, "app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n");
+    write(&src, "app/models/note.rb", &format!("class Note < ApplicationRecord\n  self.inheritance_column = {value}\nend\n"));
+    write(&src, "app/models/sticky.rb", "class Sticky < Note\nend\n");
+    write(&src, "app/models/sticky_probe.rb", "class StickyProbe\n  def self.first_title\n    Sticky.first.title\n  end\nend\n");
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "ruby", "--allow-unsupported", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .unwrap();
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+    String::from_utf8_lossy(&run.stderr).into_owned()
+}
+
+/// `nil` and `false` are modelled, so neither is reported, and the
+/// subclass's finder is the untyped subclass's warning. A column name is
+/// a custom inheritance column, which isn't modelled: it stays reported.
+#[test]
+fn turning_sti_off_is_modelled_and_a_custom_column_is_reported() {
+    for value in ["nil", "false"] {
+        let stderr = survey(value);
+        assert!(!stderr.contains("inheritance_column="), "{value}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "`Sticky.first` on a subclass of a model with STI turned off (`inheritance_column = {value}`)"
+            )),
+            "{value}: {stderr}"
+        );
+    }
+    let stderr = survey("\"kind\"");
+    assert!(stderr.contains("inheritance_column= not supported"), "{stderr}");
+}
