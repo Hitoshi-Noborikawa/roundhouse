@@ -4695,6 +4695,10 @@ const REST_CLIENT_LIB: &str = "class Remote
     RestClient::Request.execute(method: :get, url: base + \"/ok\", timeout: 5).body
   end
 
+  def self.status_of(base, path)
+    RestClient.get(base + path) { |response, _request, _result| [response.code, response.body] }.first
+  end
+
   CLIENT = ::RestClient
 
   def self.built(base)
@@ -4704,7 +4708,8 @@ end
 ";
 
 /// RestClient runs as the real gem on Ruby: requests against a local
-/// server, and a 404 rescued as `RestClient::NotFound`.
+/// server, a 404 rescued as `RestClient::NotFound`, and a verb with a
+/// block answering the block's value, a 404 included.
 #[test]
 fn rest_client_runs_as_the_real_gem_on_ruby() {
     let run = emit_and_run::real_blog()
@@ -4740,6 +4745,8 @@ raise r.inspect unless r == [404, :not_found]
 raise Remote.send_form(base) unless Remote.send_form(base) == "name=a"
 raise Remote.execute(base) unless Remote.execute(base) == "/ok"
 raise Remote.built(base) unless Remote.built(base) == "/built"
+raise "block 200" unless Remote.status_of(base, "/ok") == 200
+raise "block 404" unless Remote.status_of(base, "/missing") == 404
 "##,
         );
     run.assert_passes();

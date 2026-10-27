@@ -5962,3 +5962,28 @@ fn a_private_marker_on_a_generated_enum_predicate_is_enforced() {
     let found = diagnose(&app).iter().any(|d| d.message.contains("private method `draft?` called on Article"));
     assert!(found, "{:#?}", diagnose(&app).iter().map(|d| d.message.clone()).collect::<Vec<_>>());
 }
+
+#[test]
+fn rest_client_verbs_answer_their_block_value() {
+    let app = app_from_files(&[(
+        "app/models/remote.rb",
+        r#"class Remote
+  def self.status(url)
+    RestClient.get(url) { |response, _request, _result| [1, "ok"] }
+  end
+
+  def self.plain(url)
+    RestClient.get(url)
+  end
+end
+"#,
+    )]);
+    let remote = app.library_classes.iter().find(|c| c.name.0.as_str() == "Remote").expect("Remote");
+    let ty = |name: &str| remote.methods.iter().find(|m| m.name.as_str() == name).expect(name).body.ty.clone();
+    assert!(matches!(ty("status"), Some(Ty::Array { .. }) | Some(Ty::Tuple { .. })), "block form: {:?}", ty("status"));
+    assert!(
+        matches!(ty("plain"), Some(Ty::Class { ref id, .. }) if id.0.as_str() == "RestClient::Response"),
+        "plain form: {:?}",
+        ty("plain")
+    );
+}

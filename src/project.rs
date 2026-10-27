@@ -9852,24 +9852,37 @@ fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
 /// comments are skipped: the cookie jar explains a `Set.new` rewrite in
 /// one, and that is not a use.
 /// Whether the end of `head` lies inside a single- or double-quoted
-/// literal on its line (a backslash escapes the next byte).
+/// literal on its line (a backslash escapes the next byte). Code inside a
+/// double-quoted `#{…}` is code again.
 fn inside_quotes(head: &[u8]) -> bool {
-    let mut quote: Option<u8> = None;
+    // Open literals, innermost last, each with the `{` depth of the
+    // interpolation inside it (0 while in the literal's text).
+    let mut open: Vec<(u8, usize)> = Vec::new();
     let mut escaped = false;
-    for &c in head {
-        if escaped {
-            escaped = false;
-        } else if c == b'\\' && quote.is_some() {
-            escaped = true;
-        } else if let Some(q) = quote {
-            if c == q {
-                quote = None;
+    let mut i = 0;
+    while i < head.len() {
+        let c = head[i];
+        match open.last_mut() {
+            Some((q, 0)) => {
+                if escaped {
+                    escaped = false;
+                } else if c == b'\\' {
+                    escaped = true;
+                } else if c == *q {
+                    open.pop();
+                } else if *q == b'"' && c == b'#' && head.get(i + 1) == Some(&b'{') {
+                    open.last_mut().unwrap().1 = 1;
+                    i += 1;
+                }
             }
-        } else if c == b'"' || c == b'\'' {
-            quote = Some(c);
+            Some((_, depth)) if c == b'{' => *depth += 1,
+            Some((_, depth)) if c == b'}' => *depth -= 1,
+            _ if c == b'"' || c == b'\'' => open.push((c, 0)),
+            _ => {}
         }
+        i += 1;
     }
-    quote.is_some()
+    matches!(open.last(), Some((_, 0)))
 }
 
 fn names_constant(src: &str, konst: &str) -> bool {
@@ -9903,7 +9916,8 @@ fn names_constant(src: &str, konst: &str) -> bool {
             // `::RestClient` is the top-level name too; `Foo::RestClient`
             // is another one.
             let rooted = at >= 2 && &b[at - 2..at] == b"::" && (at == 2 || !ident(b[at - 3]));
-            let head_ok = at == 0 || rooted || !(ident(b[at - 1]) || b[at - 1] == b':');
+            let head_ok = (at == 0 || rooted || !(ident(b[at - 1]) || b[at - 1] == b':'))
+                && !inside_quotes(&b[..at]);
             let tail = at + konst.len();
             // A value: `client = RestClient`, `use(::RestClient)`, an
             // argument in a list.
@@ -9912,7 +9926,6 @@ fn names_constant(src: &str, konst: &str) -> bool {
                 let before = line[..start].trim_end();
                 (before.ends_with('=') || before.ends_with('(') || before.ends_with(','))
                     && matches!(b.get(tail), None | Some(b')' | b',' | b'\r'))
-                    && !inside_quotes(&b[..start])
             };
             let tail_ok = value
                 || matches!(b.get(tail), Some(b'.' | b'[' | b'('))
@@ -11670,6 +11683,12 @@ mod tests {
         assert!(!names_constant("msg = \"Saved, RestClient down\"\n", "RestClient"));
         assert!(!names_constant("msg = \"Saved, RestClient\"\n", "RestClient"));
         assert!(!names_constant("msg = 'a \\' (RestClient)'\n", "RestClient"));
+        assert!(!names_constant("doc = \"::RestClient::Request.execute\"\n", "RestClient"));
+        assert!(!names_constant("doc = 'see RestClient.get(u)'\n", "RestClient"));
+        // Interpolated code is code.
+        assert!(names_constant("msg = \"#{::RestClient::Request.new(a).url}\"\n", "RestClient"));
+        assert!(names_constant("msg = \"a #{h.fetch(:x) { RestClient.get(u) }} b\"\n", "RestClient"));
+        assert!(!names_constant("msg = \"#{x} RestClient.get\"\n", "RestClient"));
     }
 
     /// A test body that alone names a `lower::ruby_family_gems` gem declares
