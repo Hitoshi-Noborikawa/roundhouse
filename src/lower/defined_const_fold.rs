@@ -544,6 +544,12 @@ fn lit(like: &Expr, value: Literal, ty: Ty) -> Expr {
 
 /// Fold `e` in place; true when anything under it changed.
 fn walk(e: &mut Expr, owner: Option<&ClassId>, facts: &Facts, lt: bool) -> bool {
+    // Only a `defined?` this pass folds may become `true` below; a
+    // fold that leaves the user's own String (a ternary's branch) keeps it.
+    let right_is_defined = matches!(
+        &*e.node,
+        ExprNode::BoolOp { right, .. } if matches!(&*right.node, ExprNode::Defined { .. })
+    );
     let mut changed: Vec<bool> = Vec::new();
     e.node.for_each_child_mut(&mut |c| changed.push(walk(c, owner, facts, lt)));
     let any = changed.iter().any(|c| *c);
@@ -607,7 +613,7 @@ fn walk(e: &mut Expr, owner: Option<&ClassId>, facts: &Facts, lt: bool) -> bool 
             // operand, and a string literal under a condition is Ruby's
             // "string literal in condition" warning (which a warnings-as-errors
             // boot raises). `true` keeps its truthiness.
-            if changed.get(1) == Some(&true) {
+            if right_is_defined && changed.get(1) == Some(&true) {
                 if let ExprNode::BoolOp { right, .. } = &mut *e.node {
                     if matches!(&*right.node, ExprNode::Lit { value: Literal::Str { .. } }) {
                         *right = lit(right, Literal::Bool { value: true }, Ty::Bool);

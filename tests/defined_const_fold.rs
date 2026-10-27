@@ -63,6 +63,7 @@ const PROBE: &str = r#"class Probe
   def compacted; [:a, (:b if defined?(OmniAuth))].compact; end
   def value_of_true; v = defined?(Widget); v; end
   def trailing_guard; @on && defined?(Widget) && go; end
+  def folded_ternary_label; @on && (defined?(Widget) ? "w" : "x"); end
 end
 "#;
 
@@ -169,6 +170,8 @@ fn folded_guards_prune_their_dead_branch() {
     assert_eq!(b["negated"], "true");
     // A folded operand stays truthy without a string literal in a condition.
     assert_eq!(b["trailing_guard"], "@on && true && go");
+    // A fold that leaves the source's own String keeps its value.
+    assert_eq!(b["folded_ternary_label"], "@on && \"w\"");
     assert!(!b["compacted"].contains("OmniAuth") && !b["compacted"].contains(":b"), "{}", b["compacted"]);
 }
 
