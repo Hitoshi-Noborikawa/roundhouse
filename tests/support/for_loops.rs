@@ -18,6 +18,13 @@ pub const METHODS: &str = r##"  validates :title, presence: true
     [total, x]
   end
 
+  def self.for_outer
+    x = 10
+    for x in [1, 2]
+    end
+    x
+  end
+
   def self.for_range(n)
     out = []
     for i in 1..n
@@ -59,6 +66,7 @@ pub const METHODS: &str = r##"  validates :title, presence: true
 
 pub const ASSERTIONS: &str = r##"raise "sum #{Article.for_sum([1, 2, 3]).inspect}" unless Article.for_sum([1, 2, 3]) == [4, 3]
 raise "empty #{Article.for_sum([]).inspect}" unless Article.for_sum([]) == [0, nil]
+raise "outer #{Article.for_outer.inspect}" unless Article.for_outer == 2
 raise "range #{Article.for_range(3).inspect}" unless Article.for_range(3) == [[10, 20, 30], 3, 3]
 raise "range0 #{Article.for_range(0).inspect}" unless Article.for_range(0) == [[], nil, nil]
 raise "excl #{Article.for_exclusive.inspect}" unless Article.for_exclusive == [0, 1, 2]
