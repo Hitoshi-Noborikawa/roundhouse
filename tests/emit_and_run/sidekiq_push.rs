@@ -257,6 +257,35 @@ fn a_raising_commit_callback_drops_the_held_push() {
     assert!(run.stdout.contains("raising callback passed"), "{}", run.stdout);
 }
 
+const SIDEKIQ_YML: &str = ":concurrency: 3\n:timeout: 9\n:queues:\n  - critical\n  - [default, 2]\n";
+
+const SIDEKIQ_YML_SCRIPT: &str = r#"SidekiqWorker.parse(["sidekiq"])
+raise "concurrency #{SidekiqWorker::CONCURRENCY[0]}" unless SidekiqWorker::CONCURRENCY[0] == 3
+raise "timeout #{SidekiqWorker::TIMEOUT[0]}" unless SidekiqWorker::TIMEOUT[0] == 9
+raise "queues #{SidekiqWorker::QUEUES.inspect}" unless SidekiqWorker::QUEUES == ["queue:critical", "queue:default", "queue:default"]
+raise "weighted" if SidekiqWorker::STRICT[0]
+SidekiqWorker.parse(["sidekiq", "-c", "7", "-q", "low", "-t", "1"])
+raise "-c #{SidekiqWorker::CONCURRENCY[0]}" unless SidekiqWorker::CONCURRENCY[0] == 7
+raise "-t #{SidekiqWorker::TIMEOUT[0]}" unless SidekiqWorker::TIMEOUT[0] == 1
+raise "-q #{SidekiqWorker::QUEUES.inspect}" unless SidekiqWorker::QUEUES == ["queue:low"] && SidekiqWorker::STRICT[0]
+ENV["RAILS_MAX_THREADS"] = "11"
+SidekiqWorker.parse(["sidekiq"])
+raise "the file beats RAILS_MAX_THREADS: #{SidekiqWorker::CONCURRENCY[0]}" unless SidekiqWorker::CONCURRENCY[0] == 3
+puts "sidekiq.yml passed"
+"#;
+
+/// `config/sidekiq.yml` gives the worker its defaults, and the command
+/// line wins over them, key by key, as Sidekiq's CLI merges them; the
+/// file wins over `RAILS_MAX_THREADS`.
+#[test]
+fn sidekiq_yml_sets_the_worker_defaults() {
+    let run = on_sidekiq().write("config/sidekiq.yml", SIDEKIQ_YML).run_ruby(SIDEKIQ_YML_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("sidekiq.yml passed"), "{}", run.stdout);
+    let registry = read(&run.emitted, "runtime/job_registry.rb");
+    assert!(registry.contains("  def self.sidekiq_worker_queues\n    \"critical default,2\"\n  end\n"), "{registry}");
+}
+
 const CONFIGURE_CLIENT: &str = "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"JOBS_REDIS_URL\", \"redis://jobs:6379/1\"), password: ENV[\"JOBS_REDIS_PASSWORD\"] }\nend\n";
 
 /// The app's `configure_client` settings reach the registry the push

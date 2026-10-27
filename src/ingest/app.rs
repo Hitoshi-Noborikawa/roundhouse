@@ -931,6 +931,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     app.queue_adapter = read_queue_adapter(vfs, dir);
     // Where Sidekiq pushes (see `App::sidekiq_redis`).
     app.sidekiq_redis = read_sidekiq_redis(vfs, dir);
+    // The worker's defaults (see `App::sidekiq_worker`).
+    let (worker_defaults, worker_warnings) = super::sidekiq_yml::read(vfs, dir);
+    app.sidekiq_worker = worker_defaults;
+    worker_warnings.into_iter().for_each(warn_sidekiq);
     let app_config_path = dir.join("config/application.rb");
     if let Ok(source) = vfs.read(&app_config_path) {
         app.loaded_frameworks =
