@@ -21,7 +21,7 @@
 //! a polymorphic reader with no recorded targets — is refused with a
 //! reason instead of being rendered as nothing.
 
-use std::collections::HashMap;
+use crate::det::HashMap;
 
 use crate::dialect::{Association, Model};
 use crate::expr::{Expr, ExprNode, LValue};
@@ -91,8 +91,8 @@ pub(super) type RecordSites = HashMap<Span, Result<RecordModels, Unresolved>>;
 /// parameters over a collection are bound to its element model as the
 /// walk enters the block.
 pub(super) fn record_sites(body: &Expr, models: &[Model]) -> RecordSites {
-    let mut out = HashMap::new();
-    let mut env = HashMap::new();
+    let mut out = HashMap::default();
+    let mut env = HashMap::default();
     walk(body, models, &mut env, &mut out);
     out.into_iter()
         .map(|(span, r)| {
@@ -496,14 +496,13 @@ fn plural_model(name: &Symbol, models: &[Model]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{model_partial_path, record_sites};
-    use std::collections::HashMap;
     use std::path::PathBuf;
 
     /// The models each `json.partial!(record)` site of `view` may be,
     /// before the analyzer types anything, so only the template's own
     /// evidence (`element_model`, `resolve`) is in play.
     fn sites_of(view: &str) -> Vec<Result<Vec<String>, String>> {
-        let files: HashMap<PathBuf, Vec<u8>> = [
+        let files: crate::vfs::FileTree = [
             (
                 "db/schema.rb",
                 "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",

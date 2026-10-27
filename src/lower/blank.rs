@@ -74,7 +74,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::ty::Ty;
-use std::collections::HashSet;
+use crate::det::HashSet;
 
 /// Rewrite blank-predicate sends across every typed body in the app.
 /// Runs after `Analyzer::analyze` (receiver types must be stamped) and
@@ -225,10 +225,10 @@ impl AppDefinitions {
     /// its registry itself, at emit time, and that is also the first
     /// moment a test body HAS types (see `ground_body`).
     pub(crate) fn from_class_registry(
-        classes: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+        classes: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
     ) -> Self {
-        let mut own_predicate = HashSet::new();
-        let mut own_empty = HashSet::new();
+        let mut own_predicate = HashSet::default();
+        let mut own_empty = HashSet::default();
         for (id, info) in classes {
             let last = id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()).to_string();
             for name in info.instance_methods.keys() {
@@ -247,8 +247,8 @@ impl AppDefinitions {
     }
 
     pub(crate) fn collect(app: &App) -> Self {
-        let mut own_predicate = HashSet::new();
-        let mut own_empty = HashSet::new();
+        let mut own_predicate = HashSet::default();
+        let mut own_empty = HashSet::default();
         let mut note = |class: &str, method: &str| {
             let last = class.rsplit("::").next().unwrap_or(class).to_string();
             match method {
@@ -461,8 +461,8 @@ fn received_vars(body: &Expr) -> HashSet<VarId> {
             _ => e.node.for_each_child(&mut |c| visit(c, seen, out)),
         }
     }
-    let mut out = HashSet::new();
-    visit(body, &mut HashSet::new(), &mut out);
+    let mut out = HashSet::default();
+    visit(body, &mut HashSet::default(), &mut out);
     out
 }
 

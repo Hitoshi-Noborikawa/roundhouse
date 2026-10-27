@@ -35,7 +35,7 @@
 use crate::app::App;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
-use std::collections::HashSet;
+use crate::det::HashSet;
 
 pub fn apply_errors_full_messages_lowering(app: &mut App) {
     let fold = Fold::of(app);

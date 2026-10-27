@@ -53,4 +53,58 @@ mod tests {
         let set_of = || -> HashSet<usize> { (0..200).map(|i| i * 7).collect() };
         assert!(set_of().iter().eq(set_of().iter()));
     }
+
+    /// Library `src/` must not reintroduce `use std::collections::HashMap`
+    /// / `HashSet`. Tree input uses [`crate::vfs::FileTree`]; emitted Rust
+    /// may still *print* the std path inside string literals. Bins are
+    /// separate crates and are not scanned.
+    #[test]
+    fn library_does_not_import_std_hash_collections() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        fn walk(dir: &std::path::Path, offenders: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read src") {
+                let entry = entry.expect("dirent");
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().and_then(|s| s.to_str()) == Some("bin") {
+                        continue;
+                    }
+                    walk(&path, offenders);
+                    continue;
+                }
+                if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                    continue;
+                }
+                if path.ends_with("det.rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read rs");
+                for (i, line) in text.lines().enumerate() {
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("//")
+                        || trimmed.starts_with("///")
+                        || trimmed.starts_with('*')
+                        || trimmed.contains('"')
+                        || trimmed.contains('\'')
+                    {
+                        continue;
+                    }
+                    let imports_std_hash = trimmed.starts_with("use std::collections::HashMap")
+                        || trimmed.starts_with("use std::collections::HashSet")
+                        || (trimmed.starts_with("use std::collections::{")
+                            && (trimmed.contains("HashMap") || trimmed.contains("HashSet")));
+                    if imports_std_hash {
+                        offenders.push(format!("{}:{}", path.display(), i + 1));
+                    }
+                }
+            }
+        }
+        walk(&root, &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "std HashMap/HashSet imports in library src (use crate::det or FileTree):\n{}",
+            offenders.join("\n")
+        );
+    }
 }

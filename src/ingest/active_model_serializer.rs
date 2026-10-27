@@ -39,7 +39,7 @@
 //! `key:`, `if:` / `unless:` (a Symbol naming a method), or a block
 //! without parameters, and instance methods.
 
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 use crate::dialect::{LibraryClass, LibraryClassOrigin};
 use crate::expr::{Expr, ExprNode, Literal};
@@ -97,20 +97,20 @@ pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[So
     if selected.is_empty() {
         return Ok(());
     }
-    let mut decls: HashMap<ClassId, Decl> = HashMap::new();
-    let mut refused: HashMap<ClassId, IngestError> = HashMap::new();
+    let mut decls: HashMap<ClassId, Decl> = HashMap::default();
+    let mut refused: HashMap<ClassId, IngestError> = HashMap::default();
     // A serializer named anywhere but its declaration and the renders the
     // rewrite takes keeps the gem's class, which that use needs. Refused at
     // its declaration, naming the use: a gap in the using file would claim
     // that file's own findings.
-    let mut used: HashMap<ClassId, String> = HashMap::new();
+    let mut used: HashMap<ClassId, String> = HashMap::default();
     let known: HashSet<String> = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
     for source in sources {
         if !selected.iter().any(|id| source.text.contains(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()))) {
             continue;
         }
         let parsed = super::prism::parse_silent(source.text.as_bytes());
-        let mut uses = OtherUses { selected: &selected, known: &known, nesting: Vec::new(), found: HashMap::new() };
+        let mut uses = OtherUses { selected: &selected, known: &known, nesting: Vec::new(), found: HashMap::default() };
         ruby_prism::Visit::visit(&mut uses, &parsed.node());
         for (id, offset) in uses.found {
             let (line, _) = source.line_col(offset as u32);
@@ -181,7 +181,7 @@ pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[So
     }
     // A class whose expansion doesn't ingest is refused like any other,
     // left as it was.
-    let mut lowered_ok: HashSet<ClassId> = HashSet::new();
+    let mut lowered_ok: HashSet<ClassId> = HashSet::default();
     for class in &mut app.library_classes {
         if let Some(decl) = decls.get(&class.name) {
             let before = class.clone();
@@ -250,7 +250,7 @@ fn collect_fields(class: &ruby_prism::ClassNode<'_>, source: &SourceFile) -> Ing
     let stmts = flatten_statements(body);
     // The serializer's own instance methods: an attribute of that name
     // reads the method, as `read_attribute_for_serialization` does.
-    let mut methods: HashSet<String> = HashSet::new();
+    let mut methods: HashSet<String> = HashSet::default();
     for stmt in &stmts {
         if let Some(def) = stmt.as_def_node() {
             let offset = stmt.location().start_offset();
@@ -373,7 +373,7 @@ fn collect_fields(class: &ruby_prism::ClassNode<'_>, source: &SourceFile) -> Ing
             other => return Err(fail(&format!("`{other}` is outside the ActiveModel::Serializer subset (attributes)"))),
         }
     }
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for f in &fields {
         if !seen.insert(f.key.clone()) {
             return Err(refuse(source, class.location().start_offset(), &format!("the key `{}` is declared twice", f.key)));

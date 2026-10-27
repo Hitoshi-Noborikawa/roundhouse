@@ -431,7 +431,7 @@ impl Lockfile {
 
     /// Git specs in the requested dependency closure, dependencies first.
     pub fn git_specs_in_closure(&self, roots: &[&str]) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::det::HashSet::default();
         let mut out = Vec::new();
         for root in roots {
             let mut pending = vec![(*root, false)];
@@ -1199,15 +1199,15 @@ pub fn rails_dependent_owner<'a>(
 /// gem owns a path does not rescan every model, controller and class.
 struct AppConstants {
     /// Names of models, controllers and library classes.
-    classes: std::collections::HashSet<String>,
+    classes: crate::det::HashSet<String>,
     /// `Owner::NAME` for each constant an app class or model body assigns.
-    values: std::collections::HashSet<String>,
+    values: crate::det::HashSet<String>,
 }
 
 impl AppConstants {
     fn of(app: &crate::App) -> Self {
-        let mut classes = std::collections::HashSet::new();
-        let mut values = std::collections::HashSet::new();
+        let mut classes = crate::det::HashSet::default();
+        let mut values = crate::det::HashSet::default();
         classes.extend(app.models.iter().map(|model| model.name.0.as_str().to_string()));
         classes.extend(app.controllers.iter().map(|controller| controller.name.0.as_str().to_string()));
         classes.extend(app.library_classes.iter().map(|class| class.name.0.as_str().to_string()));
@@ -1273,7 +1273,7 @@ struct Refuser<'a> {
     app: &'a crate::App,
     target: Option<&'a str>,
     app_owned: AppConstants,
-    owners: std::cell::RefCell<std::collections::HashMap<String, Owner<'a>>>,
+    owners: std::cell::RefCell<crate::det::HashMap<String, Owner<'a>>>,
 }
 
 impl<'a> Refuser<'a> {
@@ -1372,7 +1372,7 @@ pub(crate) fn extension_gem_refusals(app: &crate::App, target: Option<&str>) -> 
             }
         }
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::det::HashSet::default();
     out.retain(|diagnostic| seen.insert((
         diagnostic.span.file.0, diagnostic.span.start, diagnostic.span.end, diagnostic.code(),
     )));
@@ -1405,8 +1405,8 @@ pub fn detail_names_external_namespace(detail: &str, root: &str) -> bool {
 /// memoized per detail (the same details repeat across an app).
 #[derive(Default)]
 pub struct ExternalRootIndex {
-    roots: std::collections::HashSet<String>,
-    memo: std::collections::HashMap<String, bool>,
+    roots: crate::det::HashSet<String>,
+    memo: crate::det::HashMap<String, bool>,
 }
 
 impl ExternalRootIndex {
@@ -1972,12 +1972,12 @@ pub const GEM_STYLESHEETS: &[(&str, &[&str])] = &[
 
 /// Every class and module `runtime/spinel/*.rb` declares, by full name: a gem's
 /// constant ported there (`Net::HTTP::Persistent`) runs on the Spinel tree.
-pub(crate) fn spinel_runtime_constants() -> &'static std::collections::HashSet<String> {
-    static NAMES: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+pub(crate) fn spinel_runtime_constants() -> &'static crate::det::HashSet<String> {
+    static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
     NAMES.get_or_init(|| {
         struct Declared {
             nesting: Vec<String>,
-            out: std::collections::HashSet<String>,
+            out: crate::det::HashSet<String>,
         }
         impl Declared {
             fn enter(&mut self, path: &ruby_prism::Node<'_>) {
@@ -2000,7 +2000,7 @@ pub(crate) fn spinel_runtime_constants() -> &'static std::collections::HashSet<S
         }
         let mut files = Vec::new();
         let _ = crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files);
-        let mut declared = Declared { nesting: Vec::new(), out: std::collections::HashSet::new() };
+        let mut declared = Declared { nesting: Vec::new(), out: crate::det::HashSet::default() };
         for (_, source) in &files {
             let parsed = ruby_prism::parse(source.as_bytes());
             ruby_prism::Visit::visit(&mut declared, &parsed.node());

@@ -65,7 +65,7 @@
 //! does, where the base's primary-key SELECT answered the row. The base
 //! model's named scopes, called on a subclass, are scoped like the rest.
 
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 use crate::app::App;
 use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Param};
@@ -121,7 +121,7 @@ impl Sti {
     fn new(app: &App, bases: HashMap<ClassId, ClassId>) -> Self {
         let parent_of: HashMap<&ClassId, &ClassId> =
             app.library_classes.iter().filter_map(|lc| Some((&lc.name, lc.parent.as_ref()?))).collect();
-        let mut names: HashMap<ClassId, Vec<String>> = HashMap::new();
+        let mut names: HashMap<ClassId, Vec<String>> = HashMap::default();
         for sub in bases.keys() {
             // Every subclass whose parent chain reaches `sub`.
             let mut own: Vec<String> = bases
@@ -168,7 +168,7 @@ pub fn apply_sti_scope_lowering(app: &mut App) {
     // the synthesized `becomes_from`: a class method nobody calls is
     // dead weight on every target, and on the strict ones it is dead
     // weight that still has to type-check.
-    let mut recast: HashSet<ClassId> = HashSet::new();
+    let mut recast: HashSet<ClassId> = HashSet::default();
     // Inside a subclass's OWN class method the receiver is implicit:
     // campfire's `Rooms::Direct.find_for` writes `all.joins(:users)
     // .detect { … }`, and Rails scopes that `all` to the subclass. Left
@@ -214,7 +214,7 @@ pub fn apply_sti_scope_lowering(app: &mut App) {
 /// Models, so the per-model synthesizer can't see them). Sorted, so
 /// the generated `case` arms are deterministic.
 fn stamp_sti_subclasses(app: &mut App, bases: &HashMap<ClassId, ClassId>) {
-    let mut by_base: HashMap<ClassId, Vec<ClassId>> = HashMap::new();
+    let mut by_base: HashMap<ClassId, Vec<ClassId>> = HashMap::default();
     for (subclass, base) in bases {
         by_base.entry(base.clone()).or_default().push(subclass.clone());
     }
@@ -450,16 +450,16 @@ pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
 /// table, split on that table's inheritance column: STI subclasses
 /// (with one) and plain subclasses (without one) → their base model.
 fn model_subclasses(app: &App) -> (HashMap<ClassId, ClassId>, HashMap<ClassId, ClassId>) {
-    let mut typed = HashMap::new();
-    let mut untyped = HashMap::new();
+    let mut typed = HashMap::default();
+    let mut untyped = HashMap::default();
     // Name -> the FIRST model / library class of that name, the same
     // element the linear `find`s this replaced answered. Indexed once:
     // a scan per parent hop is |classes|^2 on a large app.
-    let mut models_by_name: HashMap<&ClassId, &crate::dialect::Model> = HashMap::new();
+    let mut models_by_name: HashMap<&ClassId, &crate::dialect::Model> = HashMap::default();
     for m in &app.models {
         models_by_name.entry(&m.name).or_insert(m);
     }
-    let mut lc_parent: HashMap<&ClassId, &Option<ClassId>> = HashMap::new();
+    let mut lc_parent: HashMap<&ClassId, &Option<ClassId>> = HashMap::default();
     for other in &app.library_classes {
         lc_parent.entry(&other.name).or_insert(&other.parent);
     }

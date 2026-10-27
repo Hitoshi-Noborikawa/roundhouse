@@ -13,7 +13,8 @@
 //! controller), which raises when the class loads; it and a `helper do …
 //! end` block, whose methods aren't emitted, stay reported.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use crate::det::HashMap;
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
@@ -49,7 +50,7 @@ pub(crate) fn apply(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diagn
     }
     let mut gaps: Vec<(Span, String, String)> = Vec::new();
     // Each mailer's declared helper modules, its own calls consumed.
-    let mut declared: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut declared: HashMap<String, BTreeSet<String>> = HashMap::default();
     for lc in app.library_classes.iter_mut() {
         if !mailers.contains(lc.name.0.as_str()) {
             continue;

@@ -30,7 +30,7 @@
 //! files with their includes renamed, and the factory itself hidden once
 //! no other reference to it remains.
 
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ruby_prism::Node;
@@ -71,10 +71,10 @@ pub(super) struct FactoryVfs<'a, V: Vfs + ?Sized> {
 }
 
 pub(super) fn expand<'a, V: Vfs + ?Sized>(inner: &'a V, dir: &Path) -> FactoryVfs<'a, V> {
-    let mut out = FactoryVfs { inner, files: HashMap::new(), hidden: HashSet::new() };
+    let mut out = FactoryVfs { inner, files: HashMap::default(), hidden: HashSet::default() };
     let mut sources: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     collect_rb(inner, &dir.join("app"), &mut sources);
-    let mut factories: HashMap<String, Factory> = HashMap::new();
+    let mut factories: HashMap<String, Factory> = HashMap::default();
     for (file, bytes) in &sources {
         let parsed = ruby_prism::parse(bytes);
         if let Some((name, factory)) = find_factory(&parsed.node(), bytes, file) {
@@ -85,7 +85,7 @@ pub(super) fn expand<'a, V: Vfs + ?Sized>(inner: &'a V, dir: &Path) -> FactoryVf
         return out;
     }
     let mut sites: Vec<Site> = Vec::new();
-    let mut other_refs: HashSet<String> = HashSet::new();
+    let mut other_refs: HashSet<String> = HashSet::default();
     for (file, bytes) in &sources {
         let parsed = ruby_prism::parse(bytes);
         let mut finder = SiteFinder { factories: &factories, file, bytes, sites: Vec::new(), refs: Vec::new(), in_site: 0 };
@@ -98,10 +98,10 @@ pub(super) fn expand<'a, V: Vfs + ?Sized>(inner: &'a V, dir: &Path) -> FactoryVf
     if sites.is_empty() {
         return out;
     }
-    let mut generated: HashMap<(String, Vec<String>), String> = HashMap::new();
+    let mut generated: HashMap<(String, Vec<String>), String> = HashMap::default();
     // Not the camelized arguments alone: `[:a_b]` and `[:a, :b]` camelize alike, and `M[]` is `M`.
     let mut used: HashSet<String> = factories.keys().cloned().collect();
-    let mut by_file: HashMap<PathBuf, Vec<(usize, usize, String)>> = HashMap::new();
+    let mut by_file: HashMap<PathBuf, Vec<(usize, usize, String)>> = HashMap::default();
     for site in &sites {
         let factory = &factories[&site.factory];
         let key = (site.factory.clone(), site.args.clone());
@@ -355,7 +355,7 @@ fn specialized_name(factory: &str, args: &[String]) -> String {
 }
 
 fn specialize(name: &str, factory: &Factory, args: &[String]) -> Option<String> {
-    let mut value: HashMap<&str, String> = HashMap::new();
+    let mut value: HashMap<&str, String> = HashMap::default();
     for (param, arg) in factory.required.iter().zip(args) {
         value.insert(param, arg.clone());
     }
