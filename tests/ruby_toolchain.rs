@@ -31,7 +31,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use roundhouse::analyze::Analyzer;
 use roundhouse::ingest::ingest_app;
 use roundhouse::project::BuildTarget;
 
@@ -78,7 +77,9 @@ fn generate_project(fixture: &Path, scratch: &Path) {
     std::fs::create_dir_all(scratch).expect("create scratch");
 
     let mut app = ingest_app(fixture).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    // What `roundhouse --target ruby` runs: analysis plus the shared
+    // post-analyze lowerings (`errors[:attr]`, among others).
+    roundhouse::session::analyze_and_lower_for(&mut app, BuildTarget::Ruby);
     let files = roundhouse::project::target_files(&app, fixture, BuildTarget::Ruby)
         .expect("ruby target files");
     roundhouse::project::write_to_dir(&files, scratch).expect("write ruby target tree");
