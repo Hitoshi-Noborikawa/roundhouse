@@ -53,7 +53,7 @@ fn a_library_the_tree_defines_itself_is_not_required() {
 }
 
 /// A library Spinel has no package for (`date`, ...) stays out of the
-/// spinel tree, whose `--require-gate` build would refuse it, and is
+/// spinel tree, whose `--strict-require` build would refuse it, and is
 /// carried on the ruby family. `yaml` has one (packages/yaml) and is
 /// carried on both.
 #[test]
