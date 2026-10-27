@@ -286,6 +286,57 @@ fn sidekiq_yml_sets_the_worker_defaults() {
     assert!(registry.contains("  def self.sidekiq_worker_queues\n    \"critical default,2\"\n  end\n"), "{registry}");
 }
 
+const CABLE_REDIS: &str = "production:\n  adapter: redis\n  url: <%= ENV.fetch(\"REDIS_URL\") { \"redis://localhost:6379/1\" } %>\n  channel_prefix: depot_production\n";
+
+const CABLE_SCRIPT: &str = r##"SENT = []
+RedisCable.define_singleton_method(:publish) { |stream, json| SENT << [RedisCable.channel(stream), json] }
+raise "not on the Redis cable" unless RedisCable.enabled?
+Broadcasts.set_transport(RedisCable::Transport.new)
+Turbo::StreamsChannel.broadcast_append_to("Z2lkOi8vZGVwb3QvQ2FyLzE", target: "cars", html: %(<div id="car_1">Golf &amp; "GTI" \u00e9</div>))
+ActionCable.server.broadcast("user_7_unreads", { "roomId" => 1, "count" => 2, "note" => "<b>&</b>" })
+ActionCable.server.broadcast("user_7_unreads", JSON.generate({ "roomId" => 3 }), coder: nil)
+puts "SENT " + JSON.generate(SENT)
+"##;
+
+/// Under config/cable.yml's `adapter: redis`, a tree on `:sidekiq` sends
+/// each broadcast through Redis on the channel and with the bytes
+/// actioncable 8.1.3's Redis adapter publishes (tests/redis_cable/
+/// rails.json): a Turbo Stream fragment, a Hash, and a `coder: nil`
+/// String. The spinel tree gets the real transport too; a tree on
+/// another cable adapter keeps the façade.
+#[test]
+fn the_redis_cable_publishes_what_rails_does() {
+    let run = on_sidekiq().write("config/cable.yml", CABLE_REDIS).run_ruby(CABLE_SCRIPT);
+    run.assert_passes();
+    let line = run.stdout.lines().find_map(|l| l.strip_prefix("SENT ")).unwrap_or_else(|| panic!("{}", run.stdout));
+    let sent: Vec<(String, String)> = serde_json::from_str(line).unwrap();
+    let oracle: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/redis_cable/rails.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(oracle["actioncable"], "8.1.3");
+    let want: Vec<(String, String)> = oracle["publishes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["channel"].as_str().unwrap().to_string(), p["payload"].as_str().unwrap().to_string()))
+        .collect();
+    assert_eq!(sent, want, "the runtime's publishes differ from Rails'");
+    let registry = read(&run.emitted, "runtime/job_registry.rb");
+    assert!(
+        registry.contains("  def self.cable_redis_url\n    SidekiqPush.setting_or(\"REDIS_URL\", \"redis://localhost:6379/1\")\n  end\n"),
+        "{registry}"
+    );
+
+    let (spinel, errors) = on_sidekiq().write("config/cable.yml", CABLE_REDIS).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(read(&spinel, "runtime/redis_cable.rb").contains("Redis.pubsub(url: url)"));
+    let (plain, _) = on_sidekiq().emit(BuildTarget::Spinel);
+    assert!(read(&plain, "runtime/redis_cable.rb").contains("def self.enabled?\n    false\n"));
+    let (ruby, _) = on_sidekiq().emit(BuildTarget::Ruby);
+    assert!(read(&ruby, "runtime/redis_cable.rb").contains("def self.enabled?\n    false\n"));
+}
+
 const CONFIGURE_CLIENT: &str = "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"JOBS_REDIS_URL\", \"redis://jobs:6379/1\"), password: ENV[\"JOBS_REDIS_PASSWORD\"] }\nend\n";
 
 /// The app's `configure_client` settings reach the registry the push

@@ -12,4 +12,8 @@ SidekiqWorker.prepare_pool(ARGV)
 Main.configure_default_adapter!
 Db.checkpoint_in_background!
 ActiveJob.register_drain
+# A job's broadcasts go to the web processes through Redis when
+# config/cable.yml says `adapter: redis`; otherwise there is no socket here
+# to send them to.
+Broadcasts.set_transport(RedisCable::Transport.new) if RedisCable.enabled?
 SidekiqWorker.cli(ARGV)

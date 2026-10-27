@@ -139,6 +139,9 @@ SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_WORKER_INPUTS - {"runtime/spinel/sidekiq_redis.rb
     "runtime/spinel/sidekiq/sidekiq_redis.rb",
     "tests/sidekiq_push_live.rs",
     "tests/sidekiq_worker_live.rs",
+    "runtime/spinel/sidekiq/redis_cable.rb",
+    "tests/redis_cable_live.rs",
+    "tests/redis_cable/rails.json",
 }
 # Seconds each suite took in spinel-framework (main run 38936441376, its
 # test binary's compile included), for balancing its shards; a suite not
@@ -692,7 +695,7 @@ def select(
             jobs_selected.update(CORE)
         if native:
             reasons.append(f"{path}: native Spinel core")
-        if path in SIDEKIQ_LIVE_INPUTS or path.startswith(("tests/sidekiq_push_live/", "tests/sidekiq_worker_live/")):
+        if path in SIDEKIQ_LIVE_INPUTS or path.startswith(("tests/sidekiq_push_live/", "tests/sidekiq_worker_live/", "tests/redis_cable_live/")):
             spinel = True
             jobs_selected.add("sidekiq-live")
             reasons.append(f"{path}: live Sidekiq gate")
