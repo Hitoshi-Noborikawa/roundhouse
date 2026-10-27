@@ -322,6 +322,28 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     if super::roda_app::is_roda_app(vfs, dir) {
         return super::roda_app::ingest_roda_app_with_vfs(vfs, dir);
     }
+    // Again with the installed gems the code needs from source, until no
+    // new one appears: a gem brought in can need another (typeid's uuid7).
+    let mut auto: Vec<String> = Vec::new();
+    loop {
+        let marks = (super::survey::mark(), super::prism::mark());
+        let mut app = ingest_rails_app(vfs, dir, &auto)?;
+        let more: Vec<String> = super::auto_source_gems::candidates(&app, vfs, dir)
+            .into_iter()
+            .filter(|g| !auto.contains(g))
+            .collect();
+        if more.is_empty() || auto.len() >= 32 {
+            app.auto_source_gems = auto.into_iter().filter(|g| app.gem_lock.as_ref().is_some_and(|l| l.source.contains(g))).collect();
+            return Ok(app);
+        }
+        // Not the superseded pass's parse errors and survey gaps as well: the next pass reports them again.
+        super::survey::rewind(marks.0);
+        super::prism::rewind(marks.1);
+        auto.extend(more);
+    }
+}
+
+fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {
     super::sources::reset();
     super::each_validator::reset();
     let _source_root = super::sources::set_root(dir);
@@ -334,8 +356,16 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
         lock
     });
-    let source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
+    let mut source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
         .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
+    // Not fatal for an automatic one: the gem stays a reported boundary, as it was.
+    let mut auto_sourced: Vec<String> = Vec::new();
+    for gem in auto_source_gems {
+        if let Ok(mut resolved) = super::source_gems::resolve(vfs, dir, lock.as_ref(), std::slice::from_ref(gem)) {
+            source_gems.append(&mut resolved);
+            auto_sourced.push(gem.clone());
+        }
+    }
     // One walk of an unchanging tree: remember what each path answered.
     let cached_vfs = crate::vfs::CachedVfs::new(vfs);
     let mount_vfs = super::source_gems::MountVfs { inner: &cached_vfs, gems: &source_gems };
@@ -395,6 +425,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 lock.gemfile_requires = crate::gems::gemfile_requires(&gemfile);
             }
             lock.source = app.extensions.source_gems.clone();
+            lock.source.extend(auto_sourced.iter().cloned());
             app.gem_lock = Some(lock);
             if let Some(lock) = &app.gem_lock {
                 app.gem_boundary = super::rbi::load_gem_boundary(vfs, dir, lock, &app.extensions);

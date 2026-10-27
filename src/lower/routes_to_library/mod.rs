@@ -344,6 +344,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // target's call site: every emitter that wants route helpers wants
     // these too, and a per-target wiring is nine places to forget one.
     funcs.extend(lower_url_option_helpers(app));
+    funcs.extend(lower_dynamic_url_helper(app, &module_path, &flat));
     // `direct :name do … end` helpers — not routes, so they never reach
     // `flat`; they ride here because they live in the same module and
     // their `route_for` bodies need the flattened table to resolve.
@@ -439,6 +440,119 @@ pub fn lower_url_option_helpers(app: &App) -> Vec<LibraryFunction> {
         .iter()
         .map(|extras| build_url_options_function(&module_path, extras, &flat))
         .collect()
+}
+
+/// `RouteHelpers.path_for_params(controller, action, params, recall)`: a
+/// URL built from a Hash only known at run time (lobsters' moderation log
+/// pages through `link_to "Page 2", @moderation_params.merge(page: 2)`),
+/// as Rails' route generation answers it. The request's controller and
+/// action stand for the ones the Hash leaves out.
+///
+/// Rails' Journey: a candidate is a GET route of that controller#action
+/// whose every segment the Hash or the request's path parameters supply;
+/// the one whose segments the Hash names most wins, the first written on
+/// a tie; the rest of the Hash is the query string, less the parts of
+/// the route as written (an optional segment it could not place is
+/// dropped, not moved to the query). Generated only for an app whose
+/// views build such a URL.
+fn lower_dynamic_url_helper(app: &App, module_path: &[Symbol], flat: &[FlatRoute]) -> Option<LibraryFunction> {
+    if !app.views.iter().any(|v| crate::lower::view_to_library::view_uses_dynamic_url_hash(&v.body)) {
+        return None;
+    }
+    // Every controller's, not only the linking views' own: a shared partial renders under any controller, and the Hash can name one.
+    let controllers: std::collections::BTreeSet<String> = flat
+        .iter()
+        .filter(|r| r.method == HttpMethod::Get)
+        .map(|r| controller_symbol(r.controller.0.as_str()))
+        .collect();
+    let mut arms = String::new();
+    for controller in &controllers {
+        let mut actions: Vec<&Symbol> = Vec::new();
+        for r in flat.iter().filter(|r| r.method == HttpMethod::Get && controller_symbol(r.controller.0.as_str()) == *controller) {
+            if !actions.contains(&&r.action) {
+                actions.push(&r.action);
+            }
+        }
+        for action in actions {
+            let _ = std::fmt::Write::write_fmt(&mut arms, format_args!("  if key == \"{controller}#{action}\"\n"));
+            for r in flat.iter().filter(|r| r.method == HttpMethod::Get && controller_symbol(r.controller.0.as_str()) == *controller && &r.action == action) {
+                // This variant's own segments (an expanded optional group carries its siblings' names too).
+                let names: Vec<String> = r
+                    .path
+                    .split('/')
+                    .filter_map(|seg| seg.strip_prefix(':').or_else(|| seg.strip_prefix('*')))
+                    .map(str::to_string)
+                    .collect();
+                let present: Vec<String> = names.iter().map(|p| format!("(given.key?(\"{p}\") || recall.key?(\"{p}\"))")).collect();
+                let cond = if present.is_empty() { "true".to_string() } else { present.join(" && ") };
+                let score: Vec<String> = names.iter().map(|p| format!("(given.key?(\"{p}\") ? 1 : 0)")).collect();
+                let score = if score.is_empty() { "0".to_string() } else { score.join(" + ") };
+                let path = r
+                    .path
+                    .split('/')
+                    .map(|seg| match seg.strip_prefix(':').or_else(|| seg.strip_prefix('*')) {
+                        Some(p) => format!("#{{given.key?(\"{p}\") ? given.fetch(\"{p}\", \"\").to_s : recall.fetch(\"{p}\", \"\")}}"),
+                        None => seg.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let written: Vec<String> = r
+                    .source_path
+                    .split(|c: char| c == '/' || c == '(' || c == ')' || c == '.')
+                    .filter_map(|seg| seg.strip_prefix(':').or_else(|| seg.strip_prefix('*')))
+                    .map(|p| format!("\"{p}\""))
+                    .collect();
+                let _ = std::fmt::Write::write_fmt(
+                    &mut arms,
+                    format_args!(
+                        "    if {cond}\n      score = {score}\n      if score > best\n        best = score\n        path = \"{path}\"\n        parts = [{}]\n      end\n    end\n",
+                        written.join(", ")
+                    ),
+                );
+            }
+            arms.push_str("  end\n");
+        }
+    }
+    let source = format!(
+        "def self.path_for_params(controller, action, params, recall)\n\
+         \x20 given = {{}}\n\
+         \x20 params.each {{ |k, v| given[k.to_s] = v }}\n\
+         \x20 c = given.key?(\"controller\") ? given.fetch(\"controller\", \"\").to_s : controller\n\
+         \x20 a = given.key?(\"action\") ? given.fetch(\"action\", \"\").to_s : action\n\
+         \x20 key = c.gsub(\"::\", \"_\").gsub(\"/\", \"_\") + \"#\" + a\n\
+         \x20 best = -1\n\
+         \x20 path = \"\"\n\
+         \x20 parts = []\n\
+         {arms}\
+         \x20 raise \"no route matches \" + key if best < 0\n\
+         \x20 rest = {{}}\n\
+         \x20 given.each {{ |k, v| rest[k] = v unless k == \"controller\" || k == \"action\" || parts.include?(k) }}\n\
+         \x20 query = ActiveSupport.to_query(rest)\n\
+         \x20 query.empty? ? path : path + \"?\" + query\n\
+         end\n"
+    );
+    let method = crate::runtime_src::parse_methods(&source).ok()?.into_iter().next()?;
+    let params_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) };
+    let recall_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
+    Some(LibraryFunction {
+        module_path: module_path.to_vec(),
+        name: Symbol::from("path_for_params"),
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        params: method.params.clone(),
+        body: method.body,
+        signature: Some(fn_sig(
+            vec![
+                (Symbol::from("controller"), Ty::Str),
+                (Symbol::from("action"), Ty::Str),
+                (Symbol::from("params"), params_ty),
+                (Symbol::from("recall"), recall_ty),
+            ],
+            Ty::Str,
+        )),
+        effects: EffectSet::default(),
+        is_async: false,
+    })
 }
 
 /// Every url-options hash in a view: a Hash literal in the URL argument

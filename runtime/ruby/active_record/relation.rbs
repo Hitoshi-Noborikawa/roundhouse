@@ -13,6 +13,15 @@ module ActiveRecord
     def exclusive?: () -> bool
   end
 
+  class EagerFilter
+    type nested_spec = Symbol | Hash[Symbol, Symbol] | Array[Symbol | Hash[Symbol, Symbol]] | nil
+    def initialize: (Array[Hash[Symbol, untyped]] conditions, Array[Hash[Symbol, untyped]] negations, Array[Hash[Symbol, untyped]] orders, nested_spec nested) -> void
+    def nested: () -> nested_spec
+    def conditions: () -> Array[Hash[Symbol, untyped]]
+    def negations: () -> Array[Hash[Symbol, untyped]]
+    def orders: () -> Array[Hash[Symbol, untyped]]
+  end
+
   class Relation
     # Model handle is `Base` (class object collapsed onto `Ty::Class{Base}`
     # in send.rs). Do not spell `Class` — that leaves `@model` as Ty::Var
@@ -38,13 +47,13 @@ module ActiveRecord
         Array[String] groups,
         Array[String] havings,
         Array[String] ctes,
-        Array[Symbol | Hash[Symbol, Symbol]] includes,
+        Array[Symbol | Hash[Symbol, Symbol | EagerFilter]] includes,
         Hash[Symbol, untyped] attrs
       ) -> Relation
     def copy_string_list: (Array[String] xs) -> Array[String]
     def copy_bool_list: (Array[bool] xs) -> Array[bool]
     def copy_cols_list: (Array[Array[String]] xs) -> Array[Array[String]]
-    def copy_symbol_list: (Array[Symbol | Hash[Symbol, Symbol]] xs) -> Array[Symbol | Hash[Symbol, Symbol]]
+    def copy_symbol_list: (Array[Symbol | Hash[Symbol, Symbol | EagerFilter]] xs) -> Array[Symbol | Hash[Symbol, Symbol | EagerFilter]]
     def copy_scope_attributes: (Hash[Symbol, untyped] attrs) -> Hash[Symbol, untyped]
 
     def where: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
@@ -59,7 +68,7 @@ module ActiveRecord
     @limit: Integer?
     @offset: Integer?
     @records: Array[Base]?
-    @includes: Array[Symbol | Hash[Symbol, Symbol]]
+    @includes: Array[Symbol | Hash[Symbol, Symbol | EagerFilter]]
 
     @from: String?
     @ctes: Array[String]
@@ -177,10 +186,10 @@ module ActiveRecord
     def distinct: (?(bool | Symbol | String) value) -> Relation
     def distinct!: (?(bool | Symbol | String) value) -> Relation
     def all: () -> Relation
-    def includes: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
-    def preload: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
-    def eager_load: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
-    def include_names!: (Array[Symbol | Hash[Symbol, Symbol]] names) -> Relation
+    def includes: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
+    def preload: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
+    def eager_load: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
+    def include_names!: (Array[Symbol | Hash[Symbol, Symbol | EagerFilter]] names) -> Relation
     def skip_preloading!: () -> Relation
     def preload_associations: (Array[Base] records) -> Array[Base]
     def references: (*Symbol names) -> Relation

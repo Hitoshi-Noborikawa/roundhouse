@@ -11126,6 +11126,24 @@ end
         src.push_str("  end\n  nil\nend\n");
     }
 
+    // An eager load's association (`lower::eager_load`): the same IN load
+    // with the chain's conditions and order on the association's table.
+    src.push_str("\ndef self._eager_dispatch(records, name, filter)\n");
+    let eager = crate::lower::eager_load::eager_loadable(model);
+    if eager.is_empty() {
+        src.push_str("  nil\nend\n");
+    } else {
+        src.push_str("  case name\n");
+        for (name, target, fk) in &eager {
+            let target = target.0.as_str();
+            let _ = write!(
+                src,
+                "  when :{name}\n    ids = []\n    records.each do |r| ids << r.id end\n    loaded = []\n    if ids.length > 0\n      rel = ActiveRecord::Relation.new({target}).where({fk}: ids)\n      filter.conditions.each do |c| rel = rel.where(c) end\n      filter.negations.each do |c| rel = rel.where.not(c) end\n      filter.orders.each do |o| rel = rel.order(o) end\n      loaded = rel.to_a\n    end\n    grouped = {{}}\n    loaded.each do |rec|\n      k = rec.{fk}\n      grouped[k] = [] if grouped[k].nil?\n      grouped[k] << rec\n    end\n    records.each do |r| r._preload_{name}(grouped[r.id] || []) end\n    {target}.preload_associations(loaded, [filter.nested]) unless filter.nested.nil?\n"
+            );
+        }
+        src.push_str("  end\n  nil\nend\n");
+    }
+
     // Spec walker — the entry point `Relation#to_a` calls. Specs are
     // Symbols, Hashes (nested: `story: :user`), or Arrays of either.
     src.push_str(
@@ -11135,7 +11153,11 @@ def self.preload_associations(records, specs)
   specs.each do |spec|
     if spec.is_a?(Hash)
       spec.each do |name, nested|
-        _preload_dispatch(records, name, nested)
+        if nested.is_a?(ActiveRecord::EagerFilter)
+          _eager_dispatch(records, name, nested)
+        else
+          _preload_dispatch(records, name, nested)
+        end
       end
     elsif spec.is_a?(Array)
       preload_associations(records, spec)

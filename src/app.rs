@@ -439,6 +439,12 @@ pub struct App {
     /// Object, which the emitted app does not define.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_defs: Vec<crate::ident::Symbol>,
+    /// Installed gems compiled from source because the app's code needs
+    /// them and nothing models or ports them (`ingest::auto_source_gems`).
+    /// The Spinel tree carries their code; the ruby family loads the real
+    /// gem instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_source_gems: Vec<String>,
     /// `X.after_action(only: …) { response.set_header(k, v) }` from a
     /// `config/initializers/` file, bare or inside `ActiveSupport.on_load`:
     /// campfire marks the disk service's file responses cacheable this
@@ -1063,6 +1069,12 @@ impl App {
             .map(|(m, set)| (m, set.into_iter().next().unwrap()))
             .collect()
     }
+    /// The path a span's file was read from (`sources[n - 1]`), for an app
+    /// whose ingest has finished; `None` for the synthetic `FileId(0)`.
+    pub fn source_path(&self, file: crate::span::FileId) -> Option<&str> {
+        (file.0 as usize).checked_sub(1).and_then(|i| self.sources.get(i)).map(|s| s.path.as_str())
+    }
+
     pub const SCHEMA_VERSION: u32 = 1;
 
     pub fn new() -> Self {
@@ -1120,6 +1132,7 @@ impl App {
             rake_task_gaps: Vec::new(),
             initializer_filters: Vec::new(),
             initializer_defs: Vec::new(),
+            auto_source_gems: Vec::new(),
             initializer_response_headers: Vec::new(),
             collection_cache_store: None,
             app_requires: Vec::new(),

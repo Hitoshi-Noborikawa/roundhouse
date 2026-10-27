@@ -45,6 +45,35 @@ module ActiveRecord
     end
   end
 
+  # What an eager-loaded association keeps: Rails loads `includes(:tags)
+  # .where(tags: …).order(tags: …)` in one JOIN, so each record's `tags`
+  # holds only the matching rows, in that order. The preload arm reads
+  # the same conditions and order against the association's table.
+  class EagerFilter
+    def initialize(conditions, negations, orders, nested)
+      @conditions = conditions
+      @negations = negations
+      @orders = orders
+      @nested = nested
+    end
+
+    def nested
+      @nested
+    end
+
+    def conditions
+      @conditions
+    end
+
+    def negations
+      @negations
+    end
+
+    def orders
+      @orders
+    end
+  end
+
   class Relation
     # `scoped` false is `Model.unscoped`: no default scope. Otherwise the
     # model's `default_scope { where(…) }` is added here, when the
