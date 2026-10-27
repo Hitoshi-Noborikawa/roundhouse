@@ -41,3 +41,15 @@ fn arms_for_a_snapshot_rebuild() {
     ));
     assert!(text.contains("when \"Widget\" then Widget.instantiate(attributes)"), "no arm:\n{text}");
 }
+
+/// The caller scan skips only the runtime file that defines
+/// `instantiate_named`, by its path in the emitted tree: an app file that
+/// happens to share its basename is still a caller.
+#[test]
+fn arms_for_a_caller_sharing_the_runtime_basename() {
+    let text = db_config(widgets("class Widget < ApplicationRecord\nend\n").write(
+        "app/models/active_record_db_config.rb",
+        "class ActiveRecordDbConfig\n  def self.rebuild(name, attributes)\n    name.constantize.instantiate(attributes)\n  end\nend\n",
+    ));
+    assert!(text.contains("when \"Widget\" then Widget.instantiate(attributes)"), "no arm:\n{text}");
+}
