@@ -707,7 +707,7 @@ pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<()
 /// it to readdir.
 fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), String> {
     use ruby_rbs::node::{MethodDefinitionKind, Node, parse};
-    use std::collections::HashMap;
+    use crate::det::HashMap;
     struct Decl {
         file: usize,
         span: std::ops::Range<usize>,
@@ -838,7 +838,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         Ok(())
     }
     // (qualified class, receiver, method) -> declarations from every runtime .rbs.
-    let mut decls: HashMap<(String, &'static str, String), Vec<Decl>> = HashMap::new();
+    let mut decls: HashMap<(String, &'static str, String), Vec<Decl>> = HashMap::default();
     for (fi, (path, text)) in files.iter().enumerate() {
         if !path.ends_with(".rbs")
             || !(path.starts_with("runtime/") || path.starts_with("sig/runtime/"))
@@ -863,7 +863,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         let reopen = rest != primary;
         (spinel as u8) * 2 + reopen as u8
     };
-    let mut drop: HashMap<usize, Vec<std::ops::Range<usize>>> = HashMap::new();
+    let mut drop: HashMap<usize, Vec<std::ops::Range<usize>>> = HashMap::default();
     let mut undecided = Vec::new();
     for ((class, receiver, method), ds) in &decls {
         let first = &ds[0].sig;
@@ -1923,7 +1923,7 @@ fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
         return;
     }
     use crate::expr::{ExprNode, LValue};
-    fn writes(expr: &crate::expr::Expr, out: &mut std::collections::HashSet<String>) {
+    fn writes(expr: &crate::expr::Expr, out: &mut crate::det::HashSet<String>) {
         match &*expr.node {
             ExprNode::Assign { target: LValue::Ivar { name }, .. } | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
                 out.insert(name.as_str().to_string());
@@ -1939,18 +1939,18 @@ fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
         }
         expr.node.for_each_child(&mut |child| writes(child, out));
     }
-    let own: std::collections::HashMap<&crate::ident::ClassId, std::collections::HashSet<String>> = app
+    let own: crate::det::HashMap<&crate::ident::ClassId, crate::det::HashSet<String>> = app
         .controllers
         .iter()
         .map(|c| {
-            let mut out = std::collections::HashSet::new();
+            let mut out = crate::det::HashSet::default();
             for action in c.actions() {
                 writes(&action.body, &mut out);
             }
             (&c.name, out)
         })
         .collect();
-    let parent_of: std::collections::HashMap<&crate::ident::ClassId, &crate::ident::ClassId> =
+    let parent_of: crate::det::HashMap<&crate::ident::ClassId, &crate::ident::ClassId> =
         app.controllers.iter().filter_map(|c| c.parent.as_ref().map(|p| (&c.name, p))).collect();
     let chain = |start: &crate::ident::ClassId| {
         let mut out = vec![start.clone()];
@@ -1965,13 +1965,13 @@ fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
         out
     };
     for controller in &app.controllers {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen: crate::det::HashSet<String> = crate::det::HashSet::default();
         for id in chain(&controller.name) {
             if let Some(w) = own.get(&id) {
                 seen.extend(w.iter().cloned());
             }
         }
-        let below: std::collections::HashSet<&String> = app
+        let below: crate::det::HashSet<&String> = app
             .controllers
             .iter()
             .filter(|d| d.name != controller.name && chain(&d.name).contains(&controller.name))
@@ -1982,7 +1982,7 @@ fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
         if below.is_empty() {
             continue;
         }
-        fn reads(expr: &crate::expr::Expr, below: &std::collections::HashSet<&String>, target: BuildTarget) {
+        fn reads(expr: &crate::expr::Expr, below: &crate::det::HashSet<&String>, target: BuildTarget) {
             if let ExprNode::Ivar { name } = &*expr.node
                 && below.contains(&name.as_str().to_string())
             {
@@ -2057,7 +2057,7 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
     let Some(lock) = app.gem_lock.as_ref() else { return };
     let census = crate::gems::GemCensus::of(lock);
     let carried = crate::gems::native_extension_gem_namespaces(app);
-    let unknown: std::collections::HashSet<&str> = census
+    let unknown: crate::det::HashSet<&str> = census
         .unknown()
         .filter(|gem| !lock.is_from_git(&gem.name) && !app.extensions.is_rails_dependent(&gem.name))
         .filter(|gem| !carried.contains(&crate::gems::namespace_of(&gem.name)))
@@ -2091,7 +2091,7 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
 /// Every constant the app's classes name that the app does not define itself:
 /// superclasses, and each `Const` in an emitted body.
 fn for_each_app_constant(app: &App, f: &mut dyn FnMut(crate::span::Span, &str)) {
-    let own: std::collections::HashSet<&str> = app
+    let own: crate::det::HashSet<&str> = app
         .models
         .iter()
         .map(|m| m.name.0.as_str())
@@ -2172,7 +2172,7 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
         return;
     }
     // (model, reader) of each collection association: its reader answers a CollectionProxy.
-    let proxies: std::collections::HashSet<(&str, &str)> = app
+    let proxies: crate::det::HashSet<(&str, &str)> = app
         .models
         .iter()
         .flat_map(|m| {
@@ -2185,10 +2185,10 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
             })
         })
         .collect();
-    let models: std::collections::HashSet<&str> = app.models.iter().map(|m| m.name.0.as_str()).collect();
+    let models: crate::det::HashSet<&str> = app.models.iter().map(|m| m.name.0.as_str()).collect();
     struct Records<'a> {
-        proxies: std::collections::HashSet<(&'a str, &'a str)>,
-        models: std::collections::HashSet<&'a str>,
+        proxies: crate::det::HashSet<(&'a str, &'a str)>,
+        models: crate::det::HashSet<&'a str>,
     }
     /// A query chain off a model class or a collection reader (`Post.where(…)`,
     /// `product.subscribers.where(…)`): a Relation or CollectionProxy that types as
@@ -2503,7 +2503,7 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
             .chain(c.include_spans.iter().map(|span| span.file))
             .find(|file| file.0 != 0)
     };
-    let dropped: std::collections::HashSet<String> = app
+    let dropped: crate::det::HashSet<String> = app
         .library_classes
         .iter()
         .filter(|c| file_of_class(c).is_some_and(mounted))
@@ -2784,7 +2784,7 @@ fn target_files_inner(
             if declarations.iter().all(|lc| !lc.has_source_ivar_initializers()) {
                 continue;
             }
-            let mut methods = std::collections::HashSet::new();
+            let mut methods = crate::det::HashSet::default();
             for m in declarations.iter().flat_map(|lc| &lc.methods) {
                 if !methods.insert((m.receiver == crate::dialect::MethodReceiver::Class, &m.name)) {
                     return Err(format!(
@@ -2842,7 +2842,7 @@ fn target_files_inner(
         target,
         BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby
     ) {
-        let mut synth_shakeable: std::collections::HashSet<String> = app
+        let mut synth_shakeable: crate::det::HashSet<String> = app
             .models
             .iter()
             .flat_map(|m| app.schema.tables.get(&m.table.0).into_iter()
@@ -4545,7 +4545,7 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
 /// distinct entry once (`E`), and per site, locale, environment and key
 /// the index of its entry (`T`), so no entry is spelled per locale.
 fn i18n_table_text(app: &App) -> String {
-    let mut index: std::collections::HashMap<&Vec<String>, usize> = std::collections::HashMap::new();
+    let mut index: crate::det::HashMap<&Vec<String>, usize> = crate::det::HashMap::default();
     let mut entries = String::new();
     let mut lines = String::new();
     let table: Vec<(String, Vec<String>)> = app.i18n_table.iter().flat_map(|site| site.records()).collect();
@@ -6310,7 +6310,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     const HARDCODED: &str = "  def self.instantiate_controller(sym)\n    case sym\n    when :articles then ArticlesController.new\n    when :comments then CommentsController.new\n    else ActiveStorage::Routes.instantiate_controller(sym)\n    end\n  end";
 
     let flat = crate::lower::flatten_routes(app);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::det::HashSet::default();
     let current_classes = &app.current_attribute_classes;
     let mut arms = String::new();
     // Same rule as the routes.rb require header: a route may name a
@@ -6318,7 +6318,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     // under `scope module: "rooms"`). Rails resolves lazily and fails
     // only on request; an eager `require_relative` for a missing file
     // takes the whole process down at boot.
-    let defined: std::collections::HashSet<&str> =
+    let defined: crate::det::HashSet<&str> =
         app.controllers.iter().map(|c| c.name.0.as_str()).collect();
     for r in &flat {
         let class = r.controller.0.as_str();
@@ -9146,7 +9146,7 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     };
     let census = crate::gems::GemCensus::of(lock);
     // Not only the gem's conventional namespace spelled exactly: svg-graph's is `SVG::Graph`.
-    let mut owned = std::collections::HashSet::new();
+    let mut owned = crate::det::HashSet::default();
     for_each_app_constant(app, &mut |_, path| {
         owned.extend(crate::gems::lock_gems_owning_constant(lock, path).into_iter().map(str::to_string));
     });
@@ -10238,7 +10238,7 @@ fn apply_image_processor_wiring(files: &mut [(String, String)]) -> Result<bool, 
 }
 
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
-    use std::collections::HashSet;
+    use crate::det::HashSet;
 
     // 1. sig/ tree → file-adjacent sidecars.
     let mut files: Vec<(String, String)> = files
@@ -10381,7 +10381,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
 
     // Relocations can only collide by construction error — fail loudly.
     {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         for (p, _) in &files {
             if !seen.insert(p.as_str()) {
                 return Err(format!("spin_shape: path collision after reshaping: {p}"));
@@ -10902,7 +10902,7 @@ fn test_class_and_count(content: &str, path: &str) -> Result<(String, usize), St
 fn unresolvable_require(
     content: &str,
     path: &str,
-    rb_paths: &std::collections::HashSet<String>,
+    rb_paths: &crate::det::HashSet<String>,
 ) -> Option<String> {
     let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
     content.lines().find_map(|line| {
@@ -10919,7 +10919,7 @@ fn rewrite_requires_for_move(
     content: &str,
     old_dir: &str,
     new_dir: &str,
-    rb_paths: &std::collections::HashSet<String>,
+    rb_paths: &crate::det::HashSet<String>,
 ) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.lines() {
@@ -12366,7 +12366,7 @@ mod tests {
 
     #[test]
     fn move_rewrites_bare_and_relative_requires() {
-        let rb_paths: std::collections::HashSet<String> = [
+        let rb_paths: crate::det::HashSet<String> = [
             "app/models/article.rb",
             "test/fixtures/articles.rb",
             "test/test_helper.rb",

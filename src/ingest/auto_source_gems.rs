@@ -14,7 +14,8 @@
 //! loading the real gem through its Gemfile (see
 //! `project::without_auto_source_gems`).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
+use crate::det::HashSet;
 use std::path::Path;
 
 use crate::app::App;

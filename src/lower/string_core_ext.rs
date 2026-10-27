@@ -523,10 +523,9 @@ mod tests {
 
     #[test]
     fn views_keep_parameterize_and_still_ground_humanize() {
-        use std::collections::HashMap;
         use std::path::PathBuf;
 
-        let files: HashMap<PathBuf, Vec<u8>> = [
+        let files: crate::vfs::FileTree = [
             (
                 "db/schema.rb",
                 "ActiveRecord::Schema.define do\n  create_table \"stories\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",

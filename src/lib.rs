@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod check_report;
 pub mod diagnostic;
 pub mod dialect;
+pub mod det;
 /// Shared parent/include ordering for library classes that share a file.
 pub mod library_class_order;
 pub mod effect;
