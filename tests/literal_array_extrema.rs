@@ -1,0 +1,103 @@
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+
+use roundhouse::analyze::Analyzer;
+use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::ty::Ty;
+
+const MODEL: &str = r#"class LiteralExtrema
+  def self.time
+    [Time.utc(2026, 1, 2), nil].compact.max
+  end
+  def self.string
+    ["b", "a"].min
+  end
+  def self.integer
+    [3, nil, 1].compact.max
+  end
+  def self.empty
+    [].max
+  end
+  def self.possibly_empty(condition)
+    candidate = condition ? Time.utc(2026, 1, 2) : nil
+    [candidate].compact.max
+  end
+  def self.splat(values)
+    [*values].max
+  end
+end
+"#;
+
+fn inferred(name: &str) -> Ty {
+    let mut app = ingest_app_from_tree(
+        [(
+            std::path::PathBuf::from("app/models/literal_extrema.rb"),
+            MODEL.as_bytes().to_vec(),
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+    Analyzer::new(&app).analyze(&mut app);
+    app.library_classes
+        .iter()
+        .find(|class| class.name.0.as_str() == "LiteralExtrema")
+        .unwrap()
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == name)
+        .unwrap()
+        .body
+        .ty
+        .clone()
+        .unwrap()
+}
+
+fn can_be_nil(ty: &Ty) -> bool {
+    match ty {
+        Ty::Nil | Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Union { variants } => variants.iter().any(can_be_nil),
+        _ => false,
+    }
+}
+
+#[test]
+fn nonempty_literal_extrema_keep_the_selected_element_type() {
+    assert_eq!(inferred("time"), Ty::Time);
+    assert_eq!(inferred("string"), Ty::Str);
+    assert_eq!(inferred("integer"), Ty::Int);
+}
+
+#[test]
+fn empty_and_possibly_empty_extrema_stay_nullable() {
+    for name in ["empty", "possibly_empty", "splat"] {
+        assert!(can_be_nil(&inferred(name)), "{name}");
+    }
+}
+
+const SCRIPT: &str = r#"
+raise "time maximum changed" unless LiteralExtrema.time.iso8601 == "2026-01-02T00:00:00Z"
+raise "string minimum changed" unless LiteralExtrema.string == "a"
+raise "integer maximum changed" unless LiteralExtrema.integer == 3
+raise "empty maximum changed" unless LiteralExtrema.empty.nil?
+raise "nullable maximum changed" unless LiteralExtrema.possibly_empty(false).nil?
+puts "literal array extrema passed"
+"#;
+
+#[test]
+fn literal_array_extrema_run_in_emitted_ruby() {
+    emit_and_run::empty_app()
+        .write("app/models/literal_extrema.rb", MODEL)
+        .run_ruby(SCRIPT)
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn literal_array_extrema_run_natively_with_emitted_rbs() {
+    let run = emit_and_run::empty_app()
+        .write("app/models/literal_extrema.rb", MODEL)
+        .run_spinel_with_rbs(SCRIPT);
+    run.assert_passes();
+    assert_eq!(run.stdout, "literal array extrema passed\n");
+}
