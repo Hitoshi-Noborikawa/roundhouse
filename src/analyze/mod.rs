@@ -136,6 +136,9 @@ pub struct Analyzer {
     /// `app/helpers` modules, whose bodies run in a view and take
     /// ActionView's `t`.
     helper_modules: std::collections::HashSet<ClassId>,
+    /// Which `app/helpers` module answers each helper name in the view
+    /// (`App::helper_method_index`), for a helper body's bare calls.
+    helper_index: HashMap<Symbol, ClassId>,
     open_classes: open_classes::OpenClasses,
     /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
     /// carried across fixpoint rounds.
@@ -1280,6 +1283,7 @@ impl Analyzer {
             inquirers: inquiry::inquirer_methods(app),
             i18n: app.i18n.clone(),
             helper_modules: app.helper_method_index.values().cloned().collect(),
+            helper_index: app.helper_method_index.clone(),
             open_classes: open_classes::OpenClasses::of(app),
             const_resolver,
             source_indexed: !app.sources.is_empty(),
@@ -1302,6 +1306,7 @@ impl Analyzer {
             .with_materialized_associations(&self.materialized_associations)
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n, &self.helper_modules)
+            .with_helper_index(&self.helper_index)
             .with_open_classes(&self.open_classes)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
