@@ -151,6 +151,13 @@ module Main
     nil
   end
 
+  def self.nest_upload_parts(out, parts)
+    parts.each do |part|
+      CgiIo.assign_form_pair(out, part.name, part.file)
+    end
+    nil
+  end
+
   # First-time setup. Idempotent: skips when already configured (so
   # tests that load main.rb don't conflict with their own test_helper
   # setup).
@@ -490,7 +497,7 @@ module Main
     end
     controller.params = params
     controller.path_parameters = matched.path_params
-    Main.nest_uploads(controller.params, req.uploads) if req.uploads.length > 0
+    Main.nest_upload_parts(controller.params, req.upload_parts) if req.upload_parts.length > 0
     # Typed request object + per-request context statics. Helpers are
     # module functions with no controller in scope; the emit rewrites
     # their bare `request` reads to `ActionController::Current.request`
