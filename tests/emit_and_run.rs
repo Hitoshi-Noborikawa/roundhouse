@@ -184,6 +184,8 @@ mod erb_template_contract;
 mod bare_permit_contract;
 #[path = "support/data_paths.rs"]
 mod data_paths_contract;
+#[path = "support/eager_load_filter.rs"]
+mod eager_load_filter_contract;
 #[path = "emit_and_run/data_paths.rs"]
 mod data_paths;
 #[path = "emit_and_run/bare_permit.rs"]
@@ -19830,6 +19832,8 @@ mod initializer_top_level_def;
 mod unknown_gem_namespace;
 #[path = "emit_and_run/record_rebinding.rs"]
 mod record_rebinding;
+#[path = "emit_and_run/eager_load_filter.rs"]
+mod eager_load_filter;
 #[path = "emit_and_run/url_helpers_include.rs"]
 mod url_helpers_include;
 #[path = "emit_and_run/length_is_in_within.rs"]

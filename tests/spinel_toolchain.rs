@@ -100,6 +100,8 @@ mod erb_template_contract;
 mod bare_permit_contract;
 #[path = "support/data_paths.rs"]
 mod data_paths_contract;
+#[path = "support/eager_load_filter.rs"]
+mod eager_load_filter_contract;
 #[path = "spinel_toolchain/erb_template.rs"]
 mod erb_template;
 #[path = "support/anonymous_keywords.rs"]

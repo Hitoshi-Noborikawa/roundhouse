@@ -2574,6 +2574,14 @@ fn target_files_inner(
         }
         None => app,
     };
+    let with_eager_loads;
+    let app = match crate::lower::eager_load::lower_for_target(app, target) {
+        Some(lowered) => {
+            with_eager_loads = lowered;
+            &with_eager_loads
+        }
+        None => app,
+    };
     if target == BuildTarget::Roda {
         if let Some((table, column)) = app.schema.tables.values().find_map(|table| {
             table

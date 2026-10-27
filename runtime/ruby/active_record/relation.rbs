@@ -13,6 +13,12 @@ module ActiveRecord
     def exclusive?: () -> bool
   end
 
+  class EagerFilter
+    def initialize: (Hash[Symbol, untyped] conditions, Array[Hash[Symbol, untyped]] orders) -> void
+    def conditions: () -> Hash[Symbol, untyped]
+    def orders: () -> Array[Hash[Symbol, untyped]]
+  end
+
   class Relation
     # Model handle is `Base` (class object collapsed onto `Ty::Class{Base}`
     # in send.rs). Do not spell `Class` — that leaves `@model` as Ty::Var
