@@ -67,7 +67,10 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
             if m.receiver != crate::dialect::MethodReceiver::Instance || m.name.as_str() == "initialize" {
                 continue;
             }
-            let action = m.name.as_str().to_string();
+            // An action with a callback chain keeps its body under a
+            // private name (`ingest::mailer_callbacks`); its templates are
+            // still the action's.
+            let action = crate::ingest::mailer_callbacks::action_of(m.name.as_str()).to_string();
             let template = format!("{dir}/{action}");
             let site = Site {
                 module: &module,
@@ -84,6 +87,9 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
             rewrite(&mut m.body, &site, &mut diags);
         }
     }
+    // A parent's `default` is read for each mailer under it: report it once.
+    let mut seen = std::collections::HashSet::new();
+    diags.retain(|d| seen.insert((d.span.file, d.span.start, d.span.end, d.message.clone())));
     diags
 }
 
@@ -123,22 +129,33 @@ fn class_settings(
 ) -> (Vec<(Expr, Expr)>, Option<Option<String>>) {
     let mut defaults: Vec<(Expr, Expr)> = Vec::new();
     let mut layout: Option<Option<String>> = None;
+    // The defaults merge as Rails' class-level Hash does: parent first, a
+    // nearer class's value taking its key's place. That is also the order
+    // `mail` computes them in, which a Proc default (a call to a generated
+    // method by now, `ingest::mailer_defaults`) can observe.
+    for class in chain.iter().rev() {
+        for call in calls.get(class).into_iter().flatten() {
+            let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { continue };
+            if let ("default", [hash]) = (method.as_str(), args.as_slice()) {
+                let ExprNode::Hash { entries, .. } = &*hash.node else { continue };
+                for (k, v) in entries {
+                    if matches!(&*v.node, ExprNode::Lambda { .. }) {
+                        diags.push(Diagnostic::unsupported(v.span, None, "mailer default", "a `default` given a Proc runs per message in Rails; it is not evaluated here"));
+                        defaults.retain(|(dk, _)| !same_key(dk, k));
+                        continue;
+                    }
+                    match defaults.iter_mut().find(|(dk, _)| same_key(dk, k)) {
+                        Some(slot) => slot.1 = v.clone(),
+                        None => defaults.push((k.clone(), v.clone())),
+                    }
+                }
+            }
+        }
+    }
     for class in chain {
         for call in calls.get(class).into_iter().flatten() {
             let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { continue };
             match (method.as_str(), args.as_slice()) {
-                ("default", [hash]) => {
-                    let ExprNode::Hash { entries, .. } = &*hash.node else { continue };
-                    for (k, v) in entries {
-                        if matches!(&*v.node, ExprNode::Lambda { .. }) {
-                            diags.push(Diagnostic::unsupported(v.span, None, "mailer default", "a `default` given a Proc runs per message in Rails; it is not evaluated here"));
-                            continue;
-                        }
-                        if !defaults.iter().any(|(dk, _)| same_key(dk, k)) {
-                            defaults.push((k.clone(), v.clone()));
-                        }
-                    }
-                }
                 ("layout", [name]) if layout.is_none() => {
                     layout = Some(match &*name.node {
                         ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
@@ -280,10 +297,11 @@ fn merged_opts(opts: Option<Expr>, defaults: &[(Expr, Expr)], span: Span) -> Exp
     let hash = |entries: Vec<(Expr, Expr)>| typed(Expr::new(span, ExprNode::Hash { entries, kwargs: false }), hash_ty.clone());
     match opts {
         Some(o) => match &*o.node {
+            // The action's headers first, as `mail` receives them, then
+            // the defaults it leaves out, computed after them.
             ExprNode::Hash { entries, .. } => {
-                let mut out: Vec<(Expr, Expr)> =
-                    defaults.iter().filter(|(dk, _)| !entries.iter().any(|(k, _)| same_key(k, dk))).cloned().collect();
-                out.extend(entries.iter().cloned());
+                let mut out: Vec<(Expr, Expr)> = entries.to_vec();
+                out.extend(defaults.iter().filter(|(dk, _)| !entries.iter().any(|(k, _)| same_key(k, dk))).cloned());
                 hash(out)
             }
             _ if defaults.is_empty() => o,

@@ -691,22 +691,30 @@ Nokogiri-backed Fragment.
 with every attribute it carried (`sgid`, `content_type`, `caption`,
 `filename`, `url`).
 
-### `constantize` resolves only the app's own constants
+### `constantize` by name on the interpreters, a closed case on Spinel
 
 `name.constantize` and `name.safe_constantize` turn any String into the
 constant it names in Rails. A name computed at run time (pundit's
-`"#{model}Policy"`) or read off the wire would then reach every constant
-in the process, the reflection this pipeline does not emit. On the Ruby,
-JRuby and Spinel targets `lower::constantize` routes each call to one generated
-`RoundhouseConstants` lookup, a `case` over the constants the app's own
-source defines: its models,
-controllers and library classes, including the source of a gem the app
-keeps in its tree (`gem "pundit", path: "vendor/pundit"`). A name in
-that set answers what Rails answers. A name outside it (`"String"`,
-a framework class) answers `nil` from `safe_constantize` and raises
-`NameError` from `constantize`, where Rails would resolve it. Every
-other target refuses the call with an unsupported diagnostic, and
-`name.constantize.instantiate(attrs)` stays `lower::record_snapshot`'s.
+`"#{model}Policy"`) or read off the wire reaches every constant in the
+process. On the Ruby and JRuby targets `lower::constantize` routes each
+call to one generated `RoundhouseConstants` lookup that is Active Support's
+own (`inflector/methods.rb`): `constantize` is `Object.const_get`, and
+`safe_constantize` answers `nil` only for a `NameError` about the name asked
+for. The interpreter resolves the name, so a framework class
+(`"ActiveRecord::RecordNotFound"`) answers as in Rails, and the lookup
+names no app file: a closed `case` there had to load every app file before
+the first `constantize`, and one in a class body re-entered files
+mid-load.
+
+Spinel has no `const_get` by name, so its lookup is a `case` over the
+constants the app's own source defines: its models, controllers and library
+classes, including the source of a gem the app keeps in its tree
+(`gem "pundit", path: "vendor/pundit"`). A name in that set answers what
+Rails answers. A name outside it (`"String"`, a framework class) answers
+`nil` from `safe_constantize` and raises `NameError` from `constantize`,
+where Rails would resolve it. Every other target refuses the call with an
+unsupported diagnostic, and `name.constantize.instantiate(attrs)` stays
+`lower::record_snapshot`'s.
 
 ### Action Text decodes only the entities Rails' escaper emits
 

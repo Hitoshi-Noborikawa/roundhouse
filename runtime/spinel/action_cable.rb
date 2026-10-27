@@ -389,6 +389,12 @@ module ActionCable
         @params
       end
 
+      def transmit(data)
+        @connection.transmit({ identifier: @identifier, message: data })
+        nil
+      end
+      private :transmit
+
       # THE TWO LIFECYCLE CALLBACKS, as no-ops.
       #
       # Every channel in an ingested tree overrides `subscribed`, so
@@ -783,6 +789,12 @@ module ActionCable
       # `Connection::TestCase`'s `TestSocket`. Rails 8.2 hands both
       # `close` and `perform_work` to the socket, and so does this.
       attr_accessor :transport
+
+      def transmit(data)
+        live = @transport
+        live.transmit(data) unless live.nil?
+        nil
+      end
 
       # Rails' `beat`, called on every server heartbeat (`Cable.app_beats`).
       # Rails' transmits the ping; here the server's shared heartbeat

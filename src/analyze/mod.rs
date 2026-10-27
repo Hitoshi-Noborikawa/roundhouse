@@ -27,6 +27,7 @@ mod alba;
 pub(crate) mod assoc_pluck;
 mod enum_raw_input;
 mod body;
+pub(crate) use body::some_operands_take_it;
 mod class_configuration;
 mod data;
 mod class_new;
@@ -227,6 +228,9 @@ impl Analyzer {
         // model's parent before any single model is seeded.
         let model_parents: HashMap<&ClassId, Option<&ClassId>> =
             app.models.iter().map(|m| (&m.name, m.parent.as_ref())).collect();
+        // One index for every model's `reload`/`lock!` seed below: it answers
+        // the same walk `source_instance_method` does, memoized per owner.
+        let source_methods = SourceMethodIndex::new(app);
 
         for model in &app.models {
             let self_ty = Ty::Class { id: model.name.clone(), args: vec![].into() };
@@ -767,15 +771,14 @@ impl Analyzer {
                 // BodyTyper prefers the model's own table, so a self seed
                 // would hide the source override's harvested return.
                     let ret = if matches!(entry.name, "reload" | "lock!") {
-                    let classes = source_class_names(app);
                     let inherited = |name: &str| {
                         model
                             .parent
                             .as_ref()
-                            .is_some_and(|parent| source_instance_method(app, parent, name))
-                            || model_includes_in(model, &classes)
+                            .is_some_and(|parent| source_methods.instance_method(parent, name))
+                            || model_includes_in(model, &source_methods.classes)
                                 .iter()
-                                .any(|include| source_instance_method(app, include, name))
+                                .any(|include| source_methods.instance_method(include, name))
                     };
                     if inherited(entry.name)
                         || (entry.name == "lock!" && inherited("reload"))
@@ -1373,6 +1376,8 @@ impl Analyzer {
             for (i, included) in class.includes.iter().enumerate() {
                 let known = self.classes.contains_key(included)
                     || body::RUBY_TOP_LEVEL.contains(&included.0.as_str())
+                    // The generated route-helper module ingest records `include Rails.application.routes.url_helpers` as
+                    || included.0.as_str() == "RouteHelpers"
                     // A source module that only nests modeled classes (an
                     // implicit namespace: a directory of classes with no
                     // file of its own), included so the class reads its
@@ -2948,6 +2953,8 @@ impl Analyzer {
         // walks, and the one every emitted copy is cut from — was typed
         // with nothing.
         let mut controller_ivar_env: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
+        // Each action's Phase B seed, which Phase B″ adds descendants' writes to.
+        let mut action_seeds: HashMap<(ClassId, Symbol), HashMap<Symbol, Ty>> = HashMap::new();
 
         // Phase-B refinements, collected here and flushed into
         // `self.refined_action_bindings` after the loop — `self` is
@@ -3237,6 +3244,7 @@ impl Analyzer {
                         {
                             seed.insert(k, v);
                         }
+                        action_seeds.insert((ctrl_name.clone(), action.name.clone()), seed.clone());
                         if seed.is_empty() {
                             continue;
                         }
@@ -3791,6 +3799,74 @@ impl Analyzer {
                         action.rest_param.as_ref(),
                     );
                     self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
+                    self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                }
+            }
+        }
+        // ── Phase B″: re-type an ancestor's own methods against what its
+        // ── descendants write.
+        //
+        // A method on ApplicationController runs on every controller below
+        // it, so an ivar only a subclass's action writes (lobsters'
+        // `@requested_path`, read by an exception-notifier hook) is that
+        // subclass's type there, and nil wherever no action wrote it.
+        // Additive as Phase B′ is: the ancestor's own binding wins.
+        {
+            let descendant_env = descendant_ivar_env_of(app, &controller_ivar_env);
+            for controller in &mut app.controllers {
+                let Some(from_below) = descendant_env.get(&controller.name) else { continue };
+                if dirty.is_some_and(|d| !d.contains(&controller.name)) {
+                    continue;
+                }
+                let own_env = controller_ivar_env.get(&controller.name).cloned().unwrap_or_default();
+                let self_ty = Ty::Class { id: controller.name.clone(), args: vec![].into() };
+                let ctrl_name = controller.name.clone();
+                let class_constants =
+                    global_constants.with_own(extract_controller_const_assignments(&controller.body));
+                let spliced = app.concern_spliced_actions.get(&ctrl_name).cloned().unwrap_or_default();
+                for action in controller.actions_mut() {
+                    // Not a concern's copy: Phase B′ seeded that from the concern's includers
+                    if spliced.contains_key(&action.name) {
+                        continue;
+                    }
+                    // Not the controller-wide seed alone: the action's own before_action overlay (a filter's Nil arm) stays.
+                    let mut seed = action_seeds
+                        .get(&(ctrl_name.clone(), action.name.clone()))
+                        .cloned()
+                        .unwrap_or_else(|| own_env.clone());
+                    let mut filled = false;
+                    for (k, v) in from_below {
+                        if seed.get(k).is_none_or(|t| t.is_open()) {
+                            seed.insert(k.clone(), crate::analyze::body::union_of(v.clone(), Ty::Nil));
+                            filled = true;
+                        }
+                    }
+                    if !filled {
+                        continue;
+                    }
+                    let base_ctx = Ctx {
+                        self_ty: Some(self_ty.clone()),
+                        lexical_self: None,
+                        ivar_bindings: seed,
+                        local_bindings: HashMap::new(),
+                        class_objects: Default::default(),
+                        query_class_objects: Default::default(),
+                        constants: class_constants.clone(),
+                        annotate_self_dispatch: false,
+                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                        view_name: None,
+                    };
+                    let inner_ctx = self.seed_action_params(
+                        &base_ctx,
+                        &ctrl_name,
+                        None,
+                        &action.name,
+                        &action.params,
+                        &action.kw_params,
+                        action.block_param.as_ref(),
+                        action.rest_param.as_ref(),
+                    );
+                    self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, None);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                 }
             }
@@ -5115,9 +5191,10 @@ impl Analyzer {
         // Not the registered method tables: the registry lists the built-in
         // method there too (`MemoryStore#fetch`), so only the app's own
         // source can tell that the app replaced it.
+        let source_methods = SourceMethodIndex::new(app);
         for (class, method) in registry::stdlib::BUILTIN_BLOCK_VALUE_METHODS {
             let class_id = ClassId(Symbol::from(*class));
-            if !source_instance_method(app, &class_id, method) {
+            if !source_methods.instance_method(&class_id, method) {
                 found.push((class_id, Symbol::from(*method)));
             }
         }
@@ -7557,6 +7634,9 @@ pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     if !variants.iter().any(|v| !v.is_unknown() && !matches!(v, Ty::Nil)) {
         return Ty::Union { variants };
     }
+    if !variants.iter().any(|v| matches!(v, Ty::Untyped)) {
+        return Ty::Union { variants };
+    }
     let mut kept: Vec<Ty> = variants.into_iter().filter(|v| !matches!(v, Ty::Untyped)).collect();
     match kept.len() {
         1 => kept.pop().unwrap(),
@@ -7905,14 +7985,259 @@ fn source_class_names(app: &App) -> HashMap<ClassId, ()> {
 /// Whether an application-defined instance method is available on a source
 /// class through its own definition, parent chain, or included modules.
 pub(crate) fn source_instance_method(app: &App, owner: &ClassId, name: &str) -> bool {
-    source_method(app, owner, name, crate::dialect::MethodReceiver::Instance)
+    SourceMethodIndex::new(app).instance_method(owner, name)
 }
 
 /// The class-side twin: a `def self.<name>` (or `class << self` def) on the
 /// class or its superclass chain. Included modules contribute instance
 /// methods only, so they are not walked here.
 pub(crate) fn source_class_method(app: &App, owner: &ClassId, name: &str) -> bool {
-    source_method(app, owner, name, crate::dialect::MethodReceiver::Class)
+    SourceMethodIndex::new(app).class_method(owner, name)
+}
+
+/// [`source_instance_method`] / [`source_class_method`] answered from
+/// indexes built once, for callers that ask per class or per bare call.
+/// A query is "does any class reachable from `owner` (itself, its parents,
+/// and, instance side only, its includes) define `name` on this side",
+/// so the answer per `(owner, side)` is one set of names, computed on the
+/// first ask and shared by every later one.
+pub(crate) struct SourceMethodIndex<'a> {
+    app: &'a App,
+    classes: HashMap<ClassId, ()>,
+    /// Class name -> the first model of that name (the one a lookup uses,
+    /// ignoring any library class beside it), and every library class
+    /// declaration of it.
+    by_name: HashMap<&'a ClassId, SourceDecls>,
+    reachable: std::cell::RefCell<HashMap<(ClassId, bool), std::rc::Rc<HashSet<Symbol>>>>,
+}
+
+#[derive(Default)]
+struct SourceDecls {
+    model: Option<usize>,
+    library: Vec<usize>,
+}
+
+impl<'a> SourceMethodIndex<'a> {
+    pub fn new(app: &'a App) -> Self {
+        let mut by_name: HashMap<&ClassId, SourceDecls> = HashMap::new();
+        for (i, model) in app.models.iter().enumerate() {
+            let decls = by_name.entry(&model.name).or_default();
+            if decls.model.is_none() {
+                decls.model = Some(i);
+            }
+        }
+        for (i, class) in app.library_classes.iter().enumerate() {
+            by_name.entry(&class.name).or_default().library.push(i);
+        }
+        Self { app, classes: source_class_names(app), by_name, reachable: Default::default() }
+    }
+
+    pub fn instance_method(&self, owner: &ClassId, name: &str) -> bool {
+        self.method(owner, name, crate::dialect::MethodReceiver::Instance)
+    }
+
+    pub fn class_method(&self, owner: &ClassId, name: &str) -> bool {
+        self.method(owner, name, crate::dialect::MethodReceiver::Class)
+    }
+
+    fn method(&self, owner: &ClassId, name: &str, side: crate::dialect::MethodReceiver) -> bool {
+        let instance = side == crate::dialect::MethodReceiver::Instance;
+        let key = (owner.clone(), instance);
+        if let Some(names) = self.reachable.borrow().get(&key) {
+            return names.contains(&Symbol::from(name));
+        }
+        let names = std::rc::Rc::new(self.reachable_names(owner, side));
+        let found = names.contains(&Symbol::from(name));
+        self.reachable.borrow_mut().insert(key, names);
+        found
+    }
+
+    /// Every `side` method name defined on `owner` or a class it reaches.
+    fn reachable_names(&self, owner: &ClassId, side: crate::dialect::MethodReceiver) -> HashSet<Symbol> {
+        let walk_includes = side == crate::dialect::MethodReceiver::Instance;
+        let mut names = HashSet::new();
+        let mut seen: BTreeSet<ClassId> = BTreeSet::new();
+        let mut pending = vec![owner.clone()];
+        while let Some(class) = pending.pop() {
+            if !seen.insert(class.clone()) {
+                continue;
+            }
+            let Some(decls) = self.by_name.get(&class) else { continue };
+            if let Some(i) = decls.model {
+                let model = &self.app.models[i];
+                names.extend(model.methods().filter(|m| m.receiver == side).map(|m| m.name.clone()));
+                pending.extend(model.parent.iter().map(|parent| stored_target(&class, parent, &self.classes)));
+                if walk_includes {
+                    pending.extend(model_includes_in(model, &self.classes));
+                }
+                continue;
+            }
+            for &i in &decls.library {
+                let lc = &self.app.library_classes[i];
+                names.extend(lc.methods.iter().filter(|m| m.receiver == side).map(|m| m.name.clone()));
+                pending.extend(lc.parent.iter().map(|parent| stored_target(&class, parent, &self.classes)));
+                if walk_includes {
+                    pending.extend(lc.includes.iter().map(|include| stored_target(&class, include, &self.classes)));
+                }
+            }
+        }
+        names
+    }
+}
+
+#[cfg(test)]
+mod source_method_index_tests {
+    use super::*;
+    use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, ModelBodyItem};
+
+    /// The walk `SourceMethodIndex` replaced: one recursive search per ask,
+    /// short-circuiting on the first definition found.
+    fn scan(app: &App, owner: &ClassId, name: &str, side: MethodReceiver) -> bool {
+        let classes = source_class_names(app);
+        fn lookup(
+            app: &App,
+            owner: &ClassId,
+            name: &str,
+            side: MethodReceiver,
+            seen: &mut BTreeSet<ClassId>,
+            classes: &HashMap<ClassId, ()>,
+        ) -> bool {
+            if !seen.insert(owner.clone()) {
+                return false;
+            }
+            let walk_includes = side == MethodReceiver::Instance;
+            if let Some(model) = app.models.iter().find(|model| &model.name == owner) {
+                if model.methods().any(|method| method.receiver == side && method.name.as_str() == name) {
+                    return true;
+                }
+                return model.parent.as_ref().is_some_and(|parent| {
+                    lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
+                }) || (walk_includes
+                    && model_includes_in(model, classes)
+                        .iter()
+                        .any(|include| lookup(app, include, name, side, seen, classes)));
+            }
+            app.library_classes.iter().filter(|class| &class.name == owner).any(|class| {
+                class.methods.iter().any(|method| method.receiver == side && method.name.as_str() == name)
+                    || class.parent.as_ref().is_some_and(|parent| {
+                        lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
+                    })
+                    || (walk_includes
+                        && class.includes.iter().any(|include| {
+                            lookup(app, &stored_target(owner, include, classes), name, side, seen, classes)
+                        }))
+            })
+        }
+        lookup(app, owner, name, side, &mut BTreeSet::new(), &classes)
+    }
+
+    fn id(name: &str) -> ClassId {
+        ClassId(Symbol::from(name))
+    }
+
+    /// An app whose classes cover every branch of the walk: a parent chain,
+    /// an include, a relative include, a parent cycle, a class declared
+    /// twice (a reopen), and a model that shares a name with a library class.
+    fn app_with_hierarchy() -> App {
+        let mut app = crate::ingest::ingest_app(crate::fixtures::real_blog()).expect("ingest");
+        let method = |name: &str, receiver: MethodReceiver| MethodDef {
+            name: Symbol::from(name),
+            receiver,
+            visibility: crate::dialect::MethodVisibility::Public,
+            params: Vec::new(),
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            block_param: None,
+            name_span: crate::span::Span::synthetic(),
+            body: Expr::new(crate::span::Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+            signature: None,
+            effects: crate::effect::EffectSet::pure(),
+            enclosing_class: None,
+            kind: crate::dialect::AccessorKind::default(),
+            is_async: false,
+            mutates_self: false,
+        };
+        let class = |name: &str, parent: Option<&str>, includes: &[&str], methods: Vec<MethodDef>| LibraryClass {
+            name: id(name),
+            is_module: false,
+            parent: parent.map(id),
+            parent_span: Default::default(),
+            includes: includes.iter().map(|i| id(i)).collect(),
+            include_spans: Vec::new(),
+            methods,
+            nullable_columns: Vec::new(),
+            origin: None,
+            constants: Vec::new(),
+            unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
+        };
+        use MethodReceiver::{Class, Instance};
+        app.library_classes.extend([
+            class("Walk::Base", None, &[], vec![method("base_i", Instance), method("base_c", Class)]),
+            class("Walk::Mixin", None, &["Walk::Nested"], vec![method("mixin_i", Instance), method("mixin_c", Class)]),
+            class("Walk::Nested", None, &[], vec![method("nested_i", Instance)]),
+            class("Walk::Child", Some("Walk::Base"), &["Walk::Mixin"], vec![method("child_i", Instance)]),
+            class("Walk::Child", None, &[], vec![method("reopened_i", Instance), method("reopened_c", Class)]),
+            // `Mixin` is written relative to `Walk::Scoped` and resolves to `Walk::Mixin`.
+            class("Walk::Scoped", None, &["Mixin"], vec![]),
+            class("Walk::LoopA", Some("Walk::LoopB"), &[], vec![method("loop_a", Instance)]),
+            class("Walk::LoopB", Some("Walk::LoopA"), &[], vec![method("loop_b", Class)]),
+            class("Walk::Both", Some("Walk::Base"), &[], vec![method("library_i", Instance)]),
+        ]);
+        let mut model = app.models[0].clone();
+        model.name = id("Walk::Both");
+        model.parent = Some(id("Walk::Child"));
+        model.body = vec![ModelBodyItem::Method {
+            method: method("model_i", Instance),
+            leading_comments: Vec::new(),
+            leading_blank_line: false,
+        }];
+        app.models.push(model);
+        app
+    }
+
+    #[test]
+    fn index_answers_match_the_per_ask_scan() {
+        let app = app_with_hierarchy();
+        let mut names: BTreeSet<String> = ["absent", "new", "save"].iter().map(|n| n.to_string()).collect();
+        names.extend(app.models.iter().flat_map(|m| m.methods().map(|d| d.name.as_str().to_string())));
+        names.extend(
+            app.library_classes.iter().flat_map(|c| c.methods.iter().map(|d| d.name.as_str().to_string())),
+        );
+        let owners: BTreeSet<ClassId> = app
+            .models
+            .iter()
+            .map(|m| m.name.clone())
+            .chain(app.library_classes.iter().map(|c| c.name.clone()))
+            .chain([id("Unregistered")])
+            .collect();
+        let index = SourceMethodIndex::new(&app);
+        let mut hits = 0;
+        // Ask twice: the second round answers from the memoized sets.
+        for _ in 0..2 {
+            for owner in &owners {
+                for name in &names {
+                    let instance = scan(&app, owner, name, MethodReceiver::Instance);
+                    let class = scan(&app, owner, name, MethodReceiver::Class);
+                    assert_eq!(index.instance_method(owner, name), instance, "{owner:?}#{name}");
+                    assert_eq!(index.class_method(owner, name), class, "{owner:?}.{name}");
+                    assert_eq!(source_instance_method(&app, owner, name), instance);
+                    assert_eq!(source_class_method(&app, owner, name), class);
+                    hits += usize::from(instance) + usize::from(class);
+                }
+            }
+        }
+        // The hierarchy above is walked, not skipped: a model reaches its
+        // parent's reopened declaration and the include's nested include.
+        assert!(index.instance_method(&id("Walk::Both"), "reopened_i"));
+        assert!(index.instance_method(&id("Walk::Both"), "base_i"));
+        assert!(!index.instance_method(&id("Walk::Both"), "library_i"));
+        assert!(index.instance_method(&id("Walk::Child"), "nested_i"));
+        assert!(index.instance_method(&id("Walk::Scoped"), "mixin_i"));
+        assert!(!index.class_method(&id("Walk::Scoped"), "mixin_c"));
+        assert!(index.class_method(&id("Walk::LoopA"), "loop_b"));
+        assert!(hits > 0);
+    }
 }
 
 /// A mixin path as Ruby binds it. A rooted path, and a path
@@ -7943,46 +8268,6 @@ fn stored_target(scope: &ClassId, written: &ClassId, classes: &HashMap<ClassId, 
     } else {
         body::lexical_class(written, scope.0.as_str(), classes).unwrap_or_else(|| written.clone())
     }
-}
-
-fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::MethodReceiver) -> bool {
-    use crate::dialect::MethodReceiver::Instance;
-    let classes = source_class_names(app);
-    fn lookup(
-        app: &App,
-        owner: &ClassId,
-        name: &str,
-        side: crate::dialect::MethodReceiver,
-        seen: &mut BTreeSet<ClassId>,
-        classes: &HashMap<ClassId, ()>,
-    ) -> bool {
-        if !seen.insert(owner.clone()) {
-            return false;
-        }
-        let walk_includes = side == Instance;
-        if let Some(model) = app.models.iter().find(|model| &model.name == owner) {
-            if model.methods().any(|method| method.receiver == side && method.name.as_str() == name) {
-                return true;
-            }
-            return model.parent.as_ref().is_some_and(|parent| {
-                lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
-            }) || (walk_includes
-                && model_includes_in(model, classes)
-                    .iter()
-                    .any(|include| lookup(app, include, name, side, seen, classes)));
-        }
-        app.library_classes.iter().filter(|class| &class.name == owner).any(|class| {
-            class.methods.iter().any(|method| method.receiver == side && method.name.as_str() == name)
-                || class.parent.as_ref().is_some_and(|parent| {
-                    lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
-                })
-                || (walk_includes
-                    && class.includes.iter().any(|include| {
-                        lookup(app, &stored_target(owner, include, classes), name, side, seen, classes)
-                    }))
-        })
-    }
-    lookup(app, owner, name, side, &mut BTreeSet::new(), &classes)
 }
 
 /// `**{k: v, …}.merge(h)`, `h` a `Hash[Symbol, V]` and the literal's
@@ -9579,6 +9864,38 @@ fn concern_ivar_env_of(
                 }
             }
         }
+    out
+}
+
+/// controller → the union of every DESCENDANT controller's ivar
+/// environment (not its own), for the methods it defines and they inherit.
+fn descendant_ivar_env_of(
+    app: &App,
+    controller_ivar_env: &HashMap<ClassId, HashMap<Symbol, Ty>>,
+) -> HashMap<ClassId, HashMap<Symbol, Ty>> {
+    let parent_of: HashMap<&ClassId, &ClassId> =
+        app.controllers.iter().filter_map(|c| c.parent.as_ref().map(|p| (&c.name, p))).collect();
+    let mut out: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
+    for controller in &app.controllers {
+        let Some(env) = controller_ivar_env.get(&controller.name) else { continue };
+        let mut cursor = parent_of.get(&controller.name).copied();
+        for _ in 0..32 {
+            let Some(ancestor) = cursor else { break };
+            let entry = out.entry(ancestor.clone()).or_default();
+            for (k, v) in env {
+                if v.is_open() {
+                    continue;
+                }
+                let merged = match entry.remove(k) {
+                    Some(prev) if prev == *v => prev,
+                    Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                    None => v.clone(),
+                };
+                entry.insert(k.clone(), merged);
+            }
+            cursor = parent_of.get(ancestor).copied();
+        }
+    }
     out
 }
 

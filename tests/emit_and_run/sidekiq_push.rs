@@ -212,6 +212,80 @@ fn a_failed_push_at_commit_runs_the_record_callbacks_first() {
     assert!(run.stdout.contains("failed push passed"), "{}", run.stdout);
 }
 
+const RAISING_CALLBACK: &str = r#"  validates :title, presence: true
+
+  after_create_commit :refuse
+
+  def refuse
+    raise ArgumentError, "callback failed" if title == "Refused title"
+  end
+"#;
+
+const RAISING_CALLBACK_SCRIPT: &str = r#"SidekiqPush.start_recording
+begin
+  Article.transaction do
+    Article.create!(title: "Refused title", body: "A long enough article body.")
+    SidekiqPush.enqueue_after_commit("ArticleJob", "default", 0.0, "{}")
+  end
+  raise "the callback's error was swallowed"
+rescue ArgumentError => e
+  raise e unless e.message == "callback failed"
+end
+raise "pushed after a raising callback: #{SidekiqPush.recorded.inspect}" unless SidekiqPush.recorded.empty?
+raise "still held: #{SidekiqPush.held.length}" unless SidekiqPush.held.empty?
+raise "the data was not committed" unless Article.where(title: "Refused title").count == 1
+Article.transaction do
+  Article.create!(title: "Next title", body: "Another long enough body.")
+end
+raise "the dropped job was pushed later: #{SidekiqPush.recorded.inspect}" unless SidekiqPush.recorded.empty?
+SidekiqPush.stop_recording
+puts "raising callback passed"
+"#;
+
+/// A record's `after_commit` that raises ends the COMMIT there, as in
+/// Rails 8.1, where `after_all_transactions_commit` (the enqueue) runs
+/// after the record callbacks: the data stays committed, the caller
+/// sees the callback's error, and the held job is dropped, not pushed
+/// then or at the thread's next COMMIT.
+#[test]
+fn a_raising_commit_callback_drops_the_held_push() {
+    let run = emit_and_run::real_blog()
+        .write("app/jobs/article_job.rb", JOB)
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", RAISING_CALLBACK)
+        .run_ruby(RAISING_CALLBACK_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("raising callback passed"), "{}", run.stdout);
+}
+
+const SIDEKIQ_YML: &str = ":concurrency: 3\n:timeout: 9\n:queues:\n  - critical\n  - [default, 2]\n";
+
+const SIDEKIQ_YML_SCRIPT: &str = r#"SidekiqWorker.parse(["sidekiq"])
+raise "concurrency #{SidekiqWorker::CONCURRENCY[0]}" unless SidekiqWorker::CONCURRENCY[0] == 3
+raise "timeout #{SidekiqWorker::TIMEOUT[0]}" unless SidekiqWorker::TIMEOUT[0] == 9
+raise "queues #{SidekiqWorker::QUEUES.inspect}" unless SidekiqWorker::QUEUES == ["queue:critical", "queue:default", "queue:default"]
+raise "weighted" if SidekiqWorker::STRICT[0]
+SidekiqWorker.parse(["sidekiq", "-c", "7", "-q", "low", "-t", "1"])
+raise "-c #{SidekiqWorker::CONCURRENCY[0]}" unless SidekiqWorker::CONCURRENCY[0] == 7
+raise "-t #{SidekiqWorker::TIMEOUT[0]}" unless SidekiqWorker::TIMEOUT[0] == 1
+raise "-q #{SidekiqWorker::QUEUES.inspect}" unless SidekiqWorker::QUEUES == ["queue:low"] && SidekiqWorker::STRICT[0]
+ENV["RAILS_MAX_THREADS"] = "11"
+SidekiqWorker.parse(["sidekiq"])
+raise "the file beats RAILS_MAX_THREADS: #{SidekiqWorker::CONCURRENCY[0]}" unless SidekiqWorker::CONCURRENCY[0] == 3
+puts "sidekiq.yml passed"
+"#;
+
+/// `config/sidekiq.yml` gives the worker its defaults, and the command
+/// line wins over them, key by key, as Sidekiq's CLI merges them; the
+/// file wins over `RAILS_MAX_THREADS`.
+#[test]
+fn sidekiq_yml_sets_the_worker_defaults() {
+    let run = on_sidekiq().write("config/sidekiq.yml", SIDEKIQ_YML).run_ruby(SIDEKIQ_YML_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("sidekiq.yml passed"), "{}", run.stdout);
+    let registry = read(&run.emitted, "runtime/job_registry.rb");
+    assert!(registry.contains("  def self.sidekiq_worker_queues\n    \"critical default,2\"\n  end\n"), "{registry}");
+}
+
 const CONFIGURE_CLIENT: &str = "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"JOBS_REDIS_URL\", \"redis://jobs:6379/1\"), password: ENV[\"JOBS_REDIS_PASSWORD\"] }\nend\n";
 
 /// The app's `configure_client` settings reach the registry the push
@@ -496,6 +570,17 @@ fn set_options_schedule_and_route_the_push() {
     let job = read(&run.emitted, "app/models/article_job.rb");
     assert!(job.contains("def self.perform_later_with(at, queue, article)"), "{job}");
     assert!(job.contains("JobRegistry.push_article_job(queue, at, article)"), "{job}");
+    let model = read(&run.emitted, "app/models/article.rb");
+    assert!(model.contains("Time.now.to_f + 300.0"), "{model}");
+}
+
+/// A literal Duration `wait:` folds to its seconds, so the strict
+/// targets, which have no Duration, emit the same `set(...)` sites
+/// cleanly under `:sidekiq`.
+#[test]
+fn a_literal_duration_wait_emits_on_go() {
+    let (_, errors) = on_sidekiq().edit("app/models/article.rb", ENQUEUE, SET_ENQUEUE).emit(BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:#?}");
 }
 
 const COLLIDER_JOB: &str = r##"class ColliderJob < ApplicationJob

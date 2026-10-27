@@ -105,3 +105,23 @@ fn configure_server_is_not_the_client() {
     assert!(config.is_empty());
     assert!(warnings.is_empty(), "{warnings:#?}");
 }
+
+/// `config/sidekiq.yml`'s literal settings become the worker's defaults
+/// (`App::sidekiq_worker`), the `production:` section over the top
+/// level; an ERB value is a warning and is left to the command line.
+#[test]
+fn sidekiq_yml_literals_are_the_worker_defaults() {
+    let yml = ":concurrency: 4\n:timeout: <%= ENV.fetch(\"SIDEKIQ_TIMEOUT\", 8) %>\n:queues:\n  - critical\n  - [default, 2]\nproduction:\n  :concurrency: 12\n";
+    let tree: HashMap<PathBuf, Vec<u8>> = [("db/schema.rb", SCHEMA), ("config/sidekiq.yml", yml)]
+        .iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let (app, diags) = prism::scope(|| ingest_app_from_tree(tree));
+    let worker = app.expect("ingest").sidekiq_worker;
+    assert_eq!(worker.concurrency, Some(12));
+    assert_eq!(worker.timeout, None);
+    assert_eq!(worker.queues, vec![("critical".to_string(), 0), ("default".to_string(), 2)]);
+    let warnings = sidekiq_warnings(diags);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(warnings[0].contains(":timeout") && warnings[0].contains("ERB"), "{warnings:#?}");
+}

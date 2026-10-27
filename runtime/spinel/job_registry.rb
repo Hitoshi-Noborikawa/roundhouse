@@ -49,6 +49,18 @@ module JobRegistry
   def self.sidekiq_redis_password
     ""
   end
+
+  def self.sidekiq_worker_concurrency
+    0
+  end
+
+  def self.sidekiq_worker_timeout
+    -1
+  end
+
+  def self.sidekiq_worker_queues
+    ""
+  end
   # <<< generated: job-registry
 end
 

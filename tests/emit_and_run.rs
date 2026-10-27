@@ -34,6 +34,8 @@ mod active_model_attribute_alias;
 mod active_model_attributes;
 #[path = "emit_and_run/active_model_attributes_form.rs"]
 mod active_model_attributes_form;
+#[path = "emit_and_run/association_query_arguments.rs"]
+mod association_query_arguments;
 #[path = "emit_and_run/active_model_superclass.rs"]
 mod active_model_superclass;
 #[path = "emit_and_run/arel_nodes.rs"]
@@ -68,6 +70,8 @@ mod discard;
 mod callback_abort;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
+#[path = "emit_and_run/constantize_by_name.rs"]
+mod constantize_by_name;
 #[path = "emit_and_run/ancestry_source.rs"]
 mod ancestry_source;
 #[path = "emit_and_run/acts_as_follower_source.rs"]
@@ -80,6 +84,10 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "support/auto_source_gem.rs"]
+mod auto_source_gem_contract;
+#[path = "emit_and_run/auto_source_gem.rs"]
+mod auto_source_gem;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]
@@ -178,12 +186,26 @@ mod stdlib_rnp_contract;
 mod stdlib_rnp;
 #[path = "support/erb_template.rs"]
 mod erb_template_contract;
+#[path = "support/bare_permit.rs"]
+mod bare_permit_contract;
+#[path = "support/data_paths.rs"]
+mod data_paths_contract;
+#[path = "support/eager_load_filter.rs"]
+mod eager_load_filter_contract;
+#[path = "emit_and_run/data_paths.rs"]
+mod data_paths;
+#[path = "emit_and_run/bare_permit.rs"]
+mod bare_permit;
 #[path = "emit_and_run/erb_template.rs"]
 mod erb_template;
 #[path = "support/representable_decorator.rs"]
 mod representable_decorator;
 #[path = "emit_and_run/representable.rs"]
 mod representable;
+#[path = "support/active_model_serializer.rs"]
+mod active_model_serializer_app;
+#[path = "emit_and_run/active_model_serializer.rs"]
+mod active_model_serializer;
 #[path = "emit_and_run/instance_extend.rs"]
 mod instance_extend;
 
@@ -217,6 +239,10 @@ mod cable_actions_contract;
 mod cable_actions;
 #[path = "support/cable_broadcast_json.rs"]
 mod cable_broadcast_json_contract;
+#[path = "support/cable_transmit.rs"]
+mod cable_transmit_contract;
+#[path = "emit_and_run/cable_transmit.rs"]
+mod cable_transmit;
 #[path = "emit_and_run/cable_broadcast_json.rs"]
 mod cable_broadcast_json;
 #[path = "support/index_with.rs"]
@@ -19804,6 +19830,40 @@ mod enum_cross_class_mapping;
 mod jbuilder_record_values;
 #[path = "emit_and_run/nil_operand.rs"]
 mod nil_operand;
+#[path = "emit_and_run/descendant_ivar.rs"]
+mod descendant_ivar;
+#[path = "emit_and_run/initializer_top_level_def.rs"]
+mod initializer_top_level_def;
+#[path = "emit_and_run/unknown_gem_namespace.rs"]
+mod unknown_gem_namespace;
+#[path = "emit_and_run/record_rebinding.rs"]
+mod record_rebinding;
+#[path = "emit_and_run/eager_load_filter.rs"]
+mod eager_load_filter;
+#[path = "emit_and_run/url_helpers_include.rs"]
+mod url_helpers_include;
+#[path = "emit_and_run/length_is_in_within.rs"]
+mod length_is_in_within;
+#[path = "emit_and_run/bigdecimal_clamp.rs"]
+mod bigdecimal_clamp;
+#[path = "emit_and_run/partial_binop.rs"]
+mod partial_binop;
+#[path = "emit_and_run/union_block_params.rs"]
+mod union_block_params;
+#[path = "emit_and_run/format_once.rs"]
+mod format_once;
+#[path = "emit_and_run/condition_lambda_record.rs"]
+mod condition_lambda_record;
+#[path = "emit_and_run/where_time_range.rs"]
+mod where_time_range;
+#[path = "emit_and_run/route_record_to_param.rs"]
+mod route_record_to_param;
+#[path = "emit_and_run/module_factory.rs"]
+mod module_factory;
+#[path = "emit_and_run/spinel_unknown_gem.rs"]
+mod spinel_unknown_gem;
+#[path = "emit_and_run/json_column_name.rs"]
+mod json_column_name;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

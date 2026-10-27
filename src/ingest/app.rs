@@ -237,6 +237,13 @@ fn names_root_constant(text: &str, name: &str) -> bool {
     reads.found
 }
 
+/// Top-level namespaces the framework defines before any app file loads.
+pub(super) const FRAMEWORK_ROOTS: &[&str] = &[
+    "Rails", "ActiveRecord", "ActiveSupport", "ActiveModel", "ActiveJob",
+    "ActiveStorage", "ActionController", "ActionDispatch", "ActionView",
+    "ActionMailer", "ActionMailbox", "ActionCable", "ActionText", "Rack",
+];
+
 /// A module or class an initializer defines at the top level, kept
 /// when the app's own code names it and nothing else defines it.
 ///
@@ -259,11 +266,6 @@ fn keep_initializer_defined(
     sources: &[crate::span::SourceFile],
     candidates: Vec<LibraryClass>,
 ) {
-    const FRAMEWORK_ROOTS: &[&str] = &[
-        "Rails", "ActiveRecord", "ActiveSupport", "ActiveModel", "ActiveJob",
-        "ActiveStorage", "ActionController", "ActionDispatch", "ActionView",
-        "ActionMailer", "ActionMailbox", "ActionCable", "ActionText", "Rack",
-    ];
     const CORE: &[&str] = &[
         "Object", "BasicObject", "Kernel", "Module", "Class", "Comparable",
         "Enumerable", "Integer", "Float", "Numeric", "String", "Symbol",
@@ -320,19 +322,58 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     if super::roda_app::is_roda_app(vfs, dir) {
         return super::roda_app::ingest_roda_app_with_vfs(vfs, dir);
     }
+    // Again with the installed gems the code needs from source, until no
+    // new one appears: a gem brought in can need another (typeid's uuid7).
+    let mut auto: Vec<String> = Vec::new();
+    loop {
+        let marks = (super::survey::mark(), super::prism::mark());
+        let mut app = ingest_rails_app(vfs, dir, &auto)?;
+        let more: Vec<String> = super::auto_source_gems::candidates(&app, vfs, dir)
+            .into_iter()
+            .filter(|g| !auto.contains(g))
+            .collect();
+        if more.is_empty() || auto.len() >= 32 {
+            app.auto_source_gems = auto.into_iter().filter(|g| app.gem_lock.as_ref().is_some_and(|l| l.source.contains(g))).collect();
+            return Ok(app);
+        }
+        // Not the superseded pass's parse errors and survey gaps as well: the next pass reports them again.
+        super::survey::rewind(marks.0);
+        super::prism::rewind(marks.1);
+        auto.extend(more);
+    }
+}
+
+fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {
     super::sources::reset();
     super::each_validator::reset();
     let _source_root = super::sources::set_root(dir);
     let config = roundhouse_config(vfs, dir)?;
     let extensions = project_extensions(vfs, dir, &config)?;
-    let lock = vfs.read_to_string(&dir.join("Gemfile.lock")).ok().map(|text| crate::gems::Lockfile::parse(&text));
-    let source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
+    let lock = vfs.read_to_string(&dir.join("Gemfile.lock")).ok().map(|text| {
+        let mut lock = crate::gems::Lockfile::parse(&text);
+        if let Ok(gemfile) = vfs.read_to_string(&dir.join("Gemfile")) {
+            lock.gemfile_requires = crate::gems::gemfile_requires(&gemfile);
+        }
+        lock
+    });
+    let mut source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
         .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
-    let mount_vfs = super::source_gems::MountVfs { inner: vfs, gems: &source_gems };
+    // Not fatal for an automatic one: the gem stays a reported boundary, as it was.
+    let mut auto_sourced: Vec<String> = Vec::new();
+    for gem in auto_source_gems {
+        if let Ok(mut resolved) = super::source_gems::resolve(vfs, dir, lock.as_ref(), std::slice::from_ref(gem)) {
+            source_gems.append(&mut resolved);
+            auto_sourced.push(gem.clone());
+        }
+    }
+    // One walk of an unchanging tree: remember what each path answered.
+    let cached_vfs = crate::vfs::CachedVfs::new(vfs);
+    let mount_vfs = super::source_gems::MountVfs { inner: &cached_vfs, gems: &source_gems };
     let mut path_gems = path_gem_dirs(&mount_vfs, dir);
     path_gems.extend(source_gems.iter().map(|gem| gem.mount.clone()));
-    let source_vfs = PathGemVfs { inner: &mount_vfs, root: dir, dirs: &path_gems };
-    let vfs = &source_vfs;
+    let source_vfs = PathGemVfs::new(&mount_vfs, dir, &path_gems);
+    let factory_vfs = super::module_factory::expand(&source_vfs, dir);
+    let vfs = &factory_vfs;
     let engine_routes = engine_route_sources(vfs, dir, &path_gems);
     let additional_test_paths = additional_test_paths(dir, &config)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
@@ -380,7 +421,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     if vfs.exists(&lock_path) {
         if let Ok(text) = vfs.read_to_string(&lock_path) {
             let mut lock = crate::gems::Lockfile::parse(&text);
+            if let Ok(gemfile) = vfs.read_to_string(&dir.join("Gemfile")) {
+                lock.gemfile_requires = crate::gems::gemfile_requires(&gemfile);
+            }
             lock.source = app.extensions.source_gems.clone();
+            lock.source.extend(auto_sourced.iter().cloned());
             app.gem_lock = Some(lock);
             if let Some(lock) = &app.gem_lock {
                 app.gem_boundary = super::rbi::load_gem_boundary(vfs, dir, lock, &app.extensions);
@@ -513,6 +558,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // and one file's AST cannot resolve that — the base is declared in
     // another file, possibly later.
     let mut model_bases = super::library_class::ModelBases::new();
+    // A model subclass's own validations, placed once every class is read.
+    let mut sti_validations = Vec::new();
     let mut base_pairs: Vec<(String, String)> = Vec::new();
     for root in &roots {
         let models_dir = dir.join(root).join("models");
@@ -628,6 +675,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         unwrap_or_record(ingest_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
+                        // After the file is registered, so the spans name it.
+                        sti_validations.extend(super::sti_validations::harvest(&source, &path_str));
                         // Concern modules (app/models/concerns/…) also
                         // carry `included do` declarations that belong
                         // to every includer: filters (controller-side)
@@ -919,6 +968,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     app.queue_adapter = read_queue_adapter(vfs, dir);
     // Where Sidekiq pushes (see `App::sidekiq_redis`).
     app.sidekiq_redis = read_sidekiq_redis(vfs, dir);
+    // The worker's defaults (see `App::sidekiq_worker`).
+    let (worker_defaults, worker_warnings) = super::sidekiq_yml::read(vfs, dir);
+    app.sidekiq_worker = worker_defaults;
+    worker_warnings.into_iter().for_each(warn_sidekiq);
     let app_config_path = dir.join("config/application.rb");
     if let Ok(source) = vfs.read(&app_config_path) {
         app.loaded_frameworks =
@@ -1286,8 +1339,8 @@ end
                 }
             }
             let mut assignments: Vec<(Vec<String>, String)> = Vec::new();
-            for (path, bytes) in sources {
-                assignments.extend(extract_config_assignments(&bytes, &path));
+            for (path, bytes) in &sources {
+                assignments.extend(extract_config_assignments(bytes, path));
             }
             // ONCE PER PROCESS. An initializer runs at boot, so the
             // value an assignment writes is built one time and every
@@ -1490,6 +1543,7 @@ end
                 }
                 app.module_mixins.extend(mixins);
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
+                app.initializer_defs.extend(extract_initializer_defs(&bytes, &path_str));
                 app.initializer_response_headers
                     .extend(extract_initializer_response_headers(&bytes, &path_str));
                 if let Some(store) = extract_collection_cache_store(&bytes, &path_str) {
@@ -1651,6 +1705,13 @@ end
             for text in std::iter::once(&source).chain(draw_files.values().map(|(s, _)| s)) {
                 let parsed = ruby_prism::parse(text);
                 route_consts.import(&[parsed.node()], &route_inputs, &[]);
+                // Not only other files' constants: a route file may define the one its own `constraints` names (lobsters' DOMAINS_IDENTIFIER)
+                let top: Vec<ruby_prism::Node<'_>> = parsed
+                    .node()
+                    .as_program_node()
+                    .map(|program| program.statements().body().iter().collect())
+                    .unwrap_or_default();
+                route_consts.merge(super::model::ClassConsts::collect(&top, &routes_path.display().to_string()));
             }
             let routes = super::routes::with_route_constants(route_consts, || {
                 ingest_routes_with_engines(
@@ -2311,6 +2372,9 @@ end
     // Representable decorators: expanded into plain methods the same way;
     // survey mode ledgers an unsupported one and keeps going.
     super::representable::lower_representable_decorators(&mut app, &sources)?;
+    // ActiveModel::Serializer classes, the same way; their controllers'
+    // `render json: x, serializer: S` sites call the expansion.
+    super::active_model_serializer::lower_active_model_serializers(&mut app, &sources)?;
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
@@ -2326,6 +2390,8 @@ end
     // After the splice, so a concern's DSL on a tableless parent reaches
     // its subclasses too; before the macros, which read the result.
     super::tableless_inheritance::inherit_tableless_parents(&mut app);
+    super::tableless_inheritance::inherit_abstract_parent_validations(&mut app);
+    super::sti_validations::apply(&mut app, sti_validations);
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
@@ -2440,6 +2506,8 @@ end
     // reaches a stdlib method of known signature through `super` takes
     // that signature (campfire's `WebPush::Connections::Stages`).
     crate::lower::known_super_forwarding::restate(&mut app);
+    // After the controllers and views are in: their bodies read framework settings too.
+    lift_read_framework_settings(vfs, dir, &mut app);
     collect_binary_assets(vfs, dir, &mut app);
     let mut require_roots: Vec<PathBuf> = roots.iter().map(|root| dir.join(root)).collect();
     require_roots.extend(
@@ -7748,14 +7816,42 @@ fn path_gem_dirs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
 struct PathGemVfs<'a, V: Vfs + ?Sized> {
     inner: &'a V,
     root: &'a Path,
-    dirs: &'a [PathBuf],
+    /// The selected path-gem directories, sorted and deduplicated for
+    /// [`PathGemVfs::within_dirs`].
+    dirs: Vec<PathBuf>,
+    /// `linked` per path: the tree does not change during an ingest, and a
+    /// `require` is probed against every load path.
+    linked_paths: std::cell::RefCell<std::collections::HashMap<PathBuf, bool>>,
+}
+
+impl<'a, V: Vfs + ?Sized> PathGemVfs<'a, V> {
+    fn new(inner: &'a V, root: &'a Path, dirs: &[PathBuf]) -> Self {
+        let mut dirs = dirs.to_vec();
+        dirs.sort();
+        dirs.dedup();
+        Self { inner, root, dirs, linked_paths: Default::default() }
+    }
 }
 
 impl<V: Vfs + ?Sized> PathGemVfs<'_, V> {
+    /// Whether `path` is one of the selected path-gem directories or below one:
+    /// some prefix of it is in `dirs`, which is sorted.
+    fn within_dirs(&self, path: &Path) -> bool {
+        let mut prefix = PathBuf::new();
+        path.components().any(|component| {
+            prefix.push(component);
+            self.dirs.binary_search_by(|dir| dir.as_path().cmp(prefix.as_path())).is_ok()
+        })
+    }
+
     /// Apply the path-gem boundary to direct reads as well as directory walks.
     fn linked(&self, path: &Path) -> bool {
-        self.dirs.iter().any(|dir| path.starts_with(dir))
-            && path_has_symlink_component(self.inner, self.root, path)
+        if let Some(&known) = self.linked_paths.borrow().get(path) {
+            return known;
+        }
+        let linked = self.within_dirs(path) && path_has_symlink_component(self.inner, self.root, path);
+        self.linked_paths.borrow_mut().insert(path.to_path_buf(), linked);
+        linked
     }
 
     /// Treat excluded paths as absent, as directory discovery does.
@@ -7788,7 +7884,7 @@ impl<V: Vfs + ?Sized> Vfs for PathGemVfs<'_, V> {
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
         self.check(path)?;
         let mut entries = self.inner.read_dir(path)?;
-        if self.dirs.iter().any(|dir| path.starts_with(dir)) {
+        if self.within_dirs(path) {
             entries.retain(|entry| !self.inner.is_symlink(entry));
         }
         Ok(entries)
@@ -9511,6 +9607,20 @@ pub(super) fn initializer_statements<'a>(program: &ruby_prism::ProgramNode<'a>) 
     stmts
 }
 
+/// `def name` at an initializer's top level (lobsters'
+/// `do_heinous_inline_partial_replacement`).
+pub(super) fn extract_initializer_defs(source: &[u8], file: &str) -> Vec<crate::ident::Symbol> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let Some(program) = root.as_program_node() else { return Vec::new() };
+    initializer_statements(&program)
+        .iter()
+        .filter_map(|stmt| stmt.as_def_node())
+        .filter(|def| def.receiver().is_none())
+        .map(|def| crate::ident::Symbol::from(super::util::constant_id_str(&def.name())))
+        .collect()
+}
+
 /// `X.before_action :m[, only: :a | %i[a b]]` in a `config/initializers/`
 /// file — the mixin's companion (see `extract_module_mixins`): a guard
 /// mixed into a framework controller does nothing until that
@@ -9780,19 +9890,165 @@ pub(super) enum TimeFormatSource {
 /// (`config.x.vapid` read as a whole is an OrderedOptions in Rails), and
 /// `x_vapid_private_key` cannot be split back into its segments — the
 /// leaf has an underscore of its own.
+/// A framework setting the app itself reads back (lobsters'
+/// `Routes.default_url_options` is `Rails.application.config
+/// .action_mailer.default_url_options`) becomes a `Rails::Application`
+/// reader answering what the running environment's file assigned, over
+/// application.rb and the initializers. Only a READ setting is lifted:
+/// every other framework assignment configures machinery the emit replaces.
+fn lift_read_framework_settings<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App) {
+    let reads = framework_config_reads(app);
+    if reads.is_empty() {
+        return;
+    }
+    let mut sources: Vec<(String, Vec<u8>)> = Vec::new();
+    for path in [dir.join("config/application.rb")] {
+        if let Ok(bytes) = vfs.read(&path) {
+            sources.push((path.display().to_string(), bytes));
+        }
+    }
+    let init_dir = dir.join("config/initializers");
+    if vfs.is_dir(&init_dir) {
+        for entry in read_rb_files(vfs, &init_dir).unwrap_or_default() {
+            if let Ok(bytes) = vfs.read(&entry) {
+                sources.push((entry.display().to_string(), bytes));
+            }
+        }
+    }
+    let mut assignments: Vec<(Vec<String>, String)> = Vec::new();
+    for (framework, leaf) in reads {
+
+        let wanted = [framework.clone(), leaf.clone()];
+        let assigned = |bytes: &[u8], path: &str| {
+            extract_framework_config_assignments(bytes, path)
+                .into_iter()
+                .filter(|(segments, _)| segments.as_slice() == wanted.as_slice())
+                .last()
+                .map(|(_, value)| value)
+        };
+        let base = sources.iter().filter_map(|(path, bytes)| assigned(bytes, path)).last();
+        let mut arms = String::new();
+        for env in ["development", "production", "test"] {
+            let file = dir.join(format!("config/environments/{env}.rb"));
+            let Ok(bytes) = vfs.read(&file) else { continue };
+            // Not the assignment alone: ActionMailer's railtie adds `protocol: "https"` (`||=`) where `force_ssl` is on, whoever assigned the options.
+            let force_ssl = framework == "action_mailer"
+                && leaf == "default_url_options"
+                && extract_framework_config_assignments(&bytes, &file.display().to_string())
+                    .into_iter()
+                    .any(|(segments, value)| segments == ["force_ssl"] && value.trim() == "true");
+            let value = assigned(&bytes, &file.display().to_string()).or_else(|| force_ssl.then(|| base.clone()).flatten());
+            if let Some(value) = value {
+                let value = if force_ssl { format!("{{ protocol: \"https\" }}.merge({value})") } else { value };
+                arms.push_str(&format!("when {env:?}\n  {value}\n"));
+            }
+        }
+        if arms.is_empty() && base.is_none() {
+            continue;
+        }
+        let fallback = base.unwrap_or_else(|| "nil".to_string());
+        let value = if arms.is_empty() {
+            fallback
+        } else {
+            format!("case Rails.env.to_s\n{arms}else\n  {fallback}\nend")
+        };
+        assignments.push((wanted.to_vec(), value));
+    }
+    if assignments.is_empty() {
+        return;
+    }
+    let rails_application = app.rails_application.get_or_insert_with(|| crate::dialect::LibraryClass {
+        name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: None,
+        constants: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    });
+    let mut constants = String::new();
+    if !rails_application.constants.iter().any(|(name, _)| name.as_str() == "CONFIG_LOCK") {
+        constants.push_str("CONFIG_LOCK = Mutex.new\n");
+    }
+    for (segments, value) in &assignments {
+        let name = segments.join("_");
+        if rails_application.methods.iter().any(|m| m.name.as_str() == name) {
+            continue;
+        }
+        let slot = format!("{}_SLOT", name.to_uppercase());
+        if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+            "def {name}__build\n  {value}\nend\n\
+             def {name}\n  slot = {slot}\n  CONFIG_LOCK.synchronize do\n    slot.push({name}__build) if slot.empty?\n  end\n  slot[0]\nend\n"
+        )) {
+            rails_application.methods.append(&mut synth);
+            constants.push_str(&format!("{slot} = []\n"));
+        }
+    }
+    if let Ok(mut synth) = crate::runtime_src::parse_module_constant_exprs(&constants) {
+        rails_application.constants.append(&mut synth);
+    }
+}
+
 pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<String>, String)> {
-    fn walk(stmts: Vec<ruby_prism::Node<'_>>, src: &str, out: &mut Vec<(Vec<String>, String)>) {
+    config_assignments(source, file, false)
+}
+
+/// [`extract_config_assignments`] with the framework subsections kept
+/// (`config.action_mailer.default_url_options = …`).
+fn extract_framework_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<String>, String)> {
+    config_assignments(source, file, true)
+}
+
+/// Every `Rails.application.config.<framework>.<setting>` an app body reads.
+fn framework_config_reads(app: &App) -> std::collections::BTreeSet<(String, String)> {
+    use crate::expr::ExprNode;
+    fn is_config_root(e: &crate::expr::Expr) -> bool {
+        let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node else { return false };
+        if !args.is_empty() {
+            return false;
+        }
+        let rails = |e: &crate::expr::Expr| matches!(&*e.node, ExprNode::Const { path } if path.last().is_some_and(|p| p.as_str() == "Rails"));
+        match method.as_str() {
+            "config" => matches!(&*r.node, ExprNode::Send { recv: Some(rr), method, .. } if method.as_str() == "application" && rails(rr)),
+            "configuration" => rails(r),
+            _ => false,
+        }
+    }
+    fn visit(e: &crate::expr::Expr, out: &mut std::collections::BTreeSet<(String, String)>) {
+        if let ExprNode::Send { recv: Some(r), method: leaf, args, .. } = &*e.node
+            && args.is_empty()
+            && let ExprNode::Send { recv: Some(root), method: framework, args: fargs, .. } = &*r.node
+            && fargs.is_empty()
+            && FRAMEWORK_CONFIG_KEYS.contains(&framework.as_str())
+            && is_config_root(root)
+        {
+            out.insert((framework.as_str().to_string(), leaf.as_str().to_string()));
+        }
+        e.node.for_each_child(&mut |c| visit(c, out));
+    }
+    let mut out = std::collections::BTreeSet::new();
+    crate::lower::for_each_emit_body_ref(app, &mut |e| visit(e, &mut out));
+    out
+}
+
+fn config_assignments(source: &[u8], file: &str, framework: bool) -> Vec<(Vec<String>, String)> {
+    fn walk(stmts: Vec<ruby_prism::Node<'_>>, src: &str, framework: bool, out: &mut Vec<(Vec<String>, String)>) {
         for stmt in stmts {
             // Config lines sit at the top level of an initializer and
             // inside the Application class body; descend through both
             // rather than the whole expression tree, which is where
             // every other config reader in this file draws the line.
             if let Some(class) = stmt.as_class_node() {
-                walk(class.body().map(super::util::flatten_statements).unwrap_or_default(), src, out);
+                walk(class.body().map(super::util::flatten_statements).unwrap_or_default(), src, framework, out);
                 continue;
             }
             if let Some(module) = stmt.as_module_node() {
-                walk(module.body().map(super::util::flatten_statements).unwrap_or_default(), src, out);
+                walk(module.body().map(super::util::flatten_statements).unwrap_or_default(), src, framework, out);
                 continue;
             }
             // The third home, and the one Rails' own generator writes:
@@ -9806,7 +10062,7 @@ pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<
                         .and_then(|b| b.as_block_node())
                         .and_then(|b| b.body())
                     {
-                        walk(super::util::flatten_statements(body), src, out);
+                        walk(super::util::flatten_statements(body), src, framework, out);
                         continue;
                     }
                 }
@@ -9815,7 +10071,12 @@ pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<
             // `x.y = v` parses as a call named `y=`.
             let name = super::util::constant_id_str(&call.name()).to_string();
             let Some(base) = name.strip_suffix('=') else { continue };
-            let Some(prefix) = config_receiver_path(&call.receiver()) else {
+            let prefix = if framework {
+                call.receiver().as_ref().and_then(|r| config_path_of(r, 0))
+            } else {
+                config_receiver_path(&call.receiver())
+            };
+            let Some(prefix) = prefix else {
                 continue;
             };
             let Some(args) = call.arguments() else { continue };
@@ -9838,7 +10099,7 @@ pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<
         .as_program_node()
         .map(|p| p.statements().body().iter().collect::<Vec<_>>())
         .unwrap_or_default();
-    walk(stmts, &src, &mut out);
+    walk(stmts, &src, framework, &mut out);
     out
 }
 
@@ -9906,6 +10167,32 @@ fn config_path_of(node: &ruby_prism::Node<'_>, depth: usize) -> Option<Vec<Strin
     Some(segments)
 }
 
+/// A Symbol source as Rails' `ContentSecurityPolicy::MAPPINGS` writes it
+/// (actionpack 8.1.4).
+pub(crate) fn csp_source_mapping(symbol: &str) -> Option<&'static str> {
+    Some(match symbol {
+        "self" => "'self'",
+        "unsafe_eval" => "'unsafe-eval'",
+        "wasm_unsafe_eval" => "'wasm-unsafe-eval'",
+        "unsafe_hashes" => "'unsafe-hashes'",
+        "unsafe_inline" => "'unsafe-inline'",
+        "none" => "'none'",
+        "http" => "http:",
+        "https" => "https:",
+        "data" => "data:",
+        "mediastream" => "mediastream:",
+        "allow_duplicates" => "'allow-duplicates'",
+        "blob" => "blob:",
+        "filesystem" => "filesystem:",
+        "report_sample" => "'report-sample'",
+        "script" => "'script'",
+        "strict_dynamic" => "'strict-dynamic'",
+        "ws" => "ws:",
+        "wss" => "wss:",
+        _ => return None,
+    })
+}
+
 /// `config.content_security_policy do |policy| policy.script_src :self end`,
 /// including the `unless ENV["DISABLE_CONTENT_SECURITY_POLICY"]` guard
 /// when the file has one. `None` when the block names no literal source.
@@ -9934,17 +10221,12 @@ pub(super) fn content_security_policy_method(source: &str) -> Option<String> {
                 continue;
             }
             let quoted = if let Some(sym) = arg.strip_prefix(':') {
-                match sym {
-                    "self" => "'self'".to_string(),
-                    "none" => "'none'".to_string(),
-                    "unsafe_inline" => "'unsafe-inline'".to_string(),
-                    "unsafe_eval" => "'unsafe-eval'".to_string(),
-                    "https" => "https:".to_string(),
-                    "http" => "http:".to_string(),
+                match csp_source_mapping(sym) {
+                    Some(source) => source.to_string(),
                     // An unknown symbol is not a source we can quote.
                     // Dropping it keeps the directive honest; inventing
                     // the bare word would ship a policy the app did not write.
-                    _ => continue,
+                    None => continue,
                 }
             } else if arg.len() >= 2
                 && ((arg.starts_with('"') && arg.ends_with('"'))
@@ -10287,8 +10569,11 @@ pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLi
             (false, r)
         } else if let Some(r) = rest.strip_prefix('=').filter(|r| !r.starts_with('=')) {
             (true, r)
-        } else {
+        } else if filter_parameters_mutation(rest) {
             out.push(FilterParametersLine::Computed { replace: false });
+            continue;
+        } else {
+            // Not a write: an initializer that only reads the list (lobsters' lograge `ParameterFilter.new(…filter_parameters)`)
             continue;
         };
         // The shortest run of lines that parses as one operand. Blank
@@ -10324,6 +10609,18 @@ pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLi
         });
     }
     out
+}
+
+/// Whether what follows `config.filter_parameters` changes the list in
+/// place (`<<`, `.push(…)`, `.concat(…)`, a bang method) rather than reads it.
+fn filter_parameters_mutation(rest: &str) -> bool {
+    if rest.starts_with("<<") {
+        return true;
+    }
+    let Some(call) = rest.strip_prefix('.') else { return false };
+    let name: String = call.chars().take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '!' | '?')).collect();
+    name.ends_with('!')
+        || matches!(name.as_str(), "push" | "append" | "concat" | "unshift" | "prepend" | "insert" | "replace" | "clear" | "delete" | "delete_at" | "delete_if" | "keep_if" | "pop" | "shift" | "fill")
 }
 
 /// The filters of an operand that is one `[...]`, `%i[...]` or `%w[...]`
@@ -11789,5 +12086,81 @@ mod importmap_json_tests {
             method.contains(&format!("{json:?}")),
             "CSP hashes this string; it has to be the importmap script body:\n{method}"
         );
+    }
+}
+
+#[cfg(test)]
+mod filter_parameters_tests {
+    use super::{extract_filter_parameters, FilterParametersLine};
+
+    #[test]
+    fn a_read_of_the_list_is_not_a_write() {
+        let src = b"filter = ActiveSupport::ParameterFilter.new(Rails.application.config.filter_parameters)\n";
+        assert_eq!(extract_filter_parameters(src), Vec::<FilterParametersLine>::new());
+        let src = b"Rails.application.config.filter_parameters << :token\nRails.application.config.filter_parameters.push(:otp)\n";
+        assert_eq!(
+            extract_filter_parameters(src),
+            vec![FilterParametersLine::Computed { replace: false }, FilterParametersLine::Computed { replace: false }]
+        );
+    }
+}
+
+#[cfg(test)]
+mod csp_mapping_tests {
+    use super::content_security_policy_method;
+
+    #[test]
+    fn every_rails_source_symbol_is_mapped() {
+        let method = content_security_policy_method(
+            "Rails.application.configure do\n  config.content_security_policy do |policy|\n    policy.img_src :self, :data, :blob\n    policy.connect_src :self, :wss\n    policy.script_src :self, :strict_dynamic\n  end\nend\n",
+        )
+        .expect("a policy");
+        assert!(method.contains(r#"policy.set_directive("img-src", ["'self'", "data:", "blob:"])"#), "{method}");
+        assert!(method.contains(r#"policy.set_directive("connect-src", ["'self'", "wss:"])"#), "{method}");
+        assert!(method.contains(r#"policy.set_directive("script-src", ["'self'", "'strict-dynamic'"])"#), "{method}");
+    }
+}
+
+#[cfg(test)]
+mod path_gem_vfs_tests {
+    use super::PathGemVfs;
+    use crate::vfs::MapVfs;
+    use std::path::{Path, PathBuf};
+
+    /// The binary search over the sorted directories answers what the scan
+    /// it replaced did: `path.starts_with(dir)` for some `dir`, whatever
+    /// order the directories were given in.
+    #[test]
+    fn within_dirs_agrees_with_a_prefix_scan() {
+        let vfs = MapVfs::new(Default::default());
+        let dirs: Vec<PathBuf> =
+            ["/app/vendor/zeta", "/app/engines/a", "/app/vendor/alpha", "/app/engines/a/inner", "/app/vendor/alpha"]
+                .iter()
+                .map(PathBuf::from)
+                .collect();
+        let linked = PathGemVfs::new(&vfs, Path::new("/app"), &dirs);
+        for path in [
+            "/app",
+            "/app/vendor",
+            "/app/vendor/alpha",
+            "/app/vendor/alpha/lib/x.rb",
+            "/app/vendor/alphabet/lib/x.rb",
+            "/app/vendor/zeta",
+            "/app/vendor/zeta/lib",
+            "/app/engines/a",
+            "/app/engines/a/inner/lib/y.rb",
+            "/app/engines/b/lib/y.rb",
+            "/app/engines",
+            "/other/vendor/alpha",
+            "relative/vendor/alpha",
+        ] {
+            let path = Path::new(path);
+            assert_eq!(
+                linked.within_dirs(path),
+                dirs.iter().any(|dir| path.starts_with(dir)),
+                "{}",
+                path.display()
+            );
+        }
     }
 }

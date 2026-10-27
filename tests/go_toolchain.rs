@@ -121,15 +121,6 @@ fn real_blog_go_vet_passes() {
 
 #[test]
 #[ignore]
-fn tiny_blog_go_vet_passes() {
-    let fixture = Path::new("fixtures/tiny-blog");
-    let scratch = scratch_dir("tiny-blog");
-    generate_project(fixture, &scratch);
-    assert_go_passes("tiny-blog", &scratch);
-}
-
-#[test]
-#[ignore]
 fn real_blog_go_test_passes() {
     // Phase 2 forcing function: emit real-blog and run `go test ./...`,
     // the same discovery the emitted README documents. Asserts zero

@@ -107,7 +107,7 @@ fn a_cache_wrapped_template_is_not_emitted_empty() {
 /// template position and the shape tag.
 #[test]
 fn an_unlowerable_statement_files_residue() {
-    let (_, diags) = emit("<% a, b = compute_pair %>\n<p>x</p>\n");
+    let (_, diags) = emit("<% @a, @b = compute_pair %>\n<p>x</p>\n");
     let res = residues(&diags);
     assert_eq!(res.len(), 1, "exactly one residue line: {diags:?}");
     assert!(

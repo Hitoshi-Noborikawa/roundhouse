@@ -9,62 +9,7 @@
 # taken them all, then shuts down with a slow job still running, as
 # TERM does. reader.rb then reads what is left through Sidekiq's own
 # API: the dead set, and the slow job back on its queue.
-require "json"
-require "securerandom"
-require "time"
-require_relative "base64"
-
-module Rails
-  class App
-    def global_id_app
-      "depot"
-    end
-
-    def secret_key_base
-      ""
-    end
-  end
-
-  def self.application
-    App.new
-  end
-end
-
-module ActionController
-  class MessageVerifier
-    def self.verified_data_json(secret, salt, data, purpose, rotate)
-      ""
-    end
-
-    def self.json_value(json)
-      ""
-    end
-  end
-end
-
-module Db
-  def self.with_connection
-    result = yield
-    result
-  end
-end
-
-# The worker clears the broadcast log (runtime/spinel/broadcasts.rb)
-# before each job; these jobs broadcast nothing.
-module Broadcasts
-  def self.reset_log!
-    nil
-  end
-end
-
-require_relative "active_job"
-require_relative "global_id_locator"
-require_relative "active_job_serialization"
-require_relative "sidekiq_redis"
-require_relative "sidekiq_push"
-require_relative "job_registry"
-require_relative "sidekiq_envelope"
-require_relative "sidekiq_worker"
+require_relative "stubs"
 
 module JobRegistry
   RAN = [""]

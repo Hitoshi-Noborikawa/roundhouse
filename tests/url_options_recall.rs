@@ -25,6 +25,10 @@ use roundhouse::ingest::ingest_app;
 use roundhouse::project::BuildTarget;
 
 fn tree() -> PathBuf {
+    tree_for(BuildTarget::Ruby)
+}
+
+fn tree_for(target: BuildTarget) -> PathBuf {
     // Per CALL, not just per process: the tests in this file run in
     // parallel, and each clears its directory first — sharing one let a
     // test ingest a tree the other had just removed.
@@ -49,7 +53,7 @@ fn tree() -> PathBuf {
     }
     let mut app = ingest_app(&dir).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
-    let files = roundhouse::project::target_files(&app, &dir, BuildTarget::Ruby).expect("files");
+    let files = roundhouse::project::target_files(&app, &dir, target).expect("files");
     let out = dir.join("emitted");
     roundhouse::project::write_to_dir(&files, &out).expect("write");
     out
@@ -63,6 +67,16 @@ fn a_view_using_the_options_hash_takes_the_request_path_parameters() {
     let controller =
         std::fs::read_to_string(out.join("app/controllers/home_controller.rb")).expect("controller");
     assert!(controller.contains("@path_parameters"), "{controller}");
+}
+
+/// The view's sidecar types the param as the Hash it is: typed `String?`
+/// like the other trailing extras, Spinel compiled every lobsters story
+/// list to raise "no implicit conversion of Hash into String" on the call.
+#[test]
+fn the_spinel_sidecar_types_path_parameters_as_the_request_hash() {
+    let out = tree_for(BuildTarget::Spinel);
+    let rbs = std::fs::read_to_string(out.join("app/views/home/top.rbs")).expect("home/top sidecar");
+    assert!(rbs.contains("?Hash[String, String]? path_parameters"), "{rbs}");
 }
 
 #[test]

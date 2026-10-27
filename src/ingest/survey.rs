@@ -53,6 +53,18 @@ pub(super) fn without_recording<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
+/// How many errors are recorded so far, for `rewind`.
+pub(super) fn mark() -> Option<usize> {
+    SURVEY_STATE.with(|s| s.borrow().as_ref().map(Vec::len))
+}
+
+/// Forget what was recorded since `mark`: an ingest pass that is run again.
+pub(super) fn rewind(mark: Option<usize>) {
+    if let Some(length) = mark {
+        SURVEY_STATE.with(|s| s.borrow_mut().as_mut().map(|buf| buf.truncate(length)));
+    }
+}
+
 /// Record `err` when survey mode is active and continue. Strict mode
 /// returns it, so a ledgered gap never becomes a silent success and
 /// never claims the construct is supported.

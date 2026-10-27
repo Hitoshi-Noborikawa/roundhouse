@@ -1058,10 +1058,11 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
-      - name: Install the redis and sidekiq gems
+      - name: Install the redis, sidekiq and activejob gems
         run: |
           gem install --no-document redis -v '~> 5.4'
           gem install --no-document sidekiq -v 8.1.7
+          gem install --no-document activejob -v 8.1.3
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -2284,6 +2285,12 @@ jobs:
       - name: cargo test --test tiny_api cruby_gate_ -- --ignored
         if: ${{ !cancelled() }}
         run: cargo test --test tiny_api cruby_gate_ -- --ignored --nocapture
+      # The Roda + Sequel front-end's 19-check oracle, on the fixture and
+      # on its CRuby emit. Unscheduled until 10-26, it went red twice in
+      # October (CSRF default, `<%==`) and nothing saw it.
+      - name: cargo test --test roda_toolchain -- --ignored
+        if: ${{ !cancelled() }}
+        run: cargo test --test roda_toolchain -- --ignored --nocapture
       - name: scripts/compare ruby
         if: ${{ !cancelled() }}
         run: scripts/compare ruby

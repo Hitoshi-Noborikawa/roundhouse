@@ -1391,7 +1391,6 @@ impl Run<'_> {
             method_params.push(p);
         }
         let body = self.substitute(body, env, &shadow)?;
-        let template = self.table.values().next().expect("a macro was found").clone();
         // Ruby makes these private whatever defines them.
         let visibility = if receiver == MethodReceiver::Instance && matches!(name.as_str(), "initialize" | "initialize_copy" | "initialize_dup" | "initialize_clone") {
             MethodVisibility::Private
@@ -1411,7 +1410,10 @@ impl Run<'_> {
             signature: None,
             effects: Default::default(),
             enclosing_class: Some(self.owner.clone()),
-            ..template
+            // A `def`, whatever macro defined it: not the accessor kind of some other class method in the table.
+            kind: crate::dialect::AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
         });
         Ok(())
     }

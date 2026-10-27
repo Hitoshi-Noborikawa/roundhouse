@@ -163,13 +163,15 @@ pub(super) fn emit_turbo_stream_fragment(
             // string, a nested call) would need the partial machinery a
             // `render` call site gets, so decline and leave the source
             // shape for the residue ledger.
+            // turbo-rails renders it `formats: :html` (`render_record`),
+            // whatever template the builder is written in.
             let name = record_name(content)?;
             let partial = format!("{}/{}", pluralize_snake(&name), name);
             super::partial::named_partial_call(
                 &partial,
                 Some(&rewrite_helpers_in_expr(content, ctx)),
                 None,
-                ctx,
+                &ctx.in_formats(&["html"]),
             )?
         }
     };
@@ -821,6 +823,20 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     if let Some(resolved) = emit_url_options_hash(url, ctx) {
         return Some(resolved);
     }
+    // A Hash known only at run time resolves there, against this request
+    // (`routes_to_library::lower_dynamic_url_helper`).
+    if super::dynamic_url_hash(url) {
+        let local = |name: &str| var_ref(Symbol::from(name));
+        let recall = if ctx.locals.iter().any(|l| l == "path_parameters") {
+            local("path_parameters")
+        } else {
+            Expr::new(Span::synthetic(), ExprNode::Hash { entries: vec![], kwargs: false })
+        };
+        return Some(route_helpers_call(
+            "path_for_params",
+            vec![local("controller_name"), local("action_name"), rewrite_helpers_in_expr(url, ctx), recall],
+        ));
+    }
     // Association-reader record URL (`link_to text,
     // showing_user.invited_by_user`) — Rails resolves the record
     // polymorphically through its named route. The reader's target
@@ -867,7 +883,7 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
         // The local already holds the url — read it.
         ViewUrlArg::LocalUrl { name } => Some(var_ref(Symbol::from(name))),
         ViewUrlArg::PathHelper { name, args } => {
-            let route_args: Vec<Expr> = args.iter().map(|a| rewrite_path_arg(a, ctx)).collect();
+            let route_args = rewrite_path_args(name, args, ctx);
             Some(route_helpers_call(name, route_args))
         }
         ViewUrlArg::RecordRef { name } => {
@@ -886,9 +902,10 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
                     }
                 }
             }
+            let param = if ctx.slug_models.contains(&singular) { "to_param" } else { "id" };
             let id_expr = send(
                 Some(var_ref(Symbol::from(name))),
-                "id",
+                param,
                 Vec::new(),
                 None,
                 false,
@@ -1037,7 +1054,21 @@ fn nested_element_parts(kind: &NestedUrlElement<'_>) -> (String, Expr) {
 /// shape) and the bareword `Send { recv: None, args: [], block: None }`
 /// shape Prism produces for partial-scope locals. Anything else
 /// passes through unchanged.
+/// [`rewrite_path_arg`] over a helper's arguments. A lone record handed
+/// to the member helper of a model that overrides `to_param` (lobsters'
+/// `user_path(user)`, a username) projects to that, as Rails renders it.
+pub(super) fn rewrite_path_args(helper: &str, args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
+    let resource = helper.trim_end_matches("_path").trim_end_matches("_url");
+    let resource = resource.strip_prefix("edit_").unwrap_or(resource);
+    let param = if args.len() == 1 && ctx.slug_models.iter().any(|m| m == resource) { "to_param" } else { "id" };
+    args.iter().map(|a| project_path_arg(a, ctx, param)).collect()
+}
+
 pub(super) fn rewrite_path_arg(arg: &Expr, ctx: &ViewCtx) -> Expr {
+    project_path_arg(arg, ctx, "id")
+}
+
+fn project_path_arg(arg: &Expr, ctx: &ViewCtx, param: &str) -> Expr {
     let local_name = match &*arg.node {
         ExprNode::Var { name, .. } if ctx.is_local(name.as_str()) => Some(name.clone()),
         ExprNode::Send {
@@ -1050,13 +1081,11 @@ pub(super) fn rewrite_path_arg(arg: &Expr, ctx: &ViewCtx) -> Expr {
         _ => None,
     };
     match local_name {
-        Some(name) => send(
-            Some(var_ref(name)),
-            "id",
-            Vec::new(),
-            None,
-            false,
-        ),
+        Some(name) => {
+            // The record's own `to_param` whatever the helper (`edit_mod_domain_path(domain)` is a domain name).
+            let own = ctx.slug_models.iter().any(|m| *m == singularize(name.as_str()));
+            send(Some(var_ref(name)), if own { "to_param" } else { param }, Vec::new(), None, false)
+        }
         None => arg.clone(),
     }
 }

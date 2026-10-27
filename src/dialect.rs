@@ -647,6 +647,9 @@ pub enum ValidationRule {
     Length {
         min: Option<u32>,
         max: Option<u32>,
+        /// `is:` — the one length Rails accepts (`wrong_length`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is: Option<u32>,
         /// `message:` override for the length failure text. Forced by
         /// the Sequel front-end (`validates_min_length 10, :body,
         /// message: "..."`); Rails' `length: { minimum: 10, message:
@@ -1233,6 +1236,13 @@ pub enum LibraryClassOrigin {
     RepresentableDecorator {
         declaration_span: Span,
         fields: Vec<RepresentableField>,
+    },
+    /// An `ActiveModel::Serializer` expanded by
+    /// `ingest::active_model_serializer`: its attributes, in declaration
+    /// order (each read by `ams_<name>`).
+    ActiveModelSerializer {
+        declaration_span: Span,
+        fields: Vec<Symbol>,
     },
     /// Per-resource params holder synthesized from a controller's
     /// `permit([:f1, :f2, …])` declaration. `resource` is the singular

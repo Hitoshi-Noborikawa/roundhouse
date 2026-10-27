@@ -32,6 +32,7 @@ use crate::ingest::prism_api::PrismLocation;
 pub(crate) fn expand(app: &mut App) {
     app.ports_active_model_validator = true;
     let sources = app.sources.clone();
+    let guards = app.validates_with_guards.clone();
     // One count for the app, not per model: a parent model's method must
     // not share a name with its subclass's, which would override it, and
     // owners can underscore alike (`Foo_Bar`, `Foo::Bar`). The owner in
@@ -45,10 +46,12 @@ pub(crate) fn expand(app: &mut App) {
                 ModelBodyItem::Unknown { expr, .. } => match &*expr.node {
                     ExprNode::Send { recv: None, method, .. } if method.as_str() == "validates_with" => {
                         let text = source_text(&sources, expr.span);
+                        // An STI subclass's, moved here: run for it only.
+                        let guard = guards.iter().find(|g| (g.file, g.start) == (expr.span.file.0, expr.span.start)).map(|g| &g.class).map(|class| format!("if: -> {{ is_a?({class}) }}"));
                         text.and_then(|t| {
                             counter += 1;
                             let name = format!("__validates_with_{owner}_{counter}");
-                            generated_source(t, &name)
+                            generated_source(t, &name, guard.as_deref())
                                 .and_then(|src| ingest_source(&src, &model.name))
                         })
                     }
@@ -71,8 +74,9 @@ fn source_text(sources: &[crate::span::SourceFile], span: crate::span::Span) -> 
 }
 
 /// The model source for one `validates_with` call's text, or None when
-/// it isn't one validator class with keyword options.
-fn generated_source(call_text: &str, name: &str) -> Option<String> {
+/// it isn't one validator class with keyword options. `guard` is one more
+/// condition (`if: -> { is_a?(Sub) }`).
+fn generated_source(call_text: &str, name: &str, guard: Option<&str>) -> Option<String> {
     let result = ruby_prism::parse(call_text.as_bytes());
     let root = result.node();
     let call = root.as_program_node()?.statements().body().iter().next()?.as_call_node()?;
@@ -106,6 +110,7 @@ fn generated_source(call_text: &str, name: &str) -> Option<String> {
         _ => return None,
     }
     let built = if own.is_empty() { format!("{class}.new") } else { format!("{class}.new({})", own.join(", ")) };
+    conditions.extend(guard.map(str::to_string));
     let validate = std::iter::once(format!(":{name}")).chain(conditions).collect::<Vec<_>>().join(", ");
     Some(format!(
         "class GeneratedValidatesWith\n  def {name}\n    {built}.validate(self)\n  end\n\n  validate {validate}\nend\n"

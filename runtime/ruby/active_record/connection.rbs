@@ -146,7 +146,7 @@ module ActiveRecord
     def self.delete_by: (Hash[Symbol, untyped] | String conditions) -> Integer
     def self.destroy_by: (Hash[Symbol, untyped] | String conditions) -> Array[Base]
     def self.distinct: (?(bool | Symbol | String) value) -> Relation
-    def self.eager_load: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def self.eager_load: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def self.excluding: (*untyped records) -> Relation
     def self.find_each: () { (Base) -> void } -> Relation
     def self.find_in_batches: () { (Array[Base]) -> void } -> Relation
@@ -156,7 +156,7 @@ module ActiveRecord
     def self.group: (*(String | Symbol) parts) -> Relation
     def self.having: (String condition, *untyped args) -> Relation
     def self.ids: () -> Array[Integer]
-    def self.includes: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def self.includes: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def self.joins: (String | Symbol spec) -> Relation
     def self.left_joins: (String | Symbol spec) -> Relation
     def self.left_outer_joins: (String | Symbol spec) -> Relation
@@ -171,7 +171,7 @@ module ActiveRecord
     def self.order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def self.pick: (String | Symbol col) -> untyped
     def self.pluck: (String | Symbol col) -> Array[untyped]
-    def self.preload: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def self.preload: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def self.references: (*Symbol names) -> Relation
     def self.reorder: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def self.select: (*(String | Symbol) specs) -> Relation
@@ -221,6 +221,8 @@ module ActiveRecord
     def _save_committed: (bool was_new) -> void
     def _destroy_committed: () -> void
     def _enlist_or_run: (Integer kind) -> nil
+    def _enlist_write: (Integer kind) -> nil
+    def _forget_rollback_state: () -> nil
     def _run_commit_callbacks: (Integer kind) -> nil
     def self._txn_parent_joinable?: (Integer depth) -> bool
     def self._txn_note_joinable: (Integer depth, bool joinable) -> nil

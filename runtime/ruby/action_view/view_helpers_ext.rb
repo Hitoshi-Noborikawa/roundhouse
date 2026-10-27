@@ -76,6 +76,19 @@ module ActionView
       )
     end
 
+    # Not url_for_path's host: a class that defines `default_url_options` names the host its `_url` helpers answer on, as Rails' url_for merges them
+    def self.url_for_options(path, options)
+      host = options[:host]
+      return url_for_path(path) if host.nil?
+      hostport = host.to_s
+      port = options[:port]
+      hostport = hostport + ":" + port.to_s unless port.nil?
+      protocol = options[:protocol]
+      ActionController.build_host_url(
+        protocol.nil? ? "http://" : protocol.to_s, hostport, ActionController.url_port_of(hostport), path
+      )
+    end
+
     def self.digested_asset_path(source)
       cut = source.length
       query = source.index("?")

@@ -441,6 +441,12 @@ module ActionCable
         nil
       end
 
+      def transmit(data)
+        @connection.transmit({ identifier: @identifier, message: data })
+        nil
+      end
+      private :transmit
+
       def stream_for(record)
         stream_from(broadcasting_for(record))
       end
@@ -699,6 +705,11 @@ module ActionCable
       # the socket, and so does this: what a test asserts is what the
       # socket was told.
       attr_accessor :transport
+
+      def transmit(data)
+        @transport.transmit(data) unless @transport.nil?
+        nil
+      end
 
       # Rails' `beat`, called on every server heartbeat. Rails' transmits
       # the ping; here the server's shared heartbeat writes it, so the base

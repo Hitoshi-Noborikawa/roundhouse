@@ -655,8 +655,7 @@ fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) 
         // CRuby interpolated its inspect into the action, spinel raised
         // `no implicit conversion of User into Integer` — campfire's
         // bot edit page.
-        let route_args: Vec<Expr> =
-            args.iter().map(|a| super::helpers::rewrite_path_arg(a, ctx)).collect();
+        let route_args = super::helpers::rewrite_path_args(m, args, ctx);
         if m.ends_with("_path") {
             return send(Some(route_helpers()), m, route_args, None, true);
         }
@@ -962,15 +961,22 @@ fn classify_form_with_components(
     // record-derived pair when the routes actually name it, otherwise keep
     // the directory-derived pair (including for the empty helper set that
     // test harnesses without routes carry, where neither can be checked).
-    if let Some(name) = record_local_name(&model) {
+    //
+    // The record's CLASS when the analyzer typed it, else its local's
+    // name. Not only when the directory's pair is missing: users/show's
+    // `form_with model: @mod_note` posts to `mod_notes_path` in Rails,
+    // and the directory's `user_path` exists too.
+    // Then the analyzer's model for the view ivar (`@users` recorded as User where the binding's own type is a collection).
+    let typed_class = match model.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+        Some(crate::ty::Ty::Class { id, .. }) => Some(id.0.as_str().rsplit("::").next().unwrap_or_default().to_string()),
+        _ => None,
+    }
+    .or_else(|| record_local_name(&model).and_then(|name| ctx.ivar_models.get(&name).cloned()));
+    if let Some(name) = typed_class.clone().or_else(|| record_local_name(&model)) {
         let rec_singular = singularize(&snake_case(&name));
         let rec_plural = crate::naming::pluralize_snake(&rec_singular);
         let known = |n: &str| ctx.route_helper_names.contains(&format!("{n}_path"));
-        if rec_plural != plural_owned
-            && !known(&plural_owned)
-            && !known(&singularize(&plural_owned))
-            && (known(&rec_plural) || known(&rec_singular))
-        {
+        if rec_plural != plural_owned && (known(&rec_plural) || known(&rec_singular)) {
             plural_owned = rec_plural;
         }
     }
@@ -1017,7 +1023,10 @@ fn classify_form_with_components(
     // directory-derived and Rails-divergent (it renders only for
     // moderators, off-replay) — a pre-existing gap this pass leaves
     // as-was rather than turning into a compile stop.
-    let record_name: Option<String> = record_local_name(&model);
+    // The record's class when typed (`@author` holding a User), else its local's name.
+    let record_name: Option<String> = typed_class
+        .map(|class| singularize(&snake_case(&class)))
+        .or_else(|| record_local_name(&model));
     let slug_key = record_name.as_deref().unwrap_or(singular.as_str());
     let member_arg = if ctx.slug_models.contains(slug_key) {
         send(Some(model.clone()), "to_param", Vec::new(), None, false)
@@ -1556,6 +1565,8 @@ mod tests {
             lexxy: false,
             lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
+            formats: vec!["html".to_string()],
+            view_formats: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),
             partial_extras: Default::default(),
