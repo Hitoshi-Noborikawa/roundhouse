@@ -274,12 +274,23 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             .flat_map(|id| app.library_classes.iter().filter(move |c| &c.name == id))
             .flat_map(|c| c.includes.iter().map(|i| i.0.as_str().trim_start_matches("::").to_string()))
             .collect();
-        let instance_methods: HashSet<Symbol> = lineage
-            .iter()
-            .flat_map(|id| app.library_classes.iter().filter(move |c| &c.name == id))
-            .flat_map(|c| c.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.clone()))
-            .chain(included.iter().flat_map(|full| module_methods.get(full).into_iter().flatten().map(|m| m.name.clone())))
-            .collect();
+        // Not answered past a parent this program does not define: its methods are not known here.
+        let known_root = lineage.last().is_none_or(|top| {
+            app.library_classes.iter().filter(|c| &c.name == top).all(|c| {
+                c.parent.as_ref().is_none_or(|p| app.library_classes.iter().any(|o| &o.name == p) || app.models.iter().any(|m| &m.name == p))
+            })
+        });
+        // Not a private one: `method_defined?` answers public and protected methods only.
+        let instance_methods: Option<HashSet<Symbol>> = known_root.then(|| {
+            lineage
+                .iter()
+                .flat_map(|id| app.library_classes.iter().filter(move |c| &c.name == id))
+                .flat_map(|c| c.methods.iter())
+                .chain(included.iter().flat_map(|full| module_methods.get(full).into_iter().flatten()))
+                .filter(|m| m.receiver == MethodReceiver::Instance && m.visibility != MethodVisibility::Private)
+                .map(|m| m.name.clone())
+                .collect()
+        });
         let mut slot_constants: Vec<(Symbol, Expr)> = Vec::new();
         let mut counter = 0usize;
         let mut defined: HashSet<(Symbol, MethodReceiver)> = HashSet::default();
@@ -292,7 +303,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             if !macros.contains(method) || recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
                 continue;
             }
-            let mut run = Run { table: &table, constants: &constants, frozen: &frozen, cvar_readers: &cvar_readers, included: included.clone(), module_methods: &module_methods, extended: HashMap::default(), evaluated: Vec::new(), known: &known, scope: None, prefix: &prefix, counter, out: Vec::new(), replayed: HashSet::default(), class_attrs: HashMap::default(), unset_cattrs: HashMap::default(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::default(), owner: lc.name.0.clone(), sources, instance_methods: Some(&instance_methods) };
+            let mut run = Run { table: &table, constants: &constants, frozen: &frozen, cvar_readers: &cvar_readers, included: included.clone(), module_methods: &module_methods, extended: HashMap::default(), evaluated: Vec::new(), known: &known, scope: None, prefix: &prefix, counter, out: Vec::new(), replayed: HashSet::default(), class_attrs: HashMap::default(), unset_cattrs: HashMap::default(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::default(), owner: lc.name.0.clone(), sources, instance_methods: instance_methods.as_ref() };
             let result = if block.as_ref().is_some_and(|b| !matches!(&*b.node, ExprNode::Lambda { .. })) {
                 Err("it is passed a block other than a literal one".to_string())
             } else if redefined {
@@ -1555,7 +1566,8 @@ impl Run<'_> {
                     && let Some(Val::Lit(name)) = self.fold(arg, env)
                     && let ExprNode::Lit { value: Literal::Sym { value: name } } = &*name.node =>
             {
-                let defined = self.instance_methods?.contains(name) || self.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && &m.name == name);
+                let defined = self.instance_methods?.contains(name)
+                    || self.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && m.visibility != MethodVisibility::Private && &m.name == name);
                 if !defined && crate::emit::audit::OBJECT_METHODS.contains(&name.as_str()) {
                     return None;
                 }

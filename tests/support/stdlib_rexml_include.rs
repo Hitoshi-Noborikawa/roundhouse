@@ -55,16 +55,30 @@ pub const SVG_PAGE: &str = r##"class SvgPage
 end
 "##;
 
+/// Names REXML only through `include REXML`: the require is still written.
+pub const ONLY_INCLUDE: &str = r##"class OnlyInclude
+  include REXML
+
+  def self.build
+    doc = Document.new
+    doc.add_element("a")
+    doc.to_s
+  end
+end
+"##;
+
 pub const ASSERTIONS: &str = r##"want = "<?xml version='1.0'?><svg width='10' xmlns='http://www.w3.org/2000/svg'><!-- made here --><style type='text/css'><![CDATA[rect { fill: red }]]></style><rect x='1'>a &lt; b</rect></svg>"
 got = SvgDoc.render
 raise "render #{got.inspect}" unless got == want
 raise "parsed" unless SvgDoc.parsed_name == "1"
 raise "page #{SvgPage.render.inspect}" unless SvgPage.render == "<?xml version='1.0'?>\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.0//EN\" \"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd\">\n<svg width='10'>\n<rect x='1'>\nlabel\n</rect>\n</svg>"
 raise "compact #{SvgPage.compact.inspect}" unless SvgPage.compact == "<g>\n<text>a</text>\n</g>"
+raise "only include" unless OnlyInclude.build == "<a/>"
 puts "rexml passed"
 "##;
 
 #[allow(dead_code)]
 pub fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog().write("app/models/svg_doc.rb", SVG_DOC).write("app/models/svg_page.rb", SVG_PAGE)
+        .write("app/models/only_include.rb", ONLY_INCLUDE)
 }

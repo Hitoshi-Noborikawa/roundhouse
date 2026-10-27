@@ -1122,7 +1122,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("post_match", str_or_nil()),
         ("match?", int_or_nil()), ("skip", int_or_nil()), ("exist?", int_or_nil()),
         ("skip_until", int_or_nil()), ("scan_byte", int_or_nil()), ("peek_byte", int_or_nil()),
-        ("pos", Ty::Int), ("charpos", Ty::Int), ("pos=", Ty::Int), ("rest_size", Ty::Int),
+        // Not `charpos`: spinel's binding answers the byte offset, not CRuby's character one.
+        ("pos", Ty::Int), ("pos=", Ty::Int), ("rest_size", Ty::Int),
         ("eos?", Ty::Bool), ("matched?", Ty::Bool), ("rest?", Ty::Bool),
         ("peek", Ty::Str), ("rest", Ty::Str), ("string", Ty::Str),
         ("dup", scanner.clone()), ("clone", scanner.clone()), ("unscan", scanner.clone()),
@@ -1137,7 +1138,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     classes.entry(ClassId(Symbol::from("Zlib"))).or_default().is_module = true;
     register_stdlib_class(classes, "Zlib::GzipWriter", &[], &[
         ("write", Ty::Int), ("<<", gzip_writer.clone()), ("puts", Ty::Nil), ("print", Ty::Nil),
-        ("close", Ty::Untyped), ("finish", Ty::Untyped),
+        // Not `finish`: spinel's package has `close` only.
+        ("close", Ty::Untyped),
     ]);
     // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
     // in indexed app source (`time_limited_video_previewer`, web-push

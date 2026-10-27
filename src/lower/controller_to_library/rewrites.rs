@@ -54,7 +54,7 @@ pub(super) fn partial_view_call(
     locals: &[(Symbol, Expr)],
     module_name: Option<&str>,
     partials: &super::PartialMap,
-    request: Option<(&str, &str)>,
+    request: Option<&str>,
     span: Span,
 ) -> Option<Expr> {
     partial_view_call_with_record(partial, locals, None, module_name, partials, request, span)
@@ -75,7 +75,7 @@ pub(super) fn partial_view_call_with_record(
     record_override: Option<&Expr>,
     module_name: Option<&str>,
     partials: &super::PartialMap,
-    request: Option<(&str, &str)>,
+    request: Option<&str>,
     span: Span,
 ) -> Option<Expr> {
     let (module_dir, base_name) = match partial.rsplit_once('/') {
@@ -107,9 +107,17 @@ pub(super) fn partial_view_call_with_record(
     }
     // An action's render passes its own action, controller and path parameters, as a view's call passes them to a partial.
     let request_value = |name: &str| -> Option<Expr> {
-        let (action, controller) = request?;
+        let controller = request?;
+        // Not over a strict partial's own declared default (`action_name: "fallback"`).
+        if contract.declared.iter().any(|d| d == name) {
+            return None;
+        }
         match name {
-            "action_name" => Some(str_lit(span, action)),
+            // Not the enclosing method's name: a private helper that renders is not the action.
+            "action_name" => Some(Expr::new(
+                span,
+                ExprNode::Send { recv: None, method: Symbol::from("action_name"), args: vec![], block: None, parenthesized: false },
+            )),
             "controller_name" => Some(str_lit(span, controller)),
             "path_parameters" => Some(ivar("path_parameters", span)),
             _ => None,
@@ -208,7 +216,7 @@ pub(super) fn rewrite_render_to_views(
                 }
                 if let Some(pname) = partial_name {
                     let view_call =
-                        partial_view_call(&pname, &locals_entries, module_name, partials, Some((&current_action, &controller_name)), e.span)?;
+                        partial_view_call(&pname, &locals_entries, module_name, partials, Some(&controller_name), e.span)?;
                     if to_string {
                         return Some(view_call);
                     }
@@ -282,7 +290,7 @@ pub(super) fn rewrite_render_to_views(
                         }
                     }
                     let view_call =
-                        partial_view_call(tname, &locals_entries, module_name, partials, Some((&current_action, &controller_name)), e.span)?;
+                        partial_view_call(tname, &locals_entries, module_name, partials, Some(&controller_name), e.span)?;
                     let mut new_args = vec![view_call];
                     if !rest.is_empty() {
                         new_args.push(Expr::new(e.span, ExprNode::Hash { entries: rest, kwargs: true }));

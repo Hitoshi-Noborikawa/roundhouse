@@ -3839,7 +3839,7 @@ fn try_ingest_method_ref(
 ///   __for = coll.to_a; __i = 0
 ///   while __i < __for.length; x = __for[__i]; __i += 1; body; end
 ///
-/// A range literal counts with `succ` instead of building the Array:
+/// A range literal from an Integer counts with `succ` instead of building the Array:
 ///
 ///   __i = a; __e = b
 ///   while __i <= __e; x = __i; __i = __i.succ; body; end
@@ -3884,7 +3884,8 @@ fn ingest_for(f: &ruby_prism::ForNode<'_>, span: Span, file: &str) -> IngestResu
     let mut exprs: Vec<Expr> = Vec::new();
     // The range's value, from its ends evaluated once.
     let mut counted_range: Option<Expr> = None;
-    let (cond, mut step) = match range.filter(|r| r.left().is_some()) {
+    // Not a String or other range: `succ` and `<=` count an Integer range only; the rest go through `to_a`, which is `Range#each`.
+    let (cond, mut step) = match range.filter(|r| r.left().is_some_and(|l| l.as_integer_node().is_some())) {
         Some(r) => {
             let begin_local = local("__for_begin");
             exprs.push(assign(local_target(&begin_local), ingest_expr(&r.left().unwrap(), file)?));
