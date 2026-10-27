@@ -222,8 +222,9 @@ PG_DB_INPUTS = {
     "runtime/spinel/active_support_time_parsing.rbs",
 }
 # The Db contract suite (tests/support/db_contract.rs): the Spinel lanes
-# each of its files feeds. cruby_prelude.rb feeds only the CRuby lane,
-# which the unit job runs.
+# each of its files feeds, and the runtime files its LANES copy beside a
+# shim that nothing above routes to them. cruby_prelude.rb feeds only the
+# CRuby lane, which the unit job runs.
 DB_CONTRACT_INPUTS = {
     "tests/db_contract/support.rb": ("spinel_db_contract", "spinel_pg_db"),
     "tests/db_contract/contract_cases.rb": ("spinel_db_contract", "spinel_pg_db"),
@@ -234,6 +235,10 @@ DB_CONTRACT_INPUTS = {
     "tests/db_contract/db_pg_lane.rb": ("spinel_pg_db",),
     "tests/support/db_contract.rs": ("spinel_db_contract", "spinel_pg_db"),
     "tests/support/pg_test_url.rs": ("spinel_pg_db",),
+    "runtime/spinel/active_support_interval.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "runtime/spinel/active_support_duration.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "runtime/spinel/active_support_interval.rbs": ("spinel_pg_db",),
+    "runtime/spinel/active_support_duration.rbs": ("spinel_pg_db",),
 }
 GENERATED_COLUMNS_SPINEL_INPUTS = {
     "src/emit/ruby/library.rs",
