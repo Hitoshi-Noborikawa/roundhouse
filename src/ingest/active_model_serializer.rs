@@ -586,9 +586,14 @@ impl OtherUses<'_> {
     /// the innermost first, then at the top level. A name found nowhere
     /// there (one an ancestor's constants would answer) counts as every
     /// selected class it's a suffix of, so none is lowered while it may
-    /// still be used.
-    fn named(&self, path: &[String]) -> Vec<ClassId> {
+    /// still be used. A rooted path (`::ArticleSerializer`) names only the
+    /// top-level class.
+    fn named(&self, path: &[String], rooted: bool) -> Vec<ClassId> {
         let written = path.join("::");
+        if rooted {
+            let id = ClassId(Symbol::from(written.as_str()));
+            return if self.selected.contains(&id) { vec![id] } else { Vec::new() };
+        }
         let candidates = self.nesting.iter().rev().map(|scope| format!("{scope}::{written}")).chain([written.clone()]);
         for full in candidates {
             if self.known.contains(&full) {
@@ -604,7 +609,7 @@ impl OtherUses<'_> {
 
     fn note(&mut self, node: &ruby_prism::Node<'_>) -> bool {
         let Some(path) = super::util::constant_path_of(node) else { return false };
-        let ids = self.named(&path);
+        let ids = self.named(&path, is_rooted(node));
         if ids.is_empty() {
             return false;
         }
@@ -619,9 +624,10 @@ impl OtherUses<'_> {
     /// class's full name, so a short name that resolves through the
     /// nesting (`ArticleSerializer` inside `module Api`) stays with the
     /// gem's class and is a use like any other.
-    fn rewritten(&self, path: &[String]) -> bool {
+    fn rewritten(&self, node: &ruby_prism::Node<'_>) -> bool {
+        let Some(path) = super::util::constant_path_of(node) else { return false };
         let written = path.join("::");
-        matches!(self.named(path).as_slice(), [id] if id.0.as_str() == written)
+        matches!(self.named(&path, is_rooted(node)).as_slice(), [id] if id.0.as_str() == written)
     }
 
     /// Enters a class or module written as `name` from the current nesting.
@@ -675,7 +681,7 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
                                 let Some(assoc) = el.as_assoc_node() else { continue };
                                 let key = super::util::symbol_value(&assoc.key());
                                 if matches!(key.as_deref(), Some("serializer" | "each_serializer"))
-                                    && super::util::constant_path_of(&assoc.value()).is_some_and(|p| self.rewritten(&p))
+                                    && self.rewritten(&assoc.value())
                                 {
                                     continue;
                                 }
@@ -695,6 +701,21 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
     fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
         if !self.note(&node.as_node()) {
             ruby_prism::visit_constant_path_node(self, node);
+        }
+    }
+}
+
+/// Whether a constant path is written from the top level (`::A::B`): its
+/// leftmost segment has no parent.
+fn is_rooted(node: &ruby_prism::Node<'_>) -> bool {
+    let Some(mut path) = node.as_constant_path_node() else { return false };
+    loop {
+        match path.parent() {
+            None => return true,
+            Some(parent) => match parent.as_constant_path_node() {
+                Some(p) => path = p,
+                None => return false,
+            },
         }
     }
 }

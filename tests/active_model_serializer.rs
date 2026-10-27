@@ -239,3 +239,27 @@ fn a_render_naming_a_serializer_by_a_shorter_name_refuses_it() {
     let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "Api::ArticleSerializer").expect("class");
     assert!(class.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "lowered");
 }
+
+/// Review 4383500859: a rooted `::ArticleSerializer` names the top-level
+/// class, even inside `module Api` beside a selected
+/// `Api::ArticleSerializer`. The render through it is the rewrite's, and
+/// isn't a use of `Api::ArticleSerializer`: both are lowered.
+#[test]
+fn a_rooted_serializer_name_resolves_at_the_top_level() {
+    let api = "module Api\n  class ArticleSerializer < ActiveModel::Serializer\n    attributes :id\n  end\nend\n";
+    let controller = "module Api\n  class ArticlesController < ApplicationController\n    def show\n      render json: Article.find(params[:id]), serializer: ::ArticleSerializer\n    end\n  end\nend\n";
+    let mut files = tree(SERIALIZER, controller);
+    files.insert(PathBuf::from("app/serializers/api/article_serializer.rb"), api.as_bytes().to_vec());
+    survey::activate();
+    let result = ingest_app_from_tree(files);
+    let gaps = survey::drain();
+    let app = result.expect("survey ingest recovers");
+    assert!(
+        !gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. } if message.contains("other than through `render json:`"))),
+        "{gaps:?}"
+    );
+    for name in ["ArticleSerializer", "Api::ArticleSerializer"] {
+        let class = app.library_classes.iter().find(|c| c.name.0.as_str() == name).expect(name);
+        assert!(class.methods.iter().any(|m| m.name.as_str() == "as_json_str"), "{name} isn't lowered: {gaps:?}");
+    }
+}
