@@ -6858,6 +6858,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
         | "StringScanner" | "Zlib::GzipWriter"
+        // ruby-vips on the ruby family, spinel-ruby-vips on spinel.
+        | "Vips::Image"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
@@ -10148,7 +10150,7 @@ fn drop_facades_the_program_defines(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 29] = [
+const BUNDLED: [(&str, &str); 30] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -10174,6 +10176,9 @@ const BUNDLED: [(&str, &str); 29] = [
     ("Set", "set"),
     ("StringIO", "stringio"),
     ("StringScanner", "strscan"),
+    // `Vips::Image.new_from_buffer`: the ruby-vips gem on CRuby/JRuby, the
+    // spinel-ruby-vips package on spinel; an app requires it by hand.
+    ("Vips", "vips"),
     ("URI", "uri"),
     // `Net::HTTP` — a REAL client on both lanes, so unlike IPAddr there
     // is nothing for roundhouse to port: CRuby resolves this to its own
@@ -10742,7 +10747,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     // package is the spinel-ruby-vips spin package; the manifest gains
     // it below, in the same git form bcrypt uses and for the same
     // reason (matz/spin-index#7 is the registration).
-    let needs_vips = apply_image_processor_wiring(&mut files)?;
+    // An app that draws with vips itself (lobsters' StoryImage) needs the package too.
+    let needs_vips = apply_image_processor_wiring(&mut files)?
+        || files.iter().any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, "Vips"));
 
     write_bundled_requires(&mut files);
     // 6. Package manifest + compile root.
