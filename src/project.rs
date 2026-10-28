@@ -4485,8 +4485,9 @@ fn apply_postgresql_tree(files: &mut Vec<(String, String)>, app: &App) -> Result
 # created here and dropped when its tests are done: after Minitest's\n\
 # run for a file that autoruns it (whose at_exit would otherwise come\n\
 # after this one), else at exit. search_path rides PGOPTIONS, so\n\
-# every connection of the pool resolves the tables to it.\n\
-_test_schema = \"rh_test_\" + File.basename($0, \".rb\").gsub(/[^a-z0-9_]/, \"_\") + \"_\" + Process.pid.to_s\n\
+# every connection of the pool resolves the tables to it. The pid comes\n\
+# first, so cutting a long file name to PostgreSQL's 63 bytes keeps it.\n\
+_test_schema = (\"rh_test_\" + Process.pid.to_s + \"_\" + File.basename($0, \".rb\").gsub(/[^a-z0-9_]/, \"_\"))[0, 63]\n\
 ENV[\"PGOPTIONS\"] = \"-c search_path=\" + _test_schema\n\
 Db.configure(ENV.fetch(\"DATABASE_URL\", \"\"))\n\
 Db.exec(\"DROP SCHEMA IF EXISTS \" + _test_schema + \" CASCADE\")\n\

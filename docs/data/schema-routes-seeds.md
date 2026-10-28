@@ -312,7 +312,11 @@ schema DDL, the lowered queries (boolean literals, truncation) and the
 tree are PostgreSQL's: `runtime/spinel/db_pg.rb` over the pg gem as
 the emitted tree's Db, `gem "pg"`, and the database `DATABASE_URL` names, at
 boot and in the emitted tests (`project::apply_postgresql_tree`). Every
-other target, and every other adapter, keeps SQLite.
+other target, and every other adapter, keeps SQLite. The runtime's
+database tasks (`db:schema:load`, `prepare_all`, `migrate`) and
+`data_source_exists?` / `column_exists?` still ask SQLite's catalog
+(`sqlite_master`, `PRAGMA`, `INSERT OR IGNORE`), so a PostgreSQL app
+that reaches them fails at run time.
 
 The enum `database::DatabaseAdapter` names a configuration's adapter;
 it is not the analyzer's [`DatabaseAdapter` trait](adapter.md).

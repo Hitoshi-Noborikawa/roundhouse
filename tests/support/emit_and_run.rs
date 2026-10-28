@@ -141,7 +141,7 @@ impl Overlay {
     /// `run_test` with more environment for the process, such as the
     /// `DATABASE_URL` of an app whose database is PostgreSQL.
     pub fn run_test_env(self, test_path: &str, env: &[(&str, &str)]) -> Run {
-        self.run_test_with_env(&[], test_path, env)
+        self.run_test_with_env(&["--enable-frozen-string-literal"], test_path, env)
     }
 
     fn run_test_with(self, flags: &[&str], test_path: &str) -> Run {
