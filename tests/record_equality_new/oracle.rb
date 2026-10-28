@@ -24,3 +24,17 @@ check("a new record built with a row's id, both ways", [l1 == n, n == l1, l1.has
 s.destroy
 check("a destroyed record and a load of its row", [s == l1, [s, l1].uniq.size], [true, 1])
 puts "record equality passed"
+
+# A string primary key: an unsaved record's id is nil in Rails ("" here).
+ActiveRecord::Schema.define { create_table(:posts, id: :string) { |t| t.string :title } }
+class Post < ActiveRecord::Base
+  before_create { self.id ||= SecureRandom.uuid }
+end
+a = Post.new(title: "a")
+b = Post.new(title: "b")
+check("two new uuid records", [a.id, a == b, a.eql?(b), [a, b].uniq.size], [nil, false, false, 2])
+p = Post.create!(title: "p")
+l1 = Post.find(p.id)
+l2 = Post.find(p.id)
+check("two loads of one uuid row", [l1 == l2, [l1, l2].uniq.size, l1 == p], [true, 1, true])
+puts "uuid record equality passed"

@@ -36,3 +36,31 @@ fn two_new_records_are_not_equal_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("record equality passed"), "{}", run.stdout);
 }
+
+/// A string primary key's unsaved id is `""`, not 0 (CodeRabbit on
+/// #1479): two new records there aren't equal either, and a load of a
+/// saved one still is.
+const UUID_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+a = Post.new(title: "a")
+b = Post.new(title: "b")
+check("two new uuid records", [a.id, a == b, a.eql?(b), [a, b].uniq.size], ["", false, false, 2])
+p = Post.create!(title: "p")
+l1 = Post.find(p.id)
+l2 = Post.find(p.id)
+check("two loads of one uuid row", [l1 == l2, [l1, l2].uniq.size, l1 == p], [true, 1, true])
+puts "uuid record equality passed"
+"##;
+
+#[test]
+fn two_new_uuid_records_are_not_equal_on_ruby() {
+    // The fixture's controller names a filter nothing defines, which isn't
+    // what this test is about (as in `belongs_to_writer_clears_cache`).
+    let run = emit_and_run::tiny_blog_uuid()
+        .edit("app/controllers/posts_controller.rb", "  before_action :authenticate_user\n", "")
+        .run_ruby(UUID_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("uuid record equality passed"), "{}", run.stdout);
+}

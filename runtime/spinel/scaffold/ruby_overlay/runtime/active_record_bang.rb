@@ -26,7 +26,8 @@ module ActiveRecord
     # (roundhouse#1478), so that guard let any two new records of a class
     # be equal and hash alike: `[a, b].uniq` kept one. A record has a key
     # when it was saved (`persisted?`, or `destroyed?`: a destroyed record
-    # keeps its id) or was given an id that isn't 0. Both sides need one,
+    # keeps its id) or was given an id that isn't the unsaved one: 0, or
+    # `""` for a string primary key such as a uuid. Both sides need one,
     # so `==` stays symmetric, as Rails' is for a new record built with an
     # id (`Article.new(id: 1) == Article.find(1)`).
     def ==(other)
@@ -40,7 +41,7 @@ module ActiveRecord
     end
 
     def _equality_key?
-      persisted? || destroyed? || id != 0
+      persisted? || destroyed? || !(id.nil? || id == 0 || id == "")
     end
   end
 end
