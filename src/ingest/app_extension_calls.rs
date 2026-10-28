@@ -40,7 +40,16 @@ pub(super) fn mark(app: &mut App) {
             }
         }
     }
+    // Each app class or module's class-side methods, every opening's.
+    let mut singletons: std::collections::BTreeMap<String, HashSet<String>> = Default::default();
+    for lc in app.library_classes.iter().filter(|lc| lc.origin.is_none()) {
+        singletons
+            .entry(lc.name.0.as_str().to_string())
+            .or_default()
+            .extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Class).map(|m| m.name.as_str().to_string()));
+    }
     for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
+        let owner = lc.name.0.as_str().to_string();
         let own: HashSet<String> = lc
             .methods
             .iter()
@@ -56,8 +65,26 @@ pub(super) fn mark(app: &mut App) {
             // A call on what one of its own readers answers (`self.logger.progname
             // = "Gem"` after `self.logger = ::Logger.new(nil)`) runs there too.
             let through_own_reader = recv.as_ref().is_some_and(|r| reads_through_own(r, &own));
-            if (own_call || through_own_reader) && !hook && block.is_none() && !expr.span.is_synthetic() {
+            // A call on another of the app's classes, to a class method
+            // the app defines there (`Format.register_lazy(:json, …)` in
+            // `module ActKit`, after its `require "act-kit/format"`):
+            // Ruby runs it as the body loads.
+            // The receiver is written back as the constant it resolved
+            // to: the emitted body loads that constant's file, and the
+            // app's top-level `Format` is not the gem's `Kitgem::Format`.
+            let on_app_class = recv.as_ref().and_then(|r| match &*r.node {
+                ExprNode::Const { path } => resolve_from(&owner, path, &|name| singletons.contains_key(name))
+                    .filter(|name| singletons[name].contains(method.as_str())),
+                _ => None,
+            });
+            let replays = own_call || through_own_reader || on_app_class.is_some();
+            if replays && !hook && block.is_none() && !expr.span.is_synthetic() {
                 expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+                if let (Some(name), ExprNode::Send { recv: Some(r), .. }) = (on_app_class, &mut *expr.node) {
+                    if let ExprNode::Const { path } = &mut *r.node {
+                        *path = name.split("::").map(crate::ident::Symbol::from).collect();
+                    }
+                }
             }
         }
     }
@@ -107,6 +134,29 @@ pub(super) fn mark(app: &mut App) {
             }
         }
     }
+}
+
+/// The constant a path written in `owner`'s body names, as Ruby's
+/// lexical lookup finds it: under `owner`, then under each namespace
+/// enclosing it, then at the top level (`::A` only there). `None` when
+/// no candidate is one `exists` knows.
+fn resolve_from(owner: &str, path: &[crate::ident::Symbol], exists: &dyn Fn(&str) -> bool) -> Option<String> {
+    let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
+    let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+    if !rooted {
+        let mut scope = owner;
+        loop {
+            let candidate = format!("{scope}::{written}");
+            if exists(&candidate) {
+                return Some(candidate);
+            }
+            match scope.rfind("::") {
+                Some(at) => scope = &scope[..at],
+                None => break,
+            }
+        }
+    }
+    exists(&written).then_some(written)
 }
 
 /// Whether `recv` is a call chain whose innermost call is one of the

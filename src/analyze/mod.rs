@@ -1726,6 +1726,43 @@ impl Analyzer {
                 TypingMode::ViewsAndTests,
             )
         });
+        // Not done at the restamp: lobsters' `upvoter_score` kept the `String` its view site saw before `comment_score_for_user` widened to `Integer | String`.
+        for _ in 0..FIXPOINT_CAP {
+            let before = self.inferred_params.clone();
+            self.unify_params_from_call_sites(app, UnifyScope::WithViews);
+            self.overlay_test_params(app);
+            if self.inferred_params == before {
+                break;
+            }
+            crate::timings::phase("typing passes (after view param restamp)", || {
+                // Not one production pass: a helper return the new params move is read by production callers typed before its harvest.
+                for _ in 0..FIXPOINT_CAP {
+                    let hints = self.capture_dirty_hints();
+                    self.run_typing_passes(
+                        app,
+                        &dynamic_render_ivars,
+                        &existing_view_names,
+                        &module_methods,
+                        &module_includes,
+                        &parent_link_by_name,
+                        TypingMode::Production { dirty: None },
+                    );
+                    self.harvest_returns_to_registry(app, true);
+                    if self.inference_matches(&hints.sig) {
+                        break;
+                    }
+                }
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    TypingMode::ViewsAndTests,
+                )
+            });
+        }
         // Effects are a function of the converged typed trees, not of
         // the fixpoint. Collecting inside every typing round walked
         // the same bodies two or three times per round for no harvest
@@ -2943,6 +2980,8 @@ impl Analyzer {
         // `application` per Rails convention. `LayoutDecl::None`
         // (an explicit `layout false`) suppresses the contribution.
         let mut layout_ivars_by_view: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::default();
+        // Per layout: the rendering actions that feed it, and how many of them assign each ivar.
+        let mut layout_presence: HashMap<Symbol, (usize, HashMap<Symbol, usize>)> = HashMap::default();
 
         // Each controller's controller-wide ivar environment, kept so
         // the CONCERN MODULES it includes can be typed against it
@@ -3512,6 +3551,13 @@ impl Analyzer {
                         .entry(layout_name.clone())
                         .or_default()
                         .insert(ctrl_name.clone());
+                    if view_name_for_action(&ctrl_name, action).is_some() {
+                        let (rendering, assigning) = layout_presence.entry(layout_name.clone()).or_default();
+                        *rendering += 1;
+                        for k in ivars.keys() {
+                            *assigning.entry(k.clone()).or_default() += 1;
+                        }
+                    }
                     let layout_map = layout_ivars_by_view
                         .entry(layout_name.clone())
                         .or_default();
@@ -3681,6 +3727,25 @@ impl Analyzer {
                             .entry(view_name.clone())
                             .or_default()
                             .insert(ctrl_name.clone());
+                        // Not left out of the layout: the inherited page renders through the child's layout as its own actions do.
+                        if let Some(layout_name) = &effective_layout {
+                            let (rendering, assigning) = layout_presence.entry(layout_name.clone()).or_default();
+                            *rendering += 1;
+                            for k in ivars.keys() {
+                                *assigning.entry(k.clone()).or_default() += 1;
+                            }
+                            let layout_map = layout_ivars_by_view.entry(layout_name.clone()).or_default();
+                            for (k, v) in &ivars {
+                                let merged = match layout_map.remove(k) {
+                                    Some(prev) if prev.is_unknown() => v.clone(),
+                                    Some(prev) if v.is_unknown() => prev,
+                                    Some(prev) if prev == *v => prev,
+                                    Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                                    None => v.clone(),
+                                };
+                                layout_map.insert(k.clone(), merged);
+                            }
+                        }
                         let entry = action_ivars_by_view.entry(view_name).or_default();
                         for (k, v) in &ivars {
                             let noise = |t: &Ty| t.is_unknown();
@@ -4190,6 +4255,16 @@ impl Analyzer {
             }
         }
         drop(_typing_library);
+
+        // Not the assigning actions' types alone: only UsersController sets lobsters' `@title_class`, and every other page rendered its nil as a `Symbol` (`class="x"`).
+        for (layout, (rendering, assigning)) in &layout_presence {
+            let Some(map) = layout_ivars_by_view.get_mut(layout) else { continue };
+            for (k, ty) in map.iter_mut() {
+                if assigning.get(k).copied().unwrap_or(0) < *rendering && !ty.is_unknown() {
+                    *ty = crate::analyze::body::union_of(ty.clone(), Ty::Nil);
+                }
+            }
+        }
 
         // Hand the channel to the views half. Every production pass
         // refreshes it, so the pass that stamps templates reads the
@@ -8576,6 +8651,12 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
     let mut tys: Vec<Ty> = Vec::new();
     let mut saw_return = false;
     collect_return_types(body, &mut tys, &mut saw_return);
+    // Not the known arms alone: parslet's `Atoms::Base#apply` returns an
+    // unknown `result` beside `context.err_at(...)`, and harvesting only
+    // the latter typed every parse result as a `Parslet::Cause`.
+    if returns_an_unknown(body) {
+        return Some(crate::analyze::body::unknown());
+    }
     // Tail (implicit return). Drop `Bottom` so an all-diverging tail
     // doesn't poison the union; keep everything else.
     if let Some(t) = &body.ty {
@@ -8607,6 +8688,29 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
         return body.ty.clone();
     }
     Some(crate::analyze::body::union_many(tys))
+}
+
+fn returns_an_unknown(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Return { value } => matches!(value.ty, Some(Ty::Var { .. })) || returns_an_unknown(value),
+        ExprNode::Lambda { .. } => false,
+        ExprNode::Send { recv, args, block, method, .. } => {
+            recv.as_ref().is_some_and(returns_an_unknown)
+                || args.iter().any(returns_an_unknown)
+                || (!matches!(method.as_str(), "lambda" | "define_method")
+                    && block.as_ref().is_some_and(|b| matches!(&*b.node, ExprNode::Lambda { body, .. } if returns_an_unknown(body))))
+        }
+        ExprNode::Apply { fun, args, block } => {
+            returns_an_unknown(fun)
+                || args.iter().any(returns_an_unknown)
+                || block.as_ref().is_some_and(|b| matches!(&*b.node, ExprNode::Lambda { body, .. } if returns_an_unknown(body)))
+        }
+        _ => {
+            let mut found = false;
+            expr.node.for_each_child(&mut |c| found |= returns_an_unknown(c));
+            found
+        }
+    }
 }
 
 /// Collect the value type of every `return X` reachable from `expr`
@@ -8832,16 +8936,25 @@ pub(crate) fn extract_ivar_assignments_in(
     // write that comes before the `{}` seed (or before the class
     // instance that owns `[]=`) gives the same slot as one after it
     // (#617).
-    let mut index_writes: std::collections::BTreeMap<Symbol, Ty> = std::collections::BTreeMap::new();
-    for (name, value) in walk.index_writes {
+    let mut index_writes: std::collections::BTreeMap<Symbol, (Option<Ty>, Ty)> = std::collections::BTreeMap::new();
+    for (name, key, value) in walk.index_writes {
+        let key = key.filter(|k| !matches!(k, Ty::Var { .. } | Ty::Untyped | Ty::Bottom));
         let joined = match index_writes.remove(&name) {
-            Some(prev) => crate::analyze::body::union_of(prev, value),
-            None => value,
+            Some((prev_key, prev)) => (
+                // Not dropped for one unknown key: `@h[:runs] = 1; @h[name] = 2` still writes the Symbol `:runs`.
+                match (prev_key, key) {
+                    (Some(a), Some(b)) => Some(crate::analyze::body::union_of(a, b)),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                },
+                crate::analyze::body::union_of(prev, value),
+            ),
+            None => (key, value),
         };
         index_writes.insert(name, joined);
     }
-    for (name, value) in index_writes {
-        widen_hash_ivar_value(out, &name, value);
+    for (name, (key, value)) in index_writes {
+        widen_hash_ivar_value(out, &name, key, value);
         walk.touched.insert(name);
     }
     // The size bound applies once to each slot the walk wrote, after
@@ -8860,8 +8973,8 @@ pub(crate) fn extract_ivar_assignments_in(
 struct IvarWalk {
     /// Ivars the walk assigned, bounded once at the end.
     touched: BTreeSet<Symbol>,
-    /// `@ivar[k] = v` value types, joined into their slots at the end.
-    index_writes: Vec<(Symbol, Ty)>,
+    /// `@ivar[k] = v` key and value types, joined into their slots at the end.
+    index_writes: Vec<(Symbol, Option<Ty>, Ty)>,
 }
 
 fn walk_ivar_assignments(
@@ -8931,7 +9044,7 @@ fn walk_ivar_assignments(
         | ExprNode::OpAssign { target: LValue::Index { recv, index }, value, .. } => {
             if let ExprNode::Ivar { name } = &*recv.node {
                 if let Some(v_ty) = &value.ty {
-                    walk.index_writes.push((name.clone(), v_ty.clone()));
+                    walk.index_writes.push((name.clone(), index.ty.clone(), v_ty.clone()));
                 }
             }
             walk_ivar_assignments(recv, out, env, walk);
@@ -8949,7 +9062,7 @@ fn walk_ivar_assignments(
         {
             if let ExprNode::Ivar { name } = &*recv.node {
                 if let Some(v_ty) = &args[1].ty {
-                    walk.index_writes.push((name.clone(), v_ty.clone()));
+                    walk.index_writes.push((name.clone(), args[0].ty.clone(), v_ty.clone()));
                 }
             }
             walk_ivar_assignments(recv, out, env, walk);
@@ -9068,11 +9181,11 @@ fn walk_ivar_assignments(
 /// Foo.new`), is left alone: that class's own `[]=` runs, and the
 /// widening exists to grow empty-Hash-literal types, not to retype
 /// class instances.
-fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, incoming: Ty) {
+fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, written_key: Option<Ty>, incoming: Ty) {
+    // Not `Str` whatever the key: `@tags = {}; @tags[:lines] = n` typed `Hash[String, _]` and the emit rewrote `:lines` to `"lines"`.
+    let fallback = || std::sync::Arc::new(written_key.clone().unwrap_or(Ty::Str));
     let Some(existing) = out.get(name) else {
-        // No prior entry — seed a fresh Hash[Str, incoming]. Matches
-        // the Crystal collector's "fresh entry" branch.
-        out.insert(name.clone(), Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(incoming) });
+        out.insert(name.clone(), Ty::Hash { key: fallback(), value: std::sync::Arc::new(incoming) });
         return;
     };
     let arms: &[Ty] = match existing {
@@ -9080,9 +9193,12 @@ fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, incoming:
         other => std::slice::from_ref(other),
     };
     let key = match arms.iter().find(|v| matches!(v, Ty::Hash { .. })) {
-        Some(Ty::Hash { key, .. }) if !matches!(**key, Ty::Var { .. }) => key.clone(),
-        Some(_) => std::sync::Arc::new(Ty::Str),
-        None if arms.iter().all(|v| matches!(v, Ty::Nil | Ty::Var { .. })) => std::sync::Arc::new(Ty::Str),
+        Some(Ty::Hash { key, .. }) if !matches!(**key, Ty::Var { .. }) => match &written_key {
+            Some(w) => std::sync::Arc::new(crate::analyze::body::union_of((**key).clone(), w.clone())),
+            None => key.clone(),
+        },
+        Some(_) => fallback(),
+        None if arms.iter().all(|v| matches!(v, Ty::Nil | Ty::Var { .. })) => fallback(),
         None => return,
     };
     let write = Ty::Hash { key, value: std::sync::Arc::new(incoming) };

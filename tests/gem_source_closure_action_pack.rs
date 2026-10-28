@@ -75,7 +75,6 @@ fn app() -> emit_and_run::Overlay {
 }
 
 #[test]
-#[ignore = "fork spec: gem closures"]
 fn a_gem_sources_require_of_action_pack_is_a_framework_feature() {
     let (emitted, errors) = app().emit(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:#?}");

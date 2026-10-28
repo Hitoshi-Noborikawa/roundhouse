@@ -1250,7 +1250,16 @@ fn every_runtime_method_body_concretely_typed() {
     // arbitrary value to the writer (+1 in connection.rb), and
     // UnknownAttributeError preserves the arbitrary record (+2 in
     // errors.rb). Existing methods' counts are unchanged.
-    const CEILING: usize = 893;
+    // MEASURED 903 on 2026-10-29 (on 890): `ActiveSupport.pluck` is AS
+    // `Enumerable#pluck` for a receiver the analyzer could not type (lobsters'
+    // `value.pluck(:term)` over a parslet node), so the list, its elements and
+    // the Relation and model-class tests read it untyped (+13 in
+    // active_support_ext.rb, 890 -> 903).
+    // MEASURED 906 on 2026-10-29 after merging main 00e6fc23: the same
+    // analyzer and counter measure 903 on main and 906 with assignment.
+    // Base#assign_attributes adds 1 site and UnknownAttributeError#initialize
+    // adds 2. Every other method's count is unchanged.
+    const CEILING: usize = 906;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

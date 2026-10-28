@@ -3315,6 +3315,18 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         };
         let inherited_instance = inherited(false);
         let inherited_class = inherited(true);
+        if is_helper_module {
+            // Not flipped too: `module_function`'s private instance copy would become a second, private `def self.x`.
+            let class_side: Vec<(Symbol, crate::span::Span)> = lc
+                .methods
+                .iter()
+                .filter(|m| m.receiver == MethodReceiver::Class)
+                .map(|m| (m.name.clone(), m.body.span))
+                .collect();
+            lc.methods.retain(|m| {
+                m.receiver == MethodReceiver::Class || !class_side.iter().any(|(n, span)| *n == m.name && *span == m.body.span)
+            });
+        }
         for m in &mut lc.methods {
             // A helper module's own methods become module-functions so the
             // rewritten `Module.method` call has a real target — Rails mixed
@@ -8086,6 +8098,13 @@ fn emit_library_class_decl_inner(
             .map(|(_, a)| a.clone())
             .or_else(|| require_path_for_body_const(path, app, classes, name))?;
         if !load_time && !load_time_bodies && anchor.starts_with("app/models/") {
+            return None;
+        }
+        // A view never requires the aggregator that loads it: views load
+        // only through app/views.rb, so the require would come while that
+        // file is still loading, a circular require that loads nothing
+        // and warns under $VERBOSE.
+        if anchor == "app/views" && self_anchor.starts_with("app/views/") {
             return None;
         }
         (anchor != self_anchor).then(|| relpath(&out_dir, &anchor))

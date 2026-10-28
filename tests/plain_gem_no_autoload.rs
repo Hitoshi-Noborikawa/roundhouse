@@ -92,13 +92,11 @@ fn run(eager: bool) {
 }
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_plain_gems_namespace_reopen_does_not_load_the_namespace_file() {
     run(false);
 }
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn eager_loading_a_plain_gem_keeps_its_require_order() {
     run(true);
 }

@@ -1161,17 +1161,16 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
-/// True when the app schema or emitted roots mention a date-only value.
-/// Shared by the unsupported-target gate and Spinel's conditional Date
-/// runtime load (matz/spinel#7334: defining `Date#strftime` currently
-/// breaks poly `Time | Date` dispatch for `Time#strftime`).
+/// True when the app schema or emitted roots mention a date-only value
+/// (or `DateTime`). Shared by the unsupported-target gate and Spinel's
+/// conditional load of its `date` package.
 fn app_uses_date(app: &App) -> bool {
     fn expr_has_date(e: &crate::expr::Expr) -> bool {
         if e.ty.as_ref().is_some_and(crate::ty::Ty::contains_date)
             || matches!(&*e.node, crate::expr::ExprNode::Cast { target_ty, .. } if target_ty.contains_date())
             || matches!(&*e.node, crate::expr::ExprNode::Const { path }
                 if (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty()))
-                    && path.last().is_some_and(|name| name.as_str() == "Date"))
+                    && path.last().is_some_and(|name| matches!(name.as_str(), "Date" | "DateTime")))
         {
             return true;
         }
@@ -1244,20 +1243,20 @@ fn app_uses_date(app: &App) -> bool {
 }
 
 /// Insert Date-package requires after `active_record_serialization` in
-/// `boot.rb`. Spinel only — the program-defined `Date` class and the
-/// date-column JSON reopen belong on that target (matz/spinel#7334).
+/// `boot.rb`. Spinel only — Spinel's `date` package and the date-column
+/// JSON reopen belong on that target.
 fn inject_date_package_into_boot(boot: &mut String) -> Result<(), String> {
     let anchor = "require_relative \"runtime/active_record_serialization\"\n";
     // Prefer concat! over one escaped multiline string: the CI
     // planner's project.rs body-scope regex backtracks for minutes
     // on `\"` + `\` continuations in a single literal this large.
     let inject = concat!(
-        "# Date package — only when the app uses date-only values (matz/spinel#7334).\n",
-        "require_relative \"runtime/date\"\n",
+        "# Date package — only when the app uses Date or DateTime.\n",
+        "require \"date\"\n",
         "require_relative \"runtime/active_support_date_parsing\"\n",
         "require_relative \"runtime/active_record_date_serialization\"\n",
     );
-    if boot.contains("require_relative \"runtime/date\"") {
+    if boot.contains("require_relative \"runtime/active_support_date_parsing\"") {
         return Ok(());
     }
     if let Some(at) = boot.find(anchor) {
@@ -1274,8 +1273,7 @@ fn inject_date_package_into_boot(boot: &mut String) -> Result<(), String> {
 
 /// CRuby/JRuby overlay boot replaces Spinel's boot wholesale, wiping
 /// the Date-package inject. Re-inject **only** the shared `date_*`
-/// calendar helpers (invariant 2). Do not load Spinel's `date.rb`
-/// polyfill (clobbers stdlib Date → `@year` nil on `>>`) or
+/// calendar helpers (invariant 2). Do not load
 /// `active_record_date_serialization` (overlay already wraps
 /// `_as_json_only`; a second alias infinite-recurses).
 fn inject_cruby_date_calendar_helpers(boot: &mut String) -> Result<(), String> {
@@ -1623,9 +1621,9 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
 
 /// The date and decimal coercions `ingest::dry_struct` and
 /// `ingest::dry_initializer` generate call
-/// stdlib the CRuby and JRuby trees load. Spinel's tree has its own
-/// `Date` (`runtime/spinel/date.rb`, ISO `parse` included) and
-/// `BigDecimal()`, but no `DateTime`, `Time.parse` or
+/// stdlib the CRuby and JRuby trees load. Spinel's tree has `Date`
+/// (Spinel's `date` package) and `BigDecimal()`. Its `DateTime` coercion
+/// stays reported until a run pins it, and it has no `Time.parse` or
 /// `BigDecimal.interpret_loosely`; the other targets have none of them.
 fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
@@ -2495,12 +2493,11 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
     let mut trimmed = app.clone();
     // A class records no span of its own: the first real file among its parts names where it was written.
     let file_of_class = |c: &crate::dialect::LibraryClass| {
-        c.methods
-            .iter()
-            .map(|m| m.body.span.file)
-            .chain(c.constants.iter().map(|(_, value)| value.span.file))
-            .chain(std::iter::once(c.parent_span.file))
+        // The class's own header first: a macro the gem defines (parslet's `rule`) leaves its expanded methods' spans in the gem.
+        std::iter::once(c.parent_span.file)
             .chain(c.include_spans.iter().map(|span| span.file))
+            .chain(c.constants.iter().map(|(_, value)| value.span.file))
+            .chain(c.methods.iter().map(|m| m.body.span.file))
             .find(|file| file.0 != 0)
     };
     let dropped: crate::det::HashSet<String> = app
@@ -2519,6 +2516,14 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
         None => !under_dropped(c.name.0.as_str()),
     });
     trimmed.models.retain(|m| !mounted(m.parent_span.file));
+    // Its files' programs too: the real gem runs its own top level.
+    let mounted_path = |path: &str| {
+        app.auto_source_gems.iter().any(|gem| {
+            lock.and_then(|l| l.version_of(gem)).is_some_and(|v| crate::ingest::source_gems::file_of(path, gem, v))
+        })
+    };
+    trimmed.file_programs.retain(|p| !mounted_path(&p.source));
+    trimmed.boot_gem_entries.retain(|e| !mounted_path(e));
     if let Some(lock) = trimmed.gem_lock.as_mut() {
         lock.source.retain(|gem| !app.auto_source_gems.contains(gem));
     }
@@ -2536,6 +2541,15 @@ fn target_files_inner(
         Some(trimmed) => {
             without_auto_sources = trimmed;
             &without_auto_sources
+        }
+        None => app,
+    };
+    // The Spinel tree carries only the part of a gem compiled from source the program reaches.
+    let shaken_gems;
+    let app = match (target == BuildTarget::Spinel).then(|| crate::source_gem_shake::shake(app)).flatten() {
+        Some(trimmed) => {
+            shaken_gems = trimmed;
+            &shaken_gems
         }
         None => app,
     };
@@ -4425,7 +4439,444 @@ fn ruby_family_runtime_files(
     if flavor == RubyFlavor::CRuby && crate::emit::shared::schema_sql::Dialect::current() == crate::emit::shared::schema_sql::Dialect::Postgres {
         apply_postgresql_tree(&mut files, app)?;
     }
+    apply_file_programs(&mut files, app);
     Ok(files)
+}
+
+/// Each gem-source file's file-level program (`App::file_programs`) as
+/// `app/models/roundhouse_files/<source path>.rb`: what Ruby runs when it
+/// loads that file, in source order. app/models.rb already loads every
+/// declaration file, so a program runs its statements and the requires
+/// that order them: a declaration loads its emitted file (a no-op once
+/// loaded); a `require` of a file with a program loads that program, of
+/// a file of declarations alone nothing more, of a framework feature
+/// nothing (the runtime ports answer it), of anything else outside the
+/// tree what it names; a `require_relative` of an app file the tree
+/// does not carry, and a statement the ingest could not carry, are named
+/// on stderr as the file loads, and reported as errors.
+///
+/// app/models.rb gains `RoundhouseAutoload` and, before the app's own
+/// files as in Rails' boot, the programs of the files `Bundler.require`
+/// loads (`App::boot_gem_entries`). A program nothing reaches from those is
+/// listed in `UNREACHED_PROGRAMS` and not loaded, as Ruby loads no gem
+/// file that nothing requires.
+fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
+    use std::fmt::Write;
+    if app.file_programs.is_empty() {
+        return;
+    }
+    let relative = |source: &str| -> String {
+        let root = app.root.trim_end_matches('/');
+        let rel = if root.is_empty() { source } else { source.strip_prefix(root).unwrap_or(source) };
+        rel.trim_start_matches('/').to_string()
+    };
+    let anchor_of = |source: &str| -> String {
+        let rel = relative(source);
+        format!("models/roundhouse_files/{}", rel.strip_suffix(".rb").unwrap_or(&rel))
+    };
+    let programs: crate::det::HashMap<String, &crate::app::FileProgram> =
+        app.file_programs.iter().map(|p| (normalize_source(&p.source), p)).collect();
+    let known: crate::det::HashSet<String> = app.sources.iter().map(|f| normalize_source(&f.path)).collect();
+    let emitted: crate::det::HashSet<String> = files
+        .iter()
+        .filter_map(|(p, _)| p.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")).map(str::to_string))
+        .collect();
+    // `require "x"` from a gem file: the file of that feature under the
+    // requiring gem's lib/, then any gem's.
+    let resolve = |from: &str, feature: &str, relative: bool| -> Option<String> {
+        let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
+        if relative {
+            let dir = std::path::Path::new(from).parent()?;
+            return Some(normalize_source(&dir.join(&file).display().to_string()));
+        }
+        let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
+        let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
+        if let Some(own) = own.filter(|p| known.contains(p)) {
+            return Some(own);
+        }
+        let suffix = format!("/lib/{file}");
+        let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
+        found.sort();
+        found.first().map(|p| p.to_string())
+    };
+    let site = |span: crate::span::Span| -> String {
+        let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) else {
+            return "(unknown)".to_string();
+        };
+        let (line, _) = source.line_col(span.start);
+        format!("{}:{line}", relative(&source.path))
+    };
+    // The programs an `autoload` names: each, as it starts loading,
+    // drops the pending autoloads of what it is about to define, as Ruby
+    // does for the file it is loading (`RoundhouseAutoload.entering`).
+    // Each autoloaded constant (`Owner::Name`, `Name` at the top level)
+    // and the program it loads.
+    let mut autoloaded: Vec<(String, String)> = Vec::new();
+    for program in &app.file_programs {
+        for item in &program.items {
+            let crate::app::ProgramItem::Autoload { owner, name, feature, .. } = item else { continue };
+            let Some(target) = resolve(&normalize_source(&program.source), feature, false).filter(|t| programs.contains_key(t)) else {
+                continue;
+            };
+            let constant = if owner == "Object" { name.clone() } else { format!("{owner}::{name}") };
+            autoloaded.push((constant, target));
+        }
+    }
+    // Which programs each program's requires load, for reachability.
+    let mut edges: crate::det::HashMap<String, Vec<String>> = Default::default();
+    for program in &app.file_programs {
+        let from = normalize_source(&program.source);
+        let mut out = String::new();
+        writeln!(
+            out,
+            "# The file-level program of {}:\n\
+             # what Ruby runs when it loads that file, in source order. Loaded\n\
+             # where a carried file requires it, else at boot when Bundler\n\
+             # requires its gem (app/models.rb).",
+            relative(&program.source)
+        )
+        .unwrap();
+        let names: Vec<&str> = autoloaded.iter().filter(|(_, target)| *target == from).map(|(c, _)| c.as_str()).collect();
+        // A program an autoload names runs inside `entering`, which keeps
+        // Ruby's autoload when the file raises.
+        let header = std::mem::take(&mut out);
+        let mut loaded: crate::det::HashSet<String> = Default::default();
+        for item in &program.items {
+            match item {
+                crate::app::ProgramItem::Declared(names) => {
+                    for name in names {
+                        let anchor = crate::emit::ruby::library_file_anchor(name.0.as_str(), app);
+                        if emitted.contains(&anchor) && loaded.insert(anchor.clone()) {
+                            writeln!(out, "require RoundhouseAutoload.path({anchor:?})").unwrap();
+                        }
+                    }
+                }
+                crate::app::ProgramItem::Statement(expr) => {
+                    writeln!(out, "{}", crate::emit::ruby::emit_expr(expr)).unwrap();
+                }
+                crate::app::ProgramItem::Require { span, feature, relative: rel } => {
+                    let keyword = if *rel { "require_relative" } else { "require" };
+                    let target = resolve(&from, feature, *rel);
+                    match target {
+                        Some(target) if target == from => {
+                            writeln!(
+                                out,
+                                "# {}: `{keyword} {feature:?}` names this gem file itself, which is loading: Ruby's circular require, a no-op",
+                                site(*span)
+                            )
+                            .unwrap();
+                        }
+                        Some(target) if programs.contains_key(&target) => {
+                            let anchor = anchor_of(&target);
+                            edges.entry(from.clone()).or_default().push(target);
+                            if loaded.insert(anchor.clone()) {
+                                writeln!(out, "RoundhouseAutoload.require_gem_file({anchor:?})").unwrap();
+                            }
+                        }
+                        Some(target) if known.contains(&target) => {
+                            writeln!(out, "# {}: `{keyword} {feature:?}` loads {}, whose declarations app/models.rb loads", site(*span), relative(&target)).unwrap();
+                        }
+                        _ if *rel => {
+                            let message = format!(
+                                "roundhouse: error[file_require_not_carried]: {}: `{keyword} {feature:?}` names an app file the tree does not carry; it was not loaded",
+                                site(*span)
+                            );
+                            report_program_error(*span, "file_require_not_carried", &message);
+                            writeln!(out, "$stderr.puts {message:?}").unwrap();
+                        }
+                        _ if is_framework_feature(feature) => {
+                            writeln!(out, "# {}: `require {feature:?}` is a Rails feature this tree's runtime ports answer; not required", site(*span)).unwrap();
+                        }
+                        _ => {
+                            writeln!(out, "require {feature:?}").unwrap();
+                        }
+                    }
+                }
+                crate::app::ProgramItem::Opened(chains) => {
+                    for chain in chains {
+                        let open: Vec<String> =
+                            chain.iter().map(|(segment, is_class)| format!("{} {segment}", if *is_class { "class" } else { "module" })).collect();
+                        writeln!(out, "{}; {}", open.join("; "), vec!["end"; chain.len()].join("; ")).unwrap();
+                    }
+                }
+                // Lazily, as Ruby does: the constant's first read loads
+                // the program of the file it names.
+                crate::app::ProgramItem::Autoload { span, owner, name, feature } => match resolve(&from, feature, false) {
+                    Some(target) if programs.contains_key(&target) => {
+                        edges.entry(from.clone()).or_default().push(target.clone());
+                        writeln!(out, "{owner}.autoload(:{name}, RoundhouseAutoload.path({:?}))", anchor_of(&target)).unwrap();
+                    }
+                    _ if is_framework_feature(feature) => {
+                        writeln!(out, "# {}: `autoload :{name}, {feature:?}` is a Rails feature this tree's runtime ports answer", site(*span)).unwrap();
+                    }
+                    _ => {
+                        writeln!(out, "{owner}.autoload(:{name}, {feature:?})").unwrap();
+                    }
+                },
+                crate::app::ProgramItem::NotCarried { span, message } => {
+                    let text = format!("roundhouse: error[file_statement_unsupported]: {}: {message}", site(*span));
+                    report_program_error(*span, "file_statement_unsupported", &text);
+                    writeln!(out, "$stderr.puts {text:?}").unwrap();
+                }
+            }
+        }
+        let body = std::mem::take(&mut out);
+        out = header;
+        if names.is_empty() {
+            out.push_str(&body);
+        } else {
+            writeln!(out, "RoundhouseAutoload.entering({:?}, {names:?}) do", anchor_of(&program.source)).unwrap();
+            for line in body.lines() {
+                if line.is_empty() {
+                    out.push('\n');
+                } else {
+                    writeln!(out, "  {line}").unwrap();
+                }
+            }
+            out.push_str("end\n");
+        }
+        files.push((format!("app/{}.rb", anchor_of(&program.source)), out));
+    }
+    // What boot reaches: the gem entries' programs and what they require.
+    let mut reached: crate::det::HashSet<String> = Default::default();
+    let mut pending: Vec<String> = app.boot_gem_entries.iter().map(|e| normalize_source(e)).filter(|e| programs.contains_key(e)).collect();
+    while let Some(next) = pending.pop() {
+        if reached.insert(next.clone()) {
+            pending.extend(edges.get(&next).into_iter().flatten().cloned());
+        }
+    }
+    let mut unreached: Vec<String> =
+        programs.keys().filter(|p| !reached.contains(*p)).map(|p| anchor_of(p)).collect();
+    unreached.sort();
+    let mut preamble = String::from(
+        "# The gem files' programs (app/models/roundhouse_files): each loads\n\
+         # where a carried file requires it, else at boot below, when\n\
+         # Bundler requires its gem, before the app's files (apply_file_programs).\n\
+         module RoundhouseAutoload\n\
+         \x20 ROOT = __dir__\n\
+         \x20 LOADING = {}\n\
+         \x20 # The programs nothing loads at boot: no gem entry Bundler requires\n\
+         \x20 # reaches them, so Ruby would not load them either.\n\
+         \x20 UNREACHED_PROGRAMS = [\n",
+    );
+    for anchor in &unreached {
+        writeln!(preamble, "    {anchor:?},").unwrap();
+    }
+    preamble.push_str(
+        "  ].freeze\n\n\
+         \x20 def self.path(anchor)\n\
+         \x20   File.join(ROOT, anchor)\n\
+         \x20 end\n\n\
+         \x20 # A program an autoload names, starting to load by any route (a\n\
+         \x20 # plain require too): the constants whose autoloads point at it\n\
+         \x20 # lose them, so defining or reopening them does not run it again,\n\
+         \x20 # as Ruby treats the file it is loading.\n\
+         \x20 # The program's body is the block. When it raises, each autoload\n\
+         \x20 # it dropped comes back, as Ruby keeps a constant's autoload when\n\
+         \x20 # its file raises: the next read loads the file again.\n\
+         \x20 def self.entering(anchor, names)\n\
+         \x20   removed = []\n\
+         \x20   names.each do |cpath|\n\
+         \x20     *outer, name = cpath.split(\"::\")\n\
+         \x20     scope = outer.inject(Object) { |s, n| s&.const_defined?(n, false) ? s.const_get(n, false) : nil }\n\
+         \x20     # An autoload whose file is loading: listed, but not defined\n\
+         \x20     # (`autoload?` answers nil while its feature loads).\n\
+         \x20     next unless scope.is_a?(Module) && scope.constants(false).include?(name.to_sym) && !scope.const_defined?(name, false)\n\
+         \x20     scope.send(:remove_const, name)\n\
+         \x20     removed << [scope, name]\n\
+         \x20   end\n\
+         \x20   yield\n\
+         \x20 rescue Exception\n\
+         \x20   removed.each do |scope, name|\n\
+         \x20     scope.send(:remove_const, name) if scope.const_defined?(name, false)\n\
+         \x20     scope.autoload(name, path(anchor))\n\
+         \x20   end\n\
+         \x20   raise\n\
+         \x20 end\n\n\
+         \x20 # A gem file's require of another. One still loading is Ruby's\n\
+         \x20 # circular require: a no-op answering false (and a warning, which\n\
+         \x20 # natively points into RubyGems and is not the app's).\n\
+         \x20 def self.require_gem_file(anchor)\n\
+         \x20   file = path(anchor)\n\
+         \x20   return false if LOADING[file]\n\
+         \x20   LOADING[file] = true\n\
+         \x20   begin\n\
+         \x20     require file\n\
+         \x20   ensure\n\
+         \x20     LOADING.delete(file)\n\
+         \x20   end\n\
+         \x20 end\n\
+         end\n\n",
+    );
+    // Each gem's lib/ of programs on the load path: `require "globgem"`
+    // finds the program its boot already loaded (and answers false), and
+    // any `require "globgem/…"` loads that file's program.
+    let mut libs: Vec<String> = programs
+        .keys()
+        .filter_map(|source| {
+            let rel = relative(source);
+            rel.rfind("/lib/").map(|at| format!("models/roundhouse_files/{}", &rel[..at + 4]))
+        })
+        .collect();
+    libs.sort();
+    libs.dedup();
+    for lib in &libs {
+        writeln!(preamble, "$LOAD_PATH.unshift(RoundhouseAutoload.path({lib:?}))").unwrap();
+    }
+    if !libs.is_empty() {
+        preamble.push('\n');
+    }
+    let mut boot = String::new();
+    for entry in &app.boot_gem_entries {
+        let entry = normalize_source(entry);
+        if programs.contains_key(&entry) {
+            writeln!(boot, "RoundhouseAutoload.require_gem_file({:?})", anchor_of(&entry)).unwrap();
+        }
+    }
+    // A declaration file's load-time require of a constant under an
+    // autoloaded namespace loads that namespace's program, as reading the
+    // constant does natively (`Track::None` from `Options` runs track.rb,
+    // which loads base, none and status in its order), not the constant's
+    // own declarations, whose `module Track` line would run the autoload
+    // from inside a file it loads.
+    if !autoloaded.is_empty() {
+        let mut anchors: crate::det::HashMap<String, Vec<&str>> = Default::default();
+        for lc in &app.library_classes {
+            anchors.entry(crate::emit::ruby::library_file_anchor(lc.name.0.as_str(), app)).or_default().push(lc.name.0.as_str());
+        }
+        let through = |anchor: &str| -> Option<String> {
+            let names = anchors.get(anchor)?;
+            names
+                .iter()
+                .filter_map(|name| {
+                    autoloaded
+                        .iter()
+                        .filter(|(constant, _)| *name == constant || name.starts_with(&format!("{constant}::")))
+                        .max_by_key(|(constant, _)| constant.len())
+                })
+                .max_by_key(|(constant, _)| constant.len())
+                .map(|(_, target)| anchor_of(target))
+        };
+        for (path, content) in files.iter_mut() {
+            let Some(rel) = path.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")) else { continue };
+            if !rel.starts_with("models/") || rel.starts_with("models/roundhouse_files/") {
+                continue;
+            }
+            let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            let mut changed = false;
+            let lines: Vec<String> = content
+                .lines()
+                .map(|line| {
+                    let target = line
+                        .strip_prefix("require_relative \"")
+                        .and_then(|l| l.strip_suffix('"'))
+                        .map(|r| normalize_source(&format!("{dir}/{r}")));
+                    match target.as_deref().and_then(through) {
+                        Some(program) => {
+                            changed = true;
+                            format!("RoundhouseAutoload.require_gem_file({program:?})")
+                        }
+                        None => line.to_string(),
+                    }
+                })
+                .collect();
+            if changed {
+                *content = lines.join("\n") + "\n";
+            }
+        }
+    }
+    // A file of the gem's declarations alone loads where the gem's own
+    // requires and autoloads reach it, as natively, not with the app's
+    // files: a gem file nothing requires defines nothing.
+    let gem_names: crate::det::HashSet<&str> = app
+        .file_programs
+        .iter()
+        .flat_map(|p| p.items.iter())
+        .filter_map(|item| match item {
+            crate::app::ProgramItem::Declared(names) => Some(names.iter().map(|n| n.0.as_str())),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    // Only for a gem whose programs the boot reaches: one nothing loads
+    // at boot keeps its declarations among the app's files, as before.
+    let booted_libs: Vec<String> = reached
+        .iter()
+        .filter_map(|source| source.rfind("/lib/").map(|at| source[..at + 5].to_string()))
+        .collect();
+    let gem_names: crate::det::HashSet<&str> = app
+        .file_programs
+        .iter()
+        .filter(|p| booted_libs.iter().any(|lib| normalize_source(&p.source).starts_with(lib.as_str())))
+        .flat_map(|p| p.items.iter())
+        .filter_map(|item| match item {
+            crate::app::ProgramItem::Declared(names) => Some(names.iter().map(|n| n.0.as_str())),
+            _ => None,
+        })
+        .flatten()
+        .filter(|name| gem_names.contains(name))
+        .collect();
+    let mut by_anchor: crate::det::HashMap<String, bool> = Default::default();
+    for lc in &app.library_classes {
+        let gem = gem_names.contains(lc.name.0.as_str());
+        let entry = by_anchor.entry(crate::emit::ruby::library_file_anchor(lc.name.0.as_str(), app)).or_insert(true);
+        *entry &= gem;
+    }
+    if let Some((_, models)) = files.iter_mut().find(|(p, _)| p == "app/models.rb") {
+        let kept: Vec<&str> = models
+            .lines()
+            .filter(|line| {
+                let anchor = line.strip_prefix("require_relative \"").and_then(|l| l.strip_suffix('"'));
+                !anchor.is_some_and(|a| by_anchor.get(a).copied().unwrap_or(false))
+            })
+            .collect();
+        *models = kept.join("\n") + "\n";
+        // Bundler.require runs in config/application.rb, before any app
+        // file loads: the gems' entry programs come first.
+        let heading = if boot.is_empty() { "" } else { "# Bundler.require: the gems' entry files.\n" };
+        *models = format!("{preamble}{heading}{boot}{}{models}", if boot.is_empty() { "" } else { "\n" });
+    }
+}
+
+/// A path with `.` and `..` segments folded, as a require resolves it.
+fn normalize_source(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "." => {}
+            ".." if out.last().is_some_and(|s| !s.is_empty() && *s != "..") => {
+                out.pop();
+            }
+            _ => out.push(segment),
+        }
+    }
+    out.join("/")
+}
+
+/// A feature of the Rails frameworks (`active_support/core_ext/…`,
+/// `rails`): the runtime ports are the framework in an emitted tree, and
+/// no such file is on its load path.
+fn is_framework_feature(feature: &str) -> bool {
+    let root = feature.split('/').next().unwrap_or(feature);
+    matches!(
+        root,
+        "rails" | "railties" | "active_support" | "activesupport" | "active_record" | "activerecord" | "arel"
+            | "active_model" | "activemodel" | "active_job" | "activejob" | "action_pack" | "actionpack"
+            | "action_controller" | "action_dispatch" | "abstract_controller" | "action_view" | "actionview"
+            | "action_mailer" | "actionmailer" | "action_cable" | "actioncable" | "action_text" | "actiontext"
+            | "active_storage" | "activestorage" | "action_mailbox" | "actionmailbox"
+    )
+}
+
+/// An error diagnostic for a program item the tree does not carry.
+fn report_program_error(span: crate::span::Span, construct: &str, message: &str) {
+    let diagnostic = crate::diagnostic::Diagnostic::unsupported(
+        span,
+        Some(crate::ident::Symbol::from("ruby")),
+        construct,
+        message.to_string(),
+    );
+    emit::diagnostics::push(diagnostic);
 }
 
 /// The Ruby tree of an app whose primary database is PostgreSQL
@@ -5936,7 +6387,7 @@ enum RequireTarget {
 /// flags`) makes that fatal. The spinel tree leaves them out, as it did
 /// before app requires were carried; the ruby family loads them all.
 const SPINEL_LACKS: &[&str] = &[
-    "date", "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
+    "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
     "weakref",
 ];
 
@@ -6762,10 +7213,11 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "Arel::Nodes::Ascending",
     "Arel::Nodes::Descending",
     "Arel::Nodes::Predicate",
-    // `runtime/ruby/active_record/connection_not_established.rb` and
-    // `encryption_errors.rb`. A rescue of ConnectionNotEstablished
-    // catches the two children. Strict targets do not load the files.
     "ActiveModel::UnknownAttributeError",
+    // `runtime/ruby/active_record/connection_not_established.rb`,
+    // `encryption_errors.rb` and `stale_object_error.rb`. A rescue of
+    // ConnectionNotEstablished catches the two children. Strict targets
+    // do not load the files.
     "ActiveRecord::ConnectionFailed",
     "ActiveRecord::ConnectionTimeoutError",
     "ActiveRecord::Encryption::Errors::Decryption",
@@ -6850,6 +7302,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
         | "StringScanner" | "Zlib::GzipWriter"
+        // ruby-vips on the ruby family, spinel-ruby-vips on spinel.
+        | "Vips::Image"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
@@ -7683,22 +8137,18 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         ));
     }
 
-    // Program-defined Date package for apps that use date-only values.
-    // Loading Date#strftime into every Spinel tree breaks poly
-    // Time|Date receivers (matz/spinel#7334). Default boot has no Date
-    // requires; when needed we inject the package (class + date parse/
-    // format + date JSON rewrite) after always-on AR serialization.
+    // Spinel's `date` package for apps that use Date or DateTime. Default
+    // boot has no Date requires; when needed we inject the package (stdlib
+    // date + date parse/format + date JSON rewrite) after always-on AR
+    // serialization.
     const DATE_PACKAGE_FILES: &[&str] = &[
-        "runtime/date.rb",
         "runtime/active_support_date_parsing.rb",
         "runtime/active_record_date_serialization.rb",
-        "sig/runtime/date.rbs",
         "sig/runtime/active_support_date_parsing.rbs",
         "sig/runtime/active_record_date_serialization.rbs",
     ];
     if needs_date {
         for (src, dest) in [
-            ("runtime/spinel/date.rbs", "sig/runtime/date.rbs"),
             (
                 "runtime/spinel/active_support_date_parsing.rbs",
                 "sig/runtime/active_support_date_parsing.rbs",
@@ -10113,10 +10563,63 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
     }
 }
 
+/// Take out of `runtime/gem_facades.rb` (and its `.rbs`) each top-level
+/// `module X` / `class X` block whose namespace a gem compiled from source
+/// (`ingest::auto_source_gems`) defines: that is the real class, and the
+/// façade's raising one would be a second definition of it (spinel
+/// refuses two signatures for one method).
+fn drop_facades_the_program_defines(files: &mut [(String, String)]) {
+    let top_name = |line: &str| -> Option<String> {
+        let rest = line.strip_prefix("module ").or_else(|| line.strip_prefix("class "))?;
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        (!name.is_empty()).then_some(name)
+    };
+    // Not any program file: campfire's own `module WebPush` reopens the namespace its façade fills.
+    // Only a file compiled from a gem's source (its `#<SPINEL_SOURCE>` line names the mount) is the gem's.
+    let defined: std::collections::BTreeSet<String> = files
+        .iter()
+        .filter(|(p, c)| {
+            !p.starts_with("runtime/")
+                && p.ends_with(".rb")
+                && c.lines().any(|l| l.starts_with("#<SPINEL_SOURCE>") && l.contains(crate::ingest::source_gems::MOUNT))
+        })
+        .flat_map(|(_, c)| c.lines().filter_map(top_name).collect::<Vec<_>>())
+        .collect();
+    for (path, content) in files.iter_mut() {
+        if path != "runtime/gem_facades.rb" && path != "runtime/gem_facades.rbs" {
+            continue;
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        let mut keep = vec![true; lines.len()];
+        let mut i = 0;
+        while i < lines.len() {
+            if top_name(lines[i]).is_some_and(|n| defined.contains(&n)) {
+                let mut start = i;
+                // The block's own comment header goes with it.
+                while start > 0 && lines[start - 1].starts_with('#') {
+                    start -= 1;
+                }
+                let end = (i + 1..lines.len()).find(|&j| lines[j] == "end").unwrap_or(lines.len() - 1);
+                keep[start..=end].iter_mut().for_each(|k| *k = false);
+                i = end + 1;
+            } else {
+                i += 1;
+            }
+        }
+        if keep.iter().any(|k| !k) {
+            let mut out: String = lines.iter().zip(&keep).filter(|(_, k)| **k).map(|(l, _)| format!("{l}\n")).collect();
+            if !content.ends_with('\n') {
+                out.pop();
+            }
+            *content = out;
+        }
+    }
+}
+
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 29] = [
+const BUNDLED: [(&str, &str); 30] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -10142,6 +10645,9 @@ const BUNDLED: [(&str, &str); 29] = [
     ("Set", "set"),
     ("StringIO", "stringio"),
     ("StringScanner", "strscan"),
+    // `Vips::Image.new_from_buffer`: the ruby-vips gem on CRuby/JRuby, the
+    // spinel-ruby-vips package on spinel; an app requires it by hand.
+    ("Vips", "vips"),
     ("URI", "uri"),
     // `Net::HTTP` — a REAL client on both lanes, so unlike IPAddr there
     // is nothing for roundhouse to port: CRuby resolves this to its own
@@ -10637,6 +11143,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         apply_spinel_css_select(&mut files);
     }
 
+    // A gem compiled from source (svg-graph's `SVG`) defines what its raising façade stands in for.
+    drop_facades_the_program_defines(&mut files);
+
     // redis: the same swap, for a tree on queue_adapter :sidekiq with a
     // payload job (`needs_redis`, recorded as the registry's `sidekiq?`).
     // `runtime/sidekiq_redis.rb` becomes the real connection over
@@ -10707,7 +11216,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     // package is the spinel-ruby-vips spin package; the manifest gains
     // it below, in the same git form bcrypt uses and for the same
     // reason (matz/spin-index#7 is the registration).
-    let needs_vips = apply_image_processor_wiring(&mut files)?;
+    // An app that draws with vips itself (lobsters' StoryImage) needs the package too.
+    let needs_vips = apply_image_processor_wiring(&mut files)?
+        || files.iter().any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, "Vips"));
 
     write_bundled_requires(&mut files);
     // 6. Package manifest + compile root.

@@ -81,7 +81,6 @@ fn native(lib: &Path) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_require_relative_loop_over_a_literal_list_loads_each_file_it_names() {
     let root = std::env::temp_dir().join(format!("roundhouse-require-relative-literal-loop-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -112,26 +111,25 @@ fn a_require_relative_loop_over_a_literal_list_loads_each_file_it_names() {
     );
     assert_eq!(lines(run.stdout.as_bytes()), EXPECTED, "emitted boot diverges from CRuby\n{}", run.stderr);
 
-    // Each loop became one require per element, of what the tree
-    // carries for the file: its program, or its declarations.
-    let programs = "models/roundhouse_files/vendor/gems/adaptkit-1.0.0/lib/adaptkit";
-    let adapters = std::fs::read_to_string(run.emitted.join("app/models/adaptkit/adapters.rb")).unwrap();
-    let alpha = adapters.find(&format!("require RoundhouseAutoload.path({:?})", format!("{programs}/adapters/alpha_adapter")));
-    let beta = adapters.find("require RoundhouseAutoload.path(\"models/adaptkit/adapters/beta_adapter\")");
+    // Each loop became one require per element in the file's program
+    // (app/models/roundhouse_files), of the element's program.
+    let programs = "app/models/roundhouse_files/vendor/gems/adaptkit-1.0.0/lib/adaptkit";
+    let program = |name: &str| std::fs::read_to_string(run.emitted.join(format!("{programs}/{name}.rb"))).unwrap();
+    let anchor = |name: &str| format!("RoundhouseAutoload.require_gem_file(\"models/roundhouse_files/vendor/gems/adaptkit-1.0.0/lib/adaptkit/{name}\")");
+    let adapters = program("adapters");
+    let alpha = adapters.find(&anchor("adapters/alpha_adapter"));
+    let beta = adapters.find(&anchor("adapters/beta_adapter"));
     assert!(alpha.is_some() && beta.is_some() && alpha < beta, "{adapters}");
-    assert!(!adapters.contains("require_relative \"adapters/#{n}"), "{adapters}");
-    let codecs = std::fs::read_to_string(run.emitted.join("app/models/adaptkit/codecs.rb")).unwrap();
-    let plain = codecs.find(&format!("require RoundhouseAutoload.path({:?})", format!("{programs}/codecs/plain_codec")));
-    let gzip = codecs.find(&format!("require RoundhouseAutoload.path({:?})", format!("{programs}/codecs/gzip_codec")));
+    let codecs = program("codecs");
+    let plain = codecs.find(&anchor("codecs/plain_codec"));
+    let gzip = codecs.find(&anchor("codecs/gzip_codec"));
     assert!(plain.is_some() && gzip.is_some() && plain < gzip, "{codecs}");
-    assert!(!codecs.contains("require_relative \"codecs/#{name}"), "{codecs}");
     let models = std::fs::read_to_string(run.emitted.join("app/models.rb")).unwrap();
     let unreached = models.split("UNREACHED_PROGRAMS").nth(1).and_then(|rest| rest.split(']').next()).unwrap_or("");
     assert!(!unreached.contains("adaptkit"), "{models}");
 }
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_loop_element_the_tree_does_not_carry_is_reported_on_stderr_not_warned() {
     const LISTED: &str = r##"module Adaptkit
   module Adapters

@@ -78,7 +78,6 @@ fn app() -> emit_and_run::Overlay {
 }
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_gem_sources_glob_require_is_the_requires_of_its_files_in_dir_order() {
     let native = native_order();
     assert_eq!(native, ["a/y", "a", "ab", "b/z", "b", "keys"], "Ruby's Dir[] order");
@@ -91,7 +90,10 @@ fn a_gem_sources_glob_require_is_the_requires_of_its_files_in_dir_order() {
         .filter_map(|l| l.strip_prefix(&format!("RoundhouseAutoload.require_gem_file(\"models/roundhouse_files/{LIB}/globgem/")))
         .map(|l| l.trim_end_matches("\")"))
         .collect();
-    assert_eq!(required, native, "{entry}");
+    // The entry's own `require_relative "globgem/version"` comes first;
+    // the glob's require of it again is Ruby's no-op, and not written.
+    assert_eq!(required.first(), Some(&"version"), "{entry}");
+    assert_eq!(required[1..], native, "{entry}");
 
     let script = "module StrictW\n  def warn(msg, category: nil, **kw)\n    raise \"StrictWarning: #{msg}\" if msg.include?(\"already initialized constant\")\n    super\n  end\nend\n\
          Warning.singleton_class.prepend(StrictW)\n\

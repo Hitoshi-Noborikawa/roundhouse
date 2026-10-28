@@ -72,7 +72,6 @@ end\n";
 const RAISED: &str = "ArgumentError: invalid value for Integer(): \"x\"";
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_constant_whose_program_raised_while_loading_autoloads_it_again() {
     let root = std::env::temp_dir().join(format!("roundhouse-module-call-body-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -107,7 +106,7 @@ fn a_constant_whose_program_raised_while_loading_autoloads_it_again() {
     );
     let program = "models/roundhouse_files/vendor/gems/broken-1.0.0/lib/broken/track";
     let track = std::fs::read_to_string(run.emitted.join(format!("app/{program}.rb"))).unwrap();
-    assert!(track.contains(&format!("RoundhouseAutoload.entering_program({program:?})")), "{track}");
+    assert!(track.contains(&format!("RoundhouseAutoload.entering({program:?}, [\"Broken::Track\"]) do")), "{track}");
     assert!(Path::new(&run.emitted.join("app/models.rb")).exists());
     assert_eq!(run.stdout.lines().collect::<Vec<_>>(), [RAISED, RAISED], "emitted tree diverges from CRuby\n{}", run.stderr);
 }

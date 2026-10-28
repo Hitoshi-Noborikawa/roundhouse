@@ -24,8 +24,13 @@ class RuleBase
     end
   end
 
+  # `level LOW` sets the level; every instance reads it through `level`.
   def self.level(value)
     define_method(:level) { value }
+  end
+
+  def describe
+    "L#{level}"
   end
 
   def greeting
@@ -46,6 +51,7 @@ raise "word #{p.word.inspect}" unless p.word == "hi!"
 raise "twice #{p.twice.inspect}" unless p.twice == "x2:hi!hi!"
 raise "memo" unless p.word.equal?(p.word)
 raise "level #{p.level.inspect}" unless p.level == 1
+raise "describe #{p.describe.inspect}" unless p.describe == "L1"
 puts "block macros passed"
 "##;
 

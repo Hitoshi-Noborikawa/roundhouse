@@ -546,6 +546,12 @@ fn read_struct(lc: &LibraryClass, scope: &Scope<'_>) -> Result<StructClass, Stri
         if matches!(method.as_str(), "prepend" | "extend") {
             return Err(format!("`{}` in the class body", method.as_str()));
         }
+        // A call on a constant (`Dry::Validation.load_extensions(:monads)`)
+        // is configuration the class body runs, not a declaration; the
+        // walk captures it for the replay, and it is no part of this.
+        if recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. })) {
+            continue;
+        }
         if recv.is_some() {
             return Err(format!("`{}` with a receiver in the class body", method.as_str()));
         }

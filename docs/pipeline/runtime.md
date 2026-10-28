@@ -379,34 +379,21 @@ resource is an empty one, the model's validation usually refuses it, and
 the request answers 422 where Rails says 400. The capability is
 `FormatBreadth::raises_param_missing` (`src/lower/controller/body.rs`).
 
-### Spinel `Date` is a bounded runtime value
+### Spinel `Date` is Spinel's `date` package
 
-The Spinel target defines a small `Date` class in
-`runtime/spinel/date.rb` for Rails date columns. It stores a Gregorian
-year, month, and day; database storage and JSON use `YYYY-MM-DD`, with
-no clock or zone. Its ISO parser accepts only that exact format and
-validates the calendar date.
+The Spinel target loads Spinel's own `date` package (`require "date"`):
+ruby/date's pure-Ruby `Date` and `DateTime`, pinned in Spinel's
+`packages/date`. A program-defined `Date` used to stand in for it, which
+had no `DateTime` (svg-graph's `TimeSeries`, behind lobsters' `/stats`)
+and could not load beside the package. A gap in the package is fixed in
+Spinel, not worked around here.
 
-This is not Ruby's stdlib `date` package. `DateTime`, Julian/Italian
-calendar modes, natural-language and non-ISO parsing, schema date
-defaults, ActiveSupport date extensions beyond `Date.current` and the
-month/day edges `time_calendar` lowers, date picker helpers, and
-`require "date"` are not included. `strftime` implements the date
-directives used by the admitted runtime contract and raises on other
-directives. The compiler continues diagnosing those unsupported paths.
-JRuby and other targets keep their existing Date boundary until they
-have their own runtime.
-
-The Date package — `runtime/spinel/date.rb`, date parse/format
+The Date wiring — `require "date"`, date parse/format
 (`active_support_date_parsing.rb`), the date JSON rewrite
 (`active_record_date_serialization.rb`), matching RBS, and boot
 requires — is injected only when `app_uses_date` is true (schema date
-columns or date values in emitted roots). Default `as_json` stays
-always-on via `active_record_serialization.rb`. Loading
-`Date#strftime` into every Spinel app currently breaks poly
-`Time | Date` receivers for `Time#strftime` (matz/spinel#7334);
-Campfire has no date columns and must not pay that cost. Once upstream
-fixes the poly method table, unconditional load is safe again.
+columns, or `Date` / `DateTime` in emitted roots). Default `as_json`
+stays always-on via `active_record_serialization.rb`.
 
 Date-column JSON is rewritten in the omit-gated Spinel reopen (after
 the shared time-aware `_as_json_only`), not in `runtime/ruby/

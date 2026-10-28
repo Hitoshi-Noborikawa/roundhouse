@@ -38,7 +38,6 @@ const FILES: [(&str, &str); 3] =
     [("act-kit.rb", ACT_KIT), ("act-kit/version.rb", VERSION), ("act-kit/format.rb", FORMAT)];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_gem_module_body_require_runs_before_the_call_that_needs_it() {
     let mut app = emit_and_run::empty_app()
         .write("roundhouse.yml", "")

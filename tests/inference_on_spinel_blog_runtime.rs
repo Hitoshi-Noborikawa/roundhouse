@@ -511,7 +511,12 @@ fn untyped_subexpressions_baseline() {
     // sites are assign_attributes' two Hash reads, its each call,
     // the block key's to_s receiver and the block value. Existing methods and
     // sanitize_sql_like's three sites are unchanged.
-    const CEILING: usize = 1141;
+    // MEASURED 1126 on 2026-10-29 after merging main 00e6fc23: the same
+    // analyzer and collector measure 1124 total on main and 1129 here.
+    // The five additional sites are all in Base#assign_attributes; every
+    // other method's count is unchanged. Both totals include the same
+    // 3 sanitize_sql_like sites, excluded from this ceiling (1141 -> 1126).
+    const CEILING: usize = 1126;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

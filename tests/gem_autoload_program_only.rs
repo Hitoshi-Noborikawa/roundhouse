@@ -100,13 +100,11 @@ fn native(lib: &Path) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_gem_autoload_of_a_file_that_only_requires_its_children_loads_that_file() {
     program_only_autoload(false);
 }
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_gem_autoload_of_a_file_that_only_requires_its_children_loads_that_file_when_eager_loading() {
     program_only_autoload(true);
 }
@@ -144,16 +142,13 @@ fn program_only_autoload(eager: bool) {
         run.stderr
     );
     assert_eq!(lines(run.stdout.as_bytes()), EXPECTED, "emitted boot diverges from CRuby\n{}", run.stderr);
-    // The constants' autoloads, as the gem's own: the program for Track
-    // and Keys (and the program announces itself, so a plain require of
-    // it while the autoload is pending is no circular require), the
-    // implicit module for Router with its nested constants' files.
-    let models = std::fs::read_to_string(run.emitted.join("app/models.rb")).unwrap();
+    // Track's autoload, as the gem's own, loads the program of the file
+    // that only requires its children; the program drops that autoload
+    // as it starts (`RoundhouseAutoload.entering`), so a plain require of
+    // it while the autoload is pending is no circular require.
     let program = "models/roundhouse_files/vendor/gems/trackkit-1.0.0/lib/trackkit/status/track";
-    assert!(models.contains(&format!("[:Track, {program:?}, ")), "{models}");
-    assert!(models.contains(&format!("{program:?} => [[\"Trackkit::Status\", :Track]]")), "{models}");
-    assert!(models.contains("[:Router, nil, true]"), "{models}");
-    assert!(models.contains("\"Trackkit::Router\" => [[:KeyspaceRouting, \"models/trackkit/router/keyspace_routing\", true], [:Queuing, \"models/trackkit/router/queuing\", false]]"), "{models}");
+    let status = std::fs::read_to_string(run.emitted.join("app/models/roundhouse_files/vendor/gems/trackkit-1.0.0/lib/trackkit/status.rb")).unwrap();
+    assert!(status.contains(&format!("Trackkit::Status.autoload(:Track, RoundhouseAutoload.path({program:?}))")), "{status}");
     let track = std::fs::read_to_string(run.emitted.join(format!("app/{program}.rb"))).unwrap();
-    assert!(track.contains(&format!("RoundhouseAutoload.entering_program({program:?})")), "{track}");
+    assert!(track.contains(&format!("RoundhouseAutoload.entering({program:?}, [\"Trackkit::Status::Track\"]) do")), "{track}");
 }
