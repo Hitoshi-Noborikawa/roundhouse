@@ -86,6 +86,19 @@ pub struct App {
     /// otherwise → here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library_classes: Vec<LibraryClass>,
+    /// Each gem-source file whose top level runs more than declarations
+    /// when Ruby loads it (`ingest::library_class::file_program`): its
+    /// declarations, statements and requires, in source order. The Ruby
+    /// family emits each as one file (`app/models/roundhouse_files/…`),
+    /// loaded where a carried file requires it, else at boot when
+    /// Bundler requires its gem.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_programs: Vec<FileProgram>,
+    /// The gem-source files `Bundler.require` loads at boot, in Gemfile
+    /// order: each PATH or source gem's entry file
+    /// (`lib/<name>.rb`, or what the Gemfile's `require:` names).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boot_gem_entries: Vec<String>,
     pub controllers: Vec<Controller>,
     pub routes: RouteTable,
     pub views: Vec<View>,
@@ -1111,6 +1124,8 @@ impl App {
             i18n_table_sites: Vec::new(),
             models: Vec::new(),
             library_classes: Vec::new(),
+            file_programs: Vec::new(),
+            boot_gem_entries: Vec::new(),
             controllers: Vec::new(),
             routes: RouteTable::default(),
             views: Vec::new(),
@@ -1287,4 +1302,28 @@ pub struct ValidatesWithGuard {
     pub file: u32,
     pub start: u32,
     pub class: String,
+}
+
+/// A gem-source file's file-level program ([`App::file_programs`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FileProgram {
+    /// The source file, as ingested.
+    pub source: String,
+    pub items: Vec<ProgramItem>,
+}
+
+/// One top-level statement of a [`FileProgram`], in source order.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ProgramItem {
+    /// A `class`/`module` the library-class walk carried (these names),
+    /// loaded here so the statements around it run in order.
+    Declared(Vec<crate::ident::ClassId>),
+    /// A statement Ruby runs as the file loads.
+    Statement(crate::expr::Expr),
+    /// `require "feature"` / `require_relative "path"`, resolved against
+    /// the tree when emitted.
+    Require { span: crate::span::Span, feature: String, relative: bool },
+    /// A statement the ingest cannot carry, reported as
+    /// `file_statement_unsupported` and named when the file loads.
+    NotCarried { span: crate::span::Span, message: String },
 }

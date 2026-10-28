@@ -4425,7 +4425,265 @@ fn ruby_family_runtime_files(
     if flavor == RubyFlavor::CRuby && crate::emit::shared::schema_sql::Dialect::current() == crate::emit::shared::schema_sql::Dialect::Postgres {
         apply_postgresql_tree(&mut files, app)?;
     }
+    apply_file_programs(&mut files, app);
     Ok(files)
+}
+
+/// Each gem-source file's file-level program (`App::file_programs`) as
+/// `app/models/roundhouse_files/<source path>.rb`: what Ruby runs when it
+/// loads that file, in source order. app/models.rb already loads every
+/// declaration file, so a program runs its statements and the requires
+/// that order them: a declaration loads its emitted file (a no-op once
+/// loaded); a `require` of a file with a program loads that program, of
+/// a file of declarations alone nothing more, of a framework feature
+/// nothing (the runtime ports answer it), of anything else outside the
+/// tree what it names; a `require_relative` of an app file the tree
+/// does not carry, and a statement the ingest could not carry, are named
+/// on stderr as the file loads, and reported as errors.
+///
+/// app/models.rb gains `RoundhouseAutoload` and, before the app's own
+/// files as in Rails' boot, the programs of the files `Bundler.require`
+/// loads (`App::boot_gem_entries`). A program nothing reaches from those is
+/// listed in `UNREACHED_PROGRAMS` and not loaded, as Ruby loads no gem
+/// file that nothing requires.
+fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
+    use std::fmt::Write;
+    if app.file_programs.is_empty() {
+        return;
+    }
+    let relative = |source: &str| -> String {
+        let root = app.root.trim_end_matches('/');
+        let rel = if root.is_empty() { source } else { source.strip_prefix(root).unwrap_or(source) };
+        rel.trim_start_matches('/').to_string()
+    };
+    let anchor_of = |source: &str| -> String {
+        let rel = relative(source);
+        format!("models/roundhouse_files/{}", rel.strip_suffix(".rb").unwrap_or(&rel))
+    };
+    let programs: crate::det::HashMap<String, &crate::app::FileProgram> =
+        app.file_programs.iter().map(|p| (normalize_source(&p.source), p)).collect();
+    let known: crate::det::HashSet<String> = app.sources.iter().map(|f| normalize_source(&f.path)).collect();
+    let emitted: crate::det::HashSet<String> = files
+        .iter()
+        .filter_map(|(p, _)| p.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")).map(str::to_string))
+        .collect();
+    // `require "x"` from a gem file: the file of that feature under the
+    // requiring gem's lib/, then any gem's.
+    let resolve = |from: &str, feature: &str, relative: bool| -> Option<String> {
+        let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
+        if relative {
+            let dir = std::path::Path::new(from).parent()?;
+            return Some(normalize_source(&dir.join(&file).display().to_string()));
+        }
+        let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
+        let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
+        if let Some(own) = own.filter(|p| known.contains(p)) {
+            return Some(own);
+        }
+        let suffix = format!("/lib/{file}");
+        let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
+        found.sort();
+        found.first().map(|p| p.to_string())
+    };
+    let site = |span: crate::span::Span| -> String {
+        let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) else {
+            return "(unknown)".to_string();
+        };
+        let (line, _) = source.line_col(span.start);
+        format!("{}:{line}", relative(&source.path))
+    };
+    // Which programs each program's requires load, for reachability.
+    let mut edges: crate::det::HashMap<String, Vec<String>> = Default::default();
+    for program in &app.file_programs {
+        let from = normalize_source(&program.source);
+        let mut out = String::new();
+        writeln!(
+            out,
+            "# The file-level program of {}:\n\
+             # what Ruby runs when it loads that file, in source order. Loaded\n\
+             # where a carried file requires it, else at boot when Bundler\n\
+             # requires its gem (app/models.rb).",
+            relative(&program.source)
+        )
+        .unwrap();
+        let mut loaded: crate::det::HashSet<String> = Default::default();
+        for item in &program.items {
+            match item {
+                crate::app::ProgramItem::Declared(names) => {
+                    for name in names {
+                        let anchor = crate::emit::ruby::library_file_anchor(name.0.as_str(), app);
+                        if emitted.contains(&anchor) && loaded.insert(anchor.clone()) {
+                            writeln!(out, "require RoundhouseAutoload.path({anchor:?})").unwrap();
+                        }
+                    }
+                }
+                crate::app::ProgramItem::Statement(expr) => {
+                    writeln!(out, "{}", crate::emit::ruby::emit_expr(expr)).unwrap();
+                }
+                crate::app::ProgramItem::Require { span, feature, relative: rel } => {
+                    let keyword = if *rel { "require_relative" } else { "require" };
+                    let target = resolve(&from, feature, *rel);
+                    match target {
+                        Some(target) if target == from => {
+                            writeln!(
+                                out,
+                                "# {}: `{keyword} {feature:?}` names this gem file itself, which is loading: Ruby's circular require, a no-op",
+                                site(*span)
+                            )
+                            .unwrap();
+                        }
+                        Some(target) if programs.contains_key(&target) => {
+                            let anchor = anchor_of(&target);
+                            edges.entry(from.clone()).or_default().push(target);
+                            if loaded.insert(anchor.clone()) {
+                                writeln!(out, "RoundhouseAutoload.require_gem_file({anchor:?})").unwrap();
+                            }
+                        }
+                        Some(target) if known.contains(&target) => {
+                            writeln!(out, "# {}: `{keyword} {feature:?}` loads {}, whose declarations app/models.rb loads", site(*span), relative(&target)).unwrap();
+                        }
+                        _ if *rel => {
+                            let message = format!(
+                                "roundhouse: error[file_require_not_carried]: {}: `{keyword} {feature:?}` names an app file the tree does not carry; it was not loaded",
+                                site(*span)
+                            );
+                            report_program_error(*span, "file_require_not_carried", &message);
+                            writeln!(out, "$stderr.puts {message:?}").unwrap();
+                        }
+                        _ if is_framework_feature(feature) => {
+                            writeln!(out, "# {}: `require {feature:?}` is a Rails feature this tree's runtime ports answer; not required", site(*span)).unwrap();
+                        }
+                        _ => {
+                            writeln!(out, "require {feature:?}").unwrap();
+                        }
+                    }
+                }
+                crate::app::ProgramItem::NotCarried { span, message } => {
+                    let text = format!("roundhouse: error[file_statement_unsupported]: {}: {message}", site(*span));
+                    report_program_error(*span, "file_statement_unsupported", &text);
+                    writeln!(out, "$stderr.puts {text:?}").unwrap();
+                }
+            }
+        }
+        files.push((format!("app/{}.rb", anchor_of(&program.source)), out));
+    }
+    // What boot reaches: the gem entries' programs and what they require.
+    let mut reached: crate::det::HashSet<String> = Default::default();
+    let mut pending: Vec<String> = app.boot_gem_entries.iter().map(|e| normalize_source(e)).filter(|e| programs.contains_key(e)).collect();
+    while let Some(next) = pending.pop() {
+        if reached.insert(next.clone()) {
+            pending.extend(edges.get(&next).into_iter().flatten().cloned());
+        }
+    }
+    let mut unreached: Vec<String> =
+        programs.keys().filter(|p| !reached.contains(*p)).map(|p| anchor_of(p)).collect();
+    unreached.sort();
+    let mut preamble = String::from(
+        "# The gem files' programs (app/models/roundhouse_files): each loads\n\
+         # where a carried file requires it, else at boot below, when\n\
+         # Bundler requires its gem, before the app's files (apply_file_programs).\n\
+         module RoundhouseAutoload\n\
+         \x20 ROOT = __dir__\n\
+         \x20 LOADING = {}\n\
+         \x20 # The programs nothing loads at boot: no gem entry Bundler requires\n\
+         \x20 # reaches them, so Ruby would not load them either.\n\
+         \x20 UNREACHED_PROGRAMS = [\n",
+    );
+    for anchor in &unreached {
+        writeln!(preamble, "    {anchor:?},").unwrap();
+    }
+    preamble.push_str(
+        "  ].freeze\n\n\
+         \x20 def self.path(anchor)\n\
+         \x20   File.join(ROOT, anchor)\n\
+         \x20 end\n\n\
+         \x20 # A gem file's require of another. One still loading is Ruby's\n\
+         \x20 # circular require: a no-op answering false (and a warning, which\n\
+         \x20 # natively points into RubyGems and is not the app's).\n\
+         \x20 def self.require_gem_file(anchor)\n\
+         \x20   file = path(anchor)\n\
+         \x20   return false if LOADING[file]\n\
+         \x20   LOADING[file] = true\n\
+         \x20   begin\n\
+         \x20     require file\n\
+         \x20   ensure\n\
+         \x20     LOADING.delete(file)\n\
+         \x20   end\n\
+         \x20 end\n\
+         end\n\n",
+    );
+    // Each gem's lib/ of programs on the load path: `require "globgem"`
+    // finds the program its boot already loaded (and answers false), and
+    // any `require "globgem/…"` loads that file's program.
+    let mut libs: Vec<String> = programs
+        .keys()
+        .filter_map(|source| {
+            let rel = relative(source);
+            rel.rfind("/lib/").map(|at| format!("models/roundhouse_files/{}", &rel[..at + 4]))
+        })
+        .collect();
+    libs.sort();
+    libs.dedup();
+    for lib in &libs {
+        writeln!(preamble, "$LOAD_PATH.unshift(RoundhouseAutoload.path({lib:?}))").unwrap();
+    }
+    if !libs.is_empty() {
+        preamble.push('\n');
+    }
+    let mut boot = String::new();
+    for entry in &app.boot_gem_entries {
+        let entry = normalize_source(entry);
+        if programs.contains_key(&entry) {
+            writeln!(boot, "RoundhouseAutoload.require_gem_file({:?})", anchor_of(&entry)).unwrap();
+        }
+    }
+    if let Some((_, models)) = files.iter_mut().find(|(p, _)| p == "app/models.rb") {
+        // Bundler.require runs in config/application.rb, before any app
+        // file loads: the gems' entry programs come first.
+        let heading = if boot.is_empty() { "" } else { "# Bundler.require: the gems' entry files.\n" };
+        *models = format!("{preamble}{heading}{boot}{}{models}", if boot.is_empty() { "" } else { "\n" });
+    }
+}
+
+/// A path with `.` and `..` segments folded, as a require resolves it.
+fn normalize_source(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "." => {}
+            ".." if out.last().is_some_and(|s| !s.is_empty() && *s != "..") => {
+                out.pop();
+            }
+            _ => out.push(segment),
+        }
+    }
+    out.join("/")
+}
+
+/// A feature of the Rails frameworks (`active_support/core_ext/…`,
+/// `rails`): the runtime ports are the framework in an emitted tree, and
+/// no such file is on its load path.
+fn is_framework_feature(feature: &str) -> bool {
+    let root = feature.split('/').next().unwrap_or(feature);
+    matches!(
+        root,
+        "rails" | "railties" | "active_support" | "activesupport" | "active_record" | "activerecord" | "arel"
+            | "active_model" | "activemodel" | "active_job" | "activejob" | "action_pack" | "actionpack"
+            | "action_controller" | "action_dispatch" | "abstract_controller" | "action_view" | "actionview"
+            | "action_mailer" | "actionmailer" | "action_cable" | "actioncable" | "action_text" | "actiontext"
+            | "active_storage" | "activestorage" | "action_mailbox" | "actionmailbox"
+    )
+}
+
+/// An error diagnostic for a program item the tree does not carry.
+fn report_program_error(span: crate::span::Span, construct: &str, message: &str) {
+    let diagnostic = crate::diagnostic::Diagnostic::unsupported(
+        span,
+        Some(crate::ident::Symbol::from("ruby")),
+        construct,
+        message.to_string(),
+    );
+    emit::diagnostics::push(diagnostic);
 }
 
 /// The Ruby tree of an app whose primary database is PostgreSQL

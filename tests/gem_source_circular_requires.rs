@@ -28,7 +28,6 @@ fn lines(bytes: &[u8]) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_gem_sources_circular_and_self_requires_stay_quiet_no_ops() {
     let root = std::env::temp_dir().join(format!("roundhouse-gem-source-circular-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);

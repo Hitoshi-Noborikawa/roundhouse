@@ -67,6 +67,7 @@ pub mod invisible_captcha;
 pub mod generated_helpers;
 pub mod jbuilder;
 pub mod library_class;
+mod file_program;
 pub mod channel_callbacks;
 mod active_model_attributes;
 pub mod current_attributes;

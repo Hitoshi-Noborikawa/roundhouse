@@ -37,6 +37,12 @@ pub use rbs::ty_to_rbs;
 // External API: the historical surface kept for `tests/` and `bin/`.
 pub use expr::emit_expr;
 
+/// The `models/<stem>` anchor of the file a library class is emitted
+/// into: its outermost enclosing app class's (`library::file_owner`).
+pub(crate) fn library_file_anchor(name: &str, app: &App) -> String {
+    format!("models/{}", crate::naming::underscore(&library::file_owner(name, app, &app.library_classes)))
+}
+
 pub(crate) fn with_external_gem_namespaces<R>(
     namespaces: &std::collections::BTreeSet<String>,
     includes: std::collections::BTreeMap<String, Vec<String>>,

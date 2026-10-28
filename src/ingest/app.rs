@@ -762,6 +762,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
         })
     };
     let nested_app_roots: Vec<PathBuf> = roots.iter().skip(1).map(|root| dir.join(root)).collect();
+    let gem_libs: Vec<PathBuf> = path_gems.iter().map(|gem| gem.join("lib")).collect();
+    app.boot_gem_entries = boot_gem_entries(vfs, dir, lock.as_ref(), &path_gems);
     let mut support_seen: crate::det::HashSet<PathBuf> = crate::det::HashSet::default();
     let boot_required = boot_required_files(vfs, dir);
     let mut support_batches: Vec<(String, PathBuf, Vec<PathBuf>)> = Vec::new();
@@ -848,7 +850,35 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                 }
             }
             match ingest_library_classes(&source, &path_str) {
-                Ok(classes) => app.library_classes.extend(classes),
+                Ok(mut classes) => {
+                    // A gem's file runs more than its declarations when it
+                    // loads (`file_program`).
+                    if gem_libs.iter().any(|lib| entry.starts_with(lib)) {
+                        if let Ok(empty) = super::library_class::ingest_empty_modules(&source, &path_str) {
+                            let empty: Vec<_> = empty.into_iter().filter(|m| !classes.iter().any(|c| c.name == m.name)).collect();
+                            classes.extend(empty);
+                        }
+                        let carried: crate::det::HashSet<String> =
+                            classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
+                        let list_dir = |dir: &Path| -> Vec<(String, bool)> {
+                            vfs.read_dir(dir)
+                                .map(|entries| {
+                                    entries
+                                        .into_iter()
+                                        .filter_map(|e| {
+                                            let name = e.file_name()?.to_str()?.to_string();
+                                            Some((name, vfs.is_dir(&e)))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        };
+                        if let Some(program) = super::file_program::file_program(&source, &path_str, &carried, &list_dir) {
+                            app.file_programs.push(program);
+                        }
+                    }
+                    app.library_classes.extend(classes)
+                }
                 Err(err) => {
                     if survey::is_active() {
                         survey::record(&err);
@@ -7812,6 +7842,52 @@ fn boot_required_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
                         });
                     }
                 }
+            }
+        }
+    }
+    out
+}
+
+/// The gem-source files `Bundler.require` loads at boot
+/// (`App::boot_gem_entries`): when config/application.rb calls it, each
+/// PATH or source gem the Gemfile names, in lock order, by what its
+/// `require:` says or else by its name (`act-kit`, then `act/kit`).
+/// A `require: false` gem loads nothing.
+fn boot_gem_entries<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    lock: Option<&crate::gems::Lockfile>,
+    path_gems: &[PathBuf],
+) -> Vec<String> {
+    let Some(lock) = lock else { return Vec::new() };
+    let bundler = vfs
+        .read_to_string(&dir.join("config/application.rb"))
+        .is_ok_and(|text| text.contains("Bundler.require"));
+    if !bundler {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for name in &lock.dependencies {
+        if !lock.in_repo.contains(name) && !lock.source.contains(name) {
+            continue;
+        }
+        let version = lock.version_of(name).unwrap_or_default();
+        let Some(gem) = path_gems.iter().find(|gem| {
+            gem.file_name().and_then(|n| n.to_str()).is_some_and(|base| {
+                base == name.as_str() || base == format!("{name}-{version}") || base.strip_prefix(name.as_str()).is_some_and(|rest| rest.starts_with('-'))
+            })
+        }) else {
+            continue;
+        };
+        let lib = gem.join("lib");
+        let features: Vec<String> = match lock.gemfile_requires.get(name) {
+            Some(features) => features.clone(),
+            None => [name.clone(), name.replace('-', "/")].into_iter().filter(|f| vfs.exists(&lib.join(format!("{f}.rb")))).take(1).collect(),
+        };
+        for feature in features {
+            let file = lib.join(if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") });
+            if vfs.exists(&file) {
+                out.push(file.display().to_string());
             }
         }
     }

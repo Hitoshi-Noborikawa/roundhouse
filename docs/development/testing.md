@@ -64,6 +64,9 @@ behavior it waits on, `#[ignore = "fork spec: <group>"]` (load order,
 autoload, conditional declarations, class-body loops and hooks, gem
 closures, rails_dependent_by_name). Run a group's tests with `--ignored`
 to see what remains; a change that makes one pass removes its `ignore`.
+Where a spec also asserts the fork's emitted layout (a file path, a
+generated line), the change that makes it pass rewrites that assertion
+for this tree's layout and keeps its comparison with native Ruby.
 
 ## Complete local verification
 

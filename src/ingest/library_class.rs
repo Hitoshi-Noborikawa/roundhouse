@@ -102,6 +102,24 @@ pub fn ingest_nested_library_classes(
     ingest_library_classes_impl(source, file, Some(outer))
 }
 
+/// The modules a file declares with an empty body (`module MarkA; end`):
+/// constants Ruby defines, which the walk above passes over (it keeps
+/// modules that define methods). A gem's marker modules are read by
+/// name (`Globgem::MarkAY.name`); an app's empty helper modules keep
+/// their treatment, so only the gem-source ingest asks for these.
+pub(super) fn ingest_empty_modules(source: &[u8], file: &str) -> IngestResult<Vec<LibraryClass>> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let mut out = Vec::new();
+    for (scope, module) in find_all_module_declarations_with_scope(&root) {
+        if module.body().is_some() {
+            continue;
+        }
+        out.push(library_class_from_module_node_with_scope(&module, &scope, file)?);
+    }
+    Ok(out)
+}
+
 /// `nested_in`: `None` walks every declaration; `Some(outer)` walks
 /// only nested ones and top-level compact names under `outer`.
 fn ingest_library_classes_impl(
@@ -3082,12 +3100,16 @@ fn walk_decl_body_with_visibility<'pr>(
                 if let Ok(e) = ingest_expr(&stmt, file) {
                     out.unknown_calls.push(e);
                 }
-            } else if call.receiver().is_some_and(|r| r.as_constant_read_node().is_some() || r.as_constant_path_node().is_some()) {
+            } else if call.block().is_none()
+                && call.receiver().is_some_and(|r| r.as_constant_read_node().is_some() || r.as_constant_path_node().is_some())
+            {
                 // A call on a constant (`Format.register_lazy(:json, …)`
                 // in `module ActKit`): Ruby runs it as the body loads.
                 // Captured like the others; `app_extension_calls` marks
                 // the ones the app's own class answers, and the rest are
-                // reported as dropped rather than lost without a word.
+                // reported as dropped rather than lost without a word. A
+                // call with a block is not one the replay carries whole
+                // (a require loop is the file program's).
                 if let Ok(e) = ingest_expr(&stmt, file) {
                     out.unknown_calls.push(e);
                 }
