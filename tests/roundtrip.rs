@@ -130,6 +130,7 @@ fn tiny_blog_round_trips() {
             as_name: Some(Symbol::from("posts")),
             constraints: IndexMap::new(),
             scope: roundhouse::ResourceScope::Nested,
+            action_symbol: false,
         }],
         direct_helpers: vec![],
         redirects: vec![],

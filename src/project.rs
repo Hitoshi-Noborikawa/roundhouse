@@ -12036,6 +12036,7 @@ mod tests {
             as_name: None,
             constraints: Default::default(),
             scope: Default::default(),
+            action_symbol: false,
         });
 
         // An app file whose name merely ends in `main.rb` is the app's.
@@ -12075,6 +12076,7 @@ mod tests {
             as_name: None,
             constraints: Default::default(),
             scope: Default::default(),
+            action_symbol: false,
         });
         let module = "module RouteTable\nend\n".to_string();
         let mut files = vec![
