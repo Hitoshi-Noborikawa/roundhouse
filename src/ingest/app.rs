@@ -4054,33 +4054,80 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
     for lc in &app.library_classes {
         module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.clone());
     }
-    let mut controllers = HashMap::default();
+    // A class can have several declarations, including an empty reopening
+    // used only as a namespace. Its includes and superclass belong to the
+    // whole class, not whichever declaration was visited last.
+    let mut parts: HashMap<_, Vec<_>> = HashMap::default();
     for controller in &app.controllers {
+        parts.entry(&controller.name).or_default().push(controller);
+    }
+    let mut controllers = HashMap::default();
+    for name in parts.keys() {
         let mut direct_includes = Vec::new();
         let mut inherited = Vec::new();
-        let mut cur = Some(controller);
+        let mut cur = Some(*name);
         let mut seen = crate::det::HashSet::default();
         while let Some(c) = cur {
-            if !seen.insert(&c.name) {
+            if !seen.insert(c) {
                 break;
             }
-            for inc in crate::analyze::controller_includes(c) {
-                if c.name != controller.name && !inherited.contains(&inc) {
-                    inherited.push(inc.clone());
-                }
-                if !direct_includes.contains(&inc) {
-                    direct_includes.push(inc);
+            let Some(declarations) = parts.get(c) else { break };
+            for part in declarations {
+                for inc in crate::analyze::controller_includes(part) {
+                    if c != *name && !inherited.contains(&inc) {
+                        inherited.push(inc.clone());
+                    }
+                    if !direct_includes.contains(&inc) {
+                        direct_includes.push(inc);
+                    }
                 }
             }
-            cur = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
+            cur = declarations.iter().find_map(|part| part.parent.as_ref());
         }
-        controllers.insert(controller.name.clone(), ControllerConcernSurface {
+        controllers.insert((*name).clone(), ControllerConcernSurface {
             includes: filter_registration_order(&[direct_includes.clone()], &module_includes),
             inherited_includes: filter_registration_order(&[inherited], &module_includes),
             direct_includes,
         });
     }
     ControllerConcernSurfaces { module_includes, controllers }
+}
+
+#[cfg(test)]
+mod controller_concern_surface_tests {
+    use super::*;
+
+    #[test]
+    fn a_namespace_reopening_keeps_own_and_inherited_includes() {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+            ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\n  include ParentConcern\nend\n"),
+            ("app/controllers/child_controller.rb", "class ChildController < BaseController\n  include ChildConcern\nend\n"),
+        ]
+        .into_iter()
+        .map(|(path, source)| (std::path::PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        // Opening a class just to declare a nested constant contributes no
+        // superclass or includes of its own.
+        let mut reopening = app.controllers.iter().find(|c| c.name.0.as_str() == "BaseController").unwrap().clone();
+        reopening.parent = None;
+        reopening.parent_span = Default::default();
+        reopening.body.clear();
+        app.controllers.push(reopening);
+        for _ in 0..2 {
+            let surfaces = controller_concern_surfaces(&app);
+            let parent = &surfaces.controllers[&crate::ident::ClassId("BaseController".into())];
+            assert_eq!(parent.direct_includes, vec![crate::ident::ClassId("ParentConcern".into())]);
+            let child = &surfaces.controllers[&crate::ident::ClassId("ChildController".into())];
+            assert_eq!(child.direct_includes, vec![
+                crate::ident::ClassId("ChildConcern".into()),
+                crate::ident::ClassId("ParentConcern".into()),
+            ]);
+            assert_eq!(child.inherited_includes, vec![crate::ident::ClassId("ParentConcern".into())]);
+            app.controllers.reverse();
+        }
+    }
 }
 
 /// Rails' `remove_duplicates`: declaring `before_action :set_room` a
