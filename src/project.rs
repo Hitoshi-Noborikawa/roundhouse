@@ -11193,7 +11193,9 @@ fn walk_dir_into(
 /// `__FILE__` names the source path (`emit::ruby::expr::source_file_path`).
 /// Each `lib/` directory the source has is kept (with a `.keep` where no
 /// file is carried under it), so a path that goes up through it resolves.
-/// Hidden entries are skipped, as are files named for secrets.
+/// Hidden entries are skipped, as are files named for secrets and the
+/// directories tools leave in a checkout (`node_modules`, `tmp`, `log`,
+/// `coverage`).
 fn carry_path_gem_data(fixture: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
     let Ok(lock) = fs::read_to_string(fixture.join("Gemfile.lock")) else { return Ok(()) };
     let secret = |name: &str| {
@@ -11212,7 +11214,9 @@ fn carry_path_gem_data(fixture: &Path, out: &mut Vec<(String, String)>) -> Resul
         }
         let prefix = format!("{}/", remote.trim_end_matches('/').trim_start_matches("./"));
         let mut found = Vec::new();
-        walk_dir_into_skipping(&root, &prefix, &[], &mut found)?;
+        // Its own vendor/ and build/ may hold what it reads; what tools
+        // leave beside a checkout does not.
+        walk_dir_into_skipping(&root, &prefix, &["node_modules", "tmp", "log", "coverage", ".bundle"], &mut found)?;
         let lib = format!("{prefix}lib/");
         found.retain(|(rel, _)| {
             let name = rel.rsplit('/').next().unwrap_or(rel);

@@ -1924,6 +1924,24 @@ fn is_relocatable_mattr_seed(expr: &Expr, class_attributes: &HashSet<Symbol>) ->
     )
 }
 
+/// A receiver that is `self`, or a call chain on `self` (`self.logger`,
+/// `self.config.settings`): what a class body's statement writes or
+/// calls through is the class's own.
+fn receiver_rooted_at_self(receiver: &ruby_prism::Node<'_>) -> bool {
+    let mut node = receiver.as_call_node();
+    if node.is_none() {
+        return receiver.as_self_node().is_some();
+    }
+    while let Some(call) = node {
+        match call.receiver() {
+            Some(inner) if inner.as_self_node().is_some() => return true,
+            Some(inner) => node = inner.as_call_node(),
+            None => return false,
+        }
+    }
+    false
+}
+
 /// Receiverless class-body calls that are NOT safe to capture into
 /// `unknown_calls`, because their meaning depends on where they sit
 /// relative to the method definitions around them — and a
@@ -1943,25 +1961,6 @@ fn is_relocatable_mattr_seed(expr: &Expr, class_attributes: &HashSet<Symbol>) ->
 ///
 /// `include T::Struct::ActsAsComparable` is deliberately NOT here: it
 /// gives a struct its `==`, which is behavior, and it goes when the
-
-/// A receiver that is `self`, or a call chain on `self` (`self.logger`,
-/// `self.config.settings`): what a class body's statement writes or
-/// calls through is the class's own.
-fn receiver_rooted_at_self(receiver: &ruby_prism::Node<'_>) -> bool {
-    let mut node = receiver.as_call_node();
-    if node.is_none() {
-        return receiver.as_self_node().is_some();
-    }
-    while let Some(call) = node {
-        match call.receiver() {
-            Some(inner) if inner.as_self_node().is_some() => return true,
-            Some(inner) => node = inner.as_call_node(),
-            None => return false,
-        }
-    }
-    false
-}
-
 /// struct itself is lowered.
 pub(super) fn is_sorbet_annotation_mixin(call: &ruby_prism::CallNode<'_>) -> bool {
     let name = call.name();
