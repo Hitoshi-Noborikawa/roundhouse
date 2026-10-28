@@ -16,7 +16,10 @@
 # the oldest release it needs rather than one exact build.
 module RailsOracle
   DEFAULT_VERSION = "8.1.4"
-  COMPONENTS = %w[activesupport activemodel activerecord activejob actionpack actionview railties].freeze
+  COMPONENTS = %w[
+    activesupport activemodel activerecord activejob actionpack actionview
+    actionmailer actioncable activestorage actiontext actionmailbox railties
+  ].freeze
 
   def self.source
     value = ENV["RH_RAILS_ORACLE"].to_s
@@ -39,14 +42,22 @@ module RailsOracle
     "unknown"
   end
 
-  # Whether `activate` would succeed for these components, without
-  # activating anything, so a test can skip with a reason instead of failing.
-  def self.available?(*gems)
-    if release?
+  # Whether `activate` would succeed for these components and
+  # requirements, without activating anything, so a test can skip with a
+  # reason instead of failing.
+  def self.available?(*gems, **requirements)
+    components = if release?
       gems.all? { |name| Gem::Specification.find_all_by_name(name, source).any? }
     else
       gems.all? { |name| File.exist?(File.join(source, name, "#{name}.gemspec")) }
     end
+    components && requirements.all? { |name, requirement| Gem::Dependency.new(name.to_s, *Array(requirement)).matching_specs.any? }
+  end
+
+  # The environment a child Ruby needs to load the same oracle. Upstream
+  # that is nothing: the child inherits RH_RAILS_ORACLE and the gem path.
+  def self.env
+    {}
   end
 
   # Activates the named Rails components from the oracle and each other
@@ -63,7 +74,7 @@ module RailsOracle
         version = versions.fetch(name) { abort "#{name} is not in the Rails checkout at #{source}" }
         gem name, "= #{version}"
         loaded = Gem.loaded_specs.fetch(name).full_gem_path
-        abort "#{name} activated from #{loaded}, not #{source}" unless loaded.start_with?(File.expand_path(source))
+        abort "#{name} activated from #{loaded}, not #{source}" unless loaded.start_with?(File.join(File.expand_path(source), ""))
       end
     end
     requirements.each { |name, requirement| gem name.to_s, *Array(requirement) }

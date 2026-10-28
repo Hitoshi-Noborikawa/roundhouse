@@ -51,7 +51,9 @@ pins, `RH_RAILS_ORACLE=<version>` for another release, or
 `RH_RAILS_ORACLE=<path>` for a Rails checkout. Call
 `RailsOracle.activate("activerecord", sqlite3: ">= 2.9")` before requiring
 Rails; other gems take a requirement, not one exact build. When
-`RailsOracle.available?` is false, skip with a reason rather than fail.
+`RailsOracle.available?` (same arguments) is false, skip with a reason
+rather than fail. Some older controls still pin `8.1.4` inline and ignore
+`RH_RAILS_ORACLE`.
 
 ## Complete local verification
 

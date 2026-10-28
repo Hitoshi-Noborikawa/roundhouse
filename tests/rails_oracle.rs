@@ -33,22 +33,25 @@ fn release_installed() -> bool {
     probe.status.success()
 }
 
-/// A throwaway Rails checkout holding one component, `activesupport`, at
-/// `version`, whose library answers where it was loaded from.
-fn checkout(name: &str, version: &str) -> PathBuf {
+/// A throwaway Rails checkout holding `activesupport` at `version`, whose
+/// library answers where it was loaded from, plus the `others` components.
+fn checkout(name: &str, version: &str, others: &[&str]) -> PathBuf {
     let root = std::env::temp_dir().join(format!("rh-rails-oracle-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let component = root.join("activesupport");
-    std::fs::create_dir_all(component.join("lib/active_support")).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("RAILS_VERSION"), format!("{version}\n")).unwrap();
-    std::fs::write(
-        component.join("activesupport.gemspec"),
-        format!(
-            "Gem::Specification.new do |s|\n  s.name = \"activesupport\"\n  s.version = {version:?}\n  s.summary = \"checkout\"\n  s.authors = [\"oracle test\"]\n  s.files = []\n  s.require_paths = [\"lib\"]\nend\n"
-        ),
-    )
-    .unwrap();
-    std::fs::write(component.join("lib/active_support/oracle_probe.rb"), "ORACLE_PROBE = __FILE__\n").unwrap();
+    for component in std::iter::once("activesupport").chain(others.iter().copied()) {
+        std::fs::create_dir_all(root.join(component).join("lib")).unwrap();
+        std::fs::write(
+            root.join(component).join(format!("{component}.gemspec")),
+            format!(
+                "Gem::Specification.new do |s|\n  s.name = {component:?}\n  s.version = {version:?}\n  s.summary = \"checkout\"\n  s.authors = [\"oracle test\"]\n  s.files = []\n  s.require_paths = [\"lib\"]\nend\n"
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(root.join("activesupport/lib/active_support")).unwrap();
+    std::fs::write(root.join("activesupport/lib/active_support/oracle_probe.rb"), "ORACLE_PROBE = __FILE__\n").unwrap();
     root
 }
 
@@ -84,6 +87,19 @@ puts Gem.loaded_specs.fetch("minitest").version >= Gem::Version.new("5.0")"#,
 }
 
 #[test]
+fn availability_counts_the_other_gems_requirements() {
+    if !release_installed() {
+        return;
+    }
+    let output = oracle_ruby(
+        None,
+        r#"puts RailsOracle.available?("activesupport", minitest: ">= 0")
+puts RailsOracle.available?("activesupport", minitest: "0.0.1")"#,
+    );
+    assert_eq!(stdout_of(&output), "true\nfalse");
+}
+
+#[test]
 fn a_release_that_is_not_installed_is_reported_unavailable() {
     let output = oracle_ruby(Some("0.0.1"), r#"puts RailsOracle.available?("activesupport")"#);
     assert_eq!(stdout_of(&output), "false");
@@ -93,7 +109,7 @@ fn a_release_that_is_not_installed_is_reported_unavailable() {
 fn a_checkout_supplies_the_components_even_beside_a_newer_release() {
     // A prerelease, as a Rails main checkout is: RubyGems would otherwise
     // take an installed release of the same component over it.
-    let root = checkout("prerelease", "8.0.0.alpha");
+    let root = checkout("prerelease", "8.0.0.alpha", &[]);
     let output = oracle_ruby(
         Some(root.to_str().unwrap()),
         r#"puts RailsOracle.available?("activesupport")
@@ -101,17 +117,34 @@ RailsOracle.activate("activesupport")
 require "active_support/oracle_probe"
 puts Gem.loaded_specs.fetch("activesupport").version
 puts ORACLE_PROBE.start_with?(File.expand_path(RailsOracle.source))
-puts RailsOracle.label.start_with?("Rails 8.0.0.alpha (")"#,
+puts RailsOracle.label.start_with?("Rails 8.0.0.alpha (")
+puts RailsOracle.env.empty?"#,
     );
     remove(&root);
-    assert_eq!(stdout_of(&output), "true\n8.0.0.alpha\ntrue\ntrue");
+    assert_eq!(stdout_of(&output), "true\n8.0.0.alpha\ntrue\ntrue\ntrue");
+}
+
+#[test]
+fn every_rails_framework_comes_from_a_checkout() {
+    let root = checkout("frameworks", "8.0.0.alpha", &["actionmailer", "actioncable", "activestorage", "actiontext", "actionmailbox"]);
+    let output = oracle_ruby(
+        Some(root.to_str().unwrap()),
+        r#"names = %w[actionmailer actioncable activestorage actiontext actionmailbox]
+puts RailsOracle.available?(*names)
+RailsOracle.activate(*names)
+puts names.map { |name| Gem.loaded_specs.fetch(name).version }.uniq"#,
+    );
+    remove(&root);
+    assert_eq!(stdout_of(&output), "true\n8.0.0.alpha");
 }
 
 #[test]
 fn a_component_the_checkout_lacks_is_refused_by_name() {
-    let root = checkout("partial", "8.0.0");
+    let root = checkout("partial", "8.0.0", &[]);
+    let available = oracle_ruby(Some(root.to_str().unwrap()), r#"puts RailsOracle.available?("activesupport", "activerecord")"#);
     let output = oracle_ruby(Some(root.to_str().unwrap()), r#"RailsOracle.activate("activesupport", "activerecord")"#);
     remove(&root);
+    assert_eq!(stdout_of(&available), "false");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("activerecord is not in the Rails checkout at"), "{stderr}");
