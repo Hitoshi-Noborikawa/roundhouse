@@ -24,18 +24,23 @@ module ActiveRecord
     #
     # AR core guards on `!id.nil?`, but an unsaved record's `id` is 0 here
     # (roundhouse#1478), so that guard let any two new records of a class
-    # be equal and hash alike: `[a, b].uniq` kept one. The guard is "this
-    # record was saved" instead. That's `persisted?`, or `destroyed?`: a
-    # destroyed record keeps its id, and Rails keeps it equal to a load of
-    # its row.
+    # be equal and hash alike: `[a, b].uniq` kept one. A record has a key
+    # when it was saved (`persisted?`, or `destroyed?`: a destroyed record
+    # keeps its id) or was given an id that isn't 0. Both sides need one,
+    # so `==` stays symmetric, as Rails' is for a new record built with an
+    # id (`Article.new(id: 1) == Article.find(1)`).
     def ==(other)
       super ||
-        (other.instance_of?(self.class) && (persisted? || destroyed?) && other.id == id)
+        (other.instance_of?(self.class) && _equality_key? && other._equality_key? && other.id == id)
     end
     alias eql? ==
 
     def hash
-      persisted? || destroyed? ? [self.class, id].hash : super
+      _equality_key? ? [self.class, id].hash : super
+    end
+
+    def _equality_key?
+      persisted? || destroyed? || id != 0
     end
   end
 end

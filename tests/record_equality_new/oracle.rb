@@ -19,6 +19,8 @@ l1 = Article.find(s.id)
 l2 = Article.find(s.id)
 check("two loads of one row", [l1 == l2, [l1, l2].uniq.size, l1 == s], [true, 1, true])
 check("a new record and a loaded one", a == l1, false)
+n = Article.new(id: s.id, title: "n")
+check("a new record built with a row's id, both ways", [l1 == n, n == l1, l1.hash == n.hash, [l1, n].uniq.size], [true, true, true, 1])
 s.destroy
 check("a destroyed record and a load of its row", [s == l1, [s, l1].uniq.size], [true, 1])
 puts "record equality passed"
