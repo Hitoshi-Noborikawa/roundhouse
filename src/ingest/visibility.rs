@@ -29,6 +29,17 @@ pub(super) struct Visibility {
     /// Walking a concern's `ClassMethods` carrier, whose body is the
     /// includers' class side rather than a singleton of its own.
     carrier: bool,
+    /// The declaring class's path, which `def Owner.name` spells for `def self.name`.
+    owner: Option<String>,
+}
+
+impl Visibility {
+    /// `DataPoint` in svg-graph's `def DataPoint.configure_shape_criteria`, inside `class DataPoint`.
+    pub(super) fn names_owner(&self, receiver: &Node<'_>) -> bool {
+        let (Some(owner), Some(read)) = (&self.owner, receiver.as_constant_read_node()) else { return false };
+        let written = constant_id_str(&read.name());
+        owner == written || owner.ends_with(&format!("::{written}"))
+    }
 }
 
 pub(super) fn marker(call: &CallNode<'_>) -> bool {
@@ -225,7 +236,16 @@ impl Visibility {
         file: &str,
         module_owner: Option<&ClassId>,
     ) -> IngestResult<Self> {
-        let out = Self::resolve_carrying_inherited(body, file, module_owner)?;
+        Self::resolve_owned(body, file, module_owner, None)
+    }
+
+    pub(super) fn resolve_owned(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+        owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
+        let out = Self::resolve_carrying_inherited_owned(body, file, module_owner, owner)?;
         match out.inherited.first() {
             Some((_, name, _)) => Err(Self::undefined(file, name)),
             None => Ok(out),
@@ -237,7 +257,16 @@ impl Visibility {
         file: &str,
         module_owner: Option<&ClassId>,
     ) -> IngestResult<Self> {
-        let mut out = Self::default();
+        Self::resolve_carrying_inherited_owned(body, file, module_owner, None)
+    }
+
+    fn resolve_carrying_inherited_owned(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+        owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
+        let mut out = Self { owner: owner.map(|o| o.0.to_string()), ..Self::default() };
         if let Some(body) = body {
             let Some(statements) = body.as_statements_node() else {
                 return Err(Self::unsupported(
@@ -648,7 +677,7 @@ impl Visibility {
                     continue;
                 }
                 if let Some(receiver) = def.receiver() {
-                    if receiver.as_self_node().is_none() {
+                    if receiver.as_self_node().is_none() && !self.names_owner(&receiver) {
                         return Err(Self::unsupported(
                             file,
                             "visibility of a definition on a foreign receiver is not modeled",

@@ -602,3 +602,17 @@ fn a_class_methods_carrier_singleton_is_refused_by_name() {
         "{error}"
     );
 }
+
+#[test]
+fn a_def_on_the_class_s_own_name_is_a_class_method() {
+    for source in [
+        "class Shape\n  def Shape.configure(x)\n    x\n  end\nend\n",
+        "module Graph\n  class Shape\n    def Shape.configure(x)\n      x\n    end\n  end\nend\n",
+    ] {
+        let classes = ingest_library_classes(source.as_bytes(), "shape.rb").expect(source);
+        let shape = classes.iter().find(|c| c.name.0.as_str().ends_with("Shape")).expect(source);
+        assert_eq!(visibility(&shape.methods, "configure", MethodReceiver::Class), MethodVisibility::Public, "{source}");
+    }
+    let foreign = "class Shape\n  def Other.configure(x)\n    x\n  end\nend\n";
+    assert!(ingest_library_classes(foreign.as_bytes(), "shape.rb").is_err(), "a def on another class stays refused");
+}

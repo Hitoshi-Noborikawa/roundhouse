@@ -2214,7 +2214,7 @@ pub(super) fn walk_decl_body<'pr>(
     file: &str,
     mode: DeclBodyMode,
 ) -> IngestResult<DeclBody> {
-    let visibility = Visibility::resolve(body.as_ref(), file, None)?;
+    let visibility = Visibility::resolve_owned(body.as_ref(), file, None, Some(owner))?;
     walk_decl_body_with_visibility(body, owner, file, mode, &visibility)
 }
 
@@ -2405,6 +2405,14 @@ fn walk_decl_body_with_visibility<'pr>(
         // wrapper replaces it with its inner `def`. An accessor in the
         // branch has neither a `def` nor a marker, so reject it here:
         // skipping it would drop `attr_reader :token` with no error.
+        // Not an unmodeled conditional: when the class body runs, a constant it has not written yet is undefined, so svg-graph's `DEFAULT_SHAPE = … unless defined? DEFAULT_SHAPE` is the write.
+        if let Some(cw) = constant_write_unless_defined(&statement)
+            && !out.constants.iter().any(|(n, _)| n.as_str() == constant_id_str(&cw.name()))
+        {
+            let name = Symbol::from(constant_id_str(&cw.name()));
+            out.constants.push((name, ingest_expr(&cw.value(), file)?));
+            continue;
+        }
         if statement.as_if_node().is_some() || statement.as_unless_node().is_some() {
             Visibility::reject_conditional_declaration(&statement, file)?;
             reject_conditional_accessor(&statement, file)?;
@@ -5533,4 +5541,17 @@ fn is_ruby_reserved_word(m: &str) -> bool {
             | "redo" | "rescue" | "retry" | "return" | "self" | "super" | "then" | "true" | "undef"
             | "unless" | "until" | "when" | "while" | "yield"
     )
+}
+
+/// `NAME = value unless defined?(NAME)`, no `else`: the write.
+fn constant_write_unless_defined<'pr>(stmt: &ruby_prism::Node<'pr>) -> Option<ruby_prism::ConstantWriteNode<'pr>> {
+    let unless = stmt.as_unless_node()?;
+    if unless.else_clause().is_some() {
+        return None;
+    }
+    let body: Vec<_> = unless.statements()?.body().iter().collect();
+    let [only] = body.as_slice() else { return None };
+    let write = only.as_constant_write_node()?;
+    let tested = unless.predicate().as_defined_node()?.value().as_constant_read_node()?;
+    (tested.name().as_slice() == write.name().as_slice()).then_some(write)
 }
