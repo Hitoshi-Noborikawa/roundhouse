@@ -7567,6 +7567,39 @@ raise a.comment_ids.inspect unless a.comment_ids == [c.id]"#,
         .assert_passes();
 }
 
+/// The nearest definition wins across the model hierarchy: a subclass
+/// scope shadows an ancestor's class method on an association, and a
+/// subclass class method shadows an ancestor's scope on a relation.
+#[test]
+fn a_subclass_definition_shadows_an_ancestor_of_the_same_name() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/application_record.rb",
+            "  primary_abstract_class\n",
+            "  primary_abstract_class\n\n  scope :ordered, -> { order(id: :desc) }\n\n  def self.picked(value)\n    where(id: value)\n  end\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  def self.ordered\n    \"own\"\n  end\n\n  def self.picked_titles(value)\n    where.not(title: nil).picked(value).map(&:title)\n  end\n\n  def picked_commenters\n    comments.picked.map(&:commenter)\n  end\n",
+        )
+        .edit(
+            "app/models/comment.rb",
+            "  belongs_to :article\n",
+            "  belongs_to :article\n\n  scope :picked, -> { where(commenter: \"Reader\") }\n",
+        )
+        .run_ruby(
+            r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
+Article.create!(title: "Two", body: "A sufficiently long body.")
+raise Article.where.not(title: nil).ordered.inspect unless Article.where.not(title: nil).ordered == "own"
+raise Article.picked_titles(a.id).inspect unless Article.picked_titles(a.id) == ["One"]
+Comment.create!(article: a, commenter: "Reader", body: "Comment body")
+Comment.create!(article: a, commenter: "Other", body: "Comment body")
+raise a.picked_commenters.inspect unless a.picked_commenters == ["Reader"]"#,
+        )
+        .assert_passes();
+}
+
 /// `ActiveSupport::HashWithIndifferentAccess` reads and writes a Symbol
 /// key as its String, nested hashes included, and its conversions
 /// (`merge`, `reverse_merge`, `dup`, `to_hash`, `symbolize_keys`) answer

@@ -919,7 +919,15 @@ pub fn survey_assoc_class_methods(
 /// `Article.base(rel)`, which Ruby resolves to the ancestor's def.
 fn inherit_down(models: &[Model], mut reg: AssocClassMethods) -> AssocClassMethods {
     let mut added: Vec<(ClassId, Symbol, AssocScopedMethod)> = Vec::new();
+    let declares_scope = |id: &ClassId, name: &Symbol| {
+        models.iter().filter(|m| &m.name == id).flat_map(|m| &m.body).any(|item| {
+            matches!(item, ModelBodyItem::Scope { scope, .. } if scope.name == *name)
+        })
+    };
     for model in models {
+        // The model and the ancestors passed so far: a scope on any of
+        // them is nearer than the ancestor's def.
+        let mut below = vec![model.name.clone()];
         let mut current = model.parent.clone();
         for _ in 0..32 {
             let Some(id) = current else { break };
@@ -927,13 +935,15 @@ fn inherit_down(models: &[Model], mut reg: AssocClassMethods) -> AssocClassMetho
                 for (name, entry) in per {
                     // The nearest def is this ancestor's: an override
                     // in between (or on the model) is its own method.
-                    let reaches = class_method_owner(models, &model.name, name).is_some_and(|(m, _)| m.name == id);
+                    let reaches = class_method_owner(models, &model.name, name).is_some_and(|(m, _)| m.name == id)
+                        && !below.iter().any(|b| declares_scope(b, name));
                     if reaches && !added.iter().any(|(m, n, _)| m == &model.name && n == name) {
                         added.push((model.name.clone(), name.clone(), entry.clone()));
                     }
                 }
             }
             current = models.iter().find(|m| m.name == id).and_then(|m| m.parent.clone());
+            below.push(id);
         }
     }
     for (model, name, entry) in added {
