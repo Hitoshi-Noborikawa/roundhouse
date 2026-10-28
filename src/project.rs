@@ -2539,6 +2539,15 @@ fn target_files_inner(
         }
         None => app,
     };
+    // The Spinel tree carries only the part of a gem compiled from source the program reaches.
+    let shaken_gems;
+    let app = match (target == BuildTarget::Spinel).then(|| crate::source_gem_shake::shake(app)).flatten() {
+        Some(trimmed) => {
+            shaken_gems = trimmed;
+            &shaken_gems
+        }
+        None => app,
+    };
     let without_health;
     let app = match without_rails_health_controller(app, target) {
         Some(trimmed) => {
