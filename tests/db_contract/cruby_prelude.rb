@@ -11,3 +11,13 @@ module ActiveRecord
   class Rollback < StandardError
   end
 end
+
+# The app runtime supplies ActiveSupport.present (zone conversion, in
+# runtime/ruby/active_support_ext.rb); parse_db_time, which the
+# PostgreSQL shim reads timestamps through, only needs it to hand the
+# Time back.
+module ActiveSupport
+  def self.present(t)
+    t
+  end
+end
