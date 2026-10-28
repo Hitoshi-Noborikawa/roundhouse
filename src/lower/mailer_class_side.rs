@@ -285,16 +285,33 @@ fn parameterized_constructor(mailer: &crate::ident::ClassId) -> crate::dialect::
         ExprNode::Send { recv: None, method: Symbol::from("new"), args: vec![], block: None, parenthesized: false },
     );
     new_call.ty = Some(instance.clone());
-    let mut body = Expr::new(
+    // `mailer = new; mailer._with_params(params); mailer` (roundhouse#1469):
+    // `_with_params` answers the `self` of `ActionMailer::Base`, which
+    // Spinel types as the base class, so returning it contradicted the
+    // declared mailer under `--rbs .`. The local is the mailer `new` built.
+    let local = Symbol::from("mailer");
+    let read = || {
+        let mut e = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: local.clone() });
+        e.ty = Some(instance.clone());
+        e
+    };
+    let mut assign = Expr::new(
+        span,
+        ExprNode::Assign { target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: local.clone() }, value: new_call },
+    );
+    assign.ty = Some(instance.clone());
+    let mut with_params = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(new_call),
+            recv: Some(read()),
             method: Symbol::from("_with_params"),
             args: vec![arg],
             block: None,
             parenthesized: true,
         },
     );
+    with_params.ty = Some(instance.clone());
+    let mut body = Expr::new(span, ExprNode::Seq { exprs: vec![assign, with_params, read()] });
     body.ty = Some(instance.clone());
     crate::dialect::MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
