@@ -17,6 +17,17 @@ const FINDER: &str = r##"class CommentFinder
     query
   end
 
+  def self.on_title_split(title)
+    query = Comment.all
+    query.joins!(:article)
+    query.where!(article: { title: title })
+    query
+  end
+
+  def self.column(source)
+    source.pluck(:commenter)
+  end
+
   def self.on_articles(articles)
     query = Comment.all
     query.where!(article: articles)
@@ -50,9 +61,12 @@ got = [
   CommentFinder.on_articles(Article.where(title: "First")).map(&:id),
   CommentFinder.articles_with(Comment.where(commenter: "bob")).map(&:id),
   CommentFinder.nested("ann").to_sql.include?("\"comments\".\"commenter\" = 'ann'"),
-  CommentFinder.terms([{ term: "exact" }, { term: "phrase" }])
+  CommentFinder.terms([{ term: "exact" }, { term: "phrase" }]),
+  CommentFinder.on_title_split("Second").map(&:id),
+  CommentFinder.column(Comment).sort,
+  CommentFinder.column([{ commenter: "x" }])
 ]
-raise got.inspect unless got == [[b.id], [a.id], [second.id], true, ["exact", "phrase"]]
+raise got.inspect unless got == [[b.id], [a.id], [second.id], true, ["exact", "phrase"], [b.id], ["ann", "bob"], ["x"]]
 puts "bang relation builders passed"
 "##;
 

@@ -104,12 +104,21 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
 /// `.new` of a class Spinel can subclass. A fresh empty Array or Hash
 /// extended with one of the program's modules right after is made an
 /// instance of a synthesized subclass that includes the module
-/// (`ArrayWithParsletSourceRangeSearch < Array`), and the `extend` goes:
+/// (`ArrayWithParslet_Source_RangeSearch < Array`), and the `extend` goes:
 /// the object answers the module's methods, is an Array, and holds what
 /// it held. What differs from Ruby is its `class`, which is the subclass.
 fn lift_fresh_builtin_extends(app: &mut App) {
-    let modules: HashSet<String> =
-        app.library_classes.iter().filter(|c| c.is_module).map(|c| c.name.0.to_string()).collect();
+    // Not a module with a hook: `extended` / `extend_object` would not run, and `included` would run for the subclass instead.
+    let modules: HashSet<String> = app
+        .library_classes
+        .iter()
+        .filter(|c| c.is_module)
+        .filter(|c| !c.methods.iter().any(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Class
+                && matches!(m.name.as_str(), "extended" | "extend_object" | "included" | "append_features")
+        }))
+        .map(|c| c.name.0.to_string())
+        .collect();
     let mut synthesized: Vec<(String, String, String, Span)> = Vec::new();
     for lc in &mut app.library_classes {
         let owner = lc.name.0.to_string();
@@ -172,7 +181,8 @@ fn lift_in(e: &mut Expr, owner: &str, modules: &HashSet<String>, out: &mut Vec<(
             scope = scope.rsplit_once("::").map_or("", |(outer, _)| outer);
         };
         let Some(module) = module else { continue };
-        let name = format!("{base}With{}", module.replace("::", ""));
+        // Not `::` dropped: `A::BC` and `AB::C` would share one class.
+        let name = format!("{base}With{}", module.replace("::", "_"));
         let span = exprs[i].span;
         if let ExprNode::Assign { value, .. } = &mut *exprs[i].node {
             *value = Expr::new(

@@ -396,25 +396,25 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             .collect()
     };
     fn class_side_mentions(e: &Expr, name: &Symbol, class_body: bool, owners: &HashSet<String>) -> usize {
+        let on_owner = |recv: Option<&Expr>| match recv.map(|r| &*r.node) {
+            Some(ExprNode::Const { path }) => {
+                let full = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+                owners.iter().any(|o| o == &full || o.ends_with(&format!("::{full}"))) as usize
+            }
+            Some(ExprNode::SelfRef) | None => class_body as usize,
+            _ => 0,
+        };
         let here = match &*e.node {
-            ExprNode::Send { recv, method, .. } if method == name => match recv {
-                Some(r) => match &*r.node {
-                    ExprNode::Const { path } => {
-                        let full = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
-                        owners.iter().any(|o| o == &full || o.ends_with(&format!("::{full}"))) as usize
-                    }
-                    ExprNode::SelfRef => class_body as usize,
-                    _ => 0,
-                },
-                None => class_body as usize,
-            },
-            // `send(:root)`, `method(:root)`: a call by a name held as a Symbol.
-            ExprNode::Send { method, args, .. }
+            ExprNode::Send { recv, method, .. } if method == name => on_owner(recv.as_ref()),
+            // `send(:root)`, `method(:root)`: a call by a name held as a Symbol, on the macro's owner.
+            ExprNode::Send { recv, method, args, .. }
                 if matches!(method.as_str(), "send" | "public_send" | "__send__" | "method" | "public_method" | "respond_to?")
                     && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { value } }) if value == name) =>
             {
-                1
+                on_owner(recv.as_ref())
             }
+            // `&method(:level)`: ingest's bound-method reference.
+            ExprNode::MethodRef { recv, name: referenced } if referenced == name => on_owner(recv.as_ref()),
             _ => 0,
         };
         let mut inner = 0;
@@ -425,13 +425,25 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
         let owners = owners(name);
         let mut everywhere = 0;
         crate::lower::for_each_emit_body_ref(app, &mut |e| everywhere += class_side_mentions(e, name, false, &owners));
-        let (macro_bodies, class_bodies): (Vec<&MethodDef>, Vec<&MethodDef>) = app
+        let class_bodies: Vec<&MethodDef> = app
             .library_classes
             .iter()
             .flat_map(|lc| lc.methods.iter())
-            .filter(|m| m.receiver == MethodReceiver::Class)
-            .partition(|m| &m.name == name);
-        let own: usize = macro_bodies.iter().map(|m| class_side_mentions(&m.body, name, false, &owners)).sum();
+            .filter(|m| m.receiver == MethodReceiver::Class && &m.name != name)
+            .collect();
+        // Not every call in a same-named class method: a subclass's `def self.level(v) = RuleBase.level(v)` still reaches the macro.
+        let own: usize = app
+            .library_classes
+            .iter()
+            .flat_map(|lc| {
+                let only: HashSet<String> = std::iter::once(lc.name.0.to_string()).collect();
+                lc.methods
+                    .iter()
+                    .filter(|m| m.receiver == MethodReceiver::Class && &m.name == name)
+                    .map(move |m| class_side_mentions(&m.body, name, false, &only))
+                    .collect::<Vec<_>>()
+            })
+            .sum();
         let class_side: usize = class_bodies
             .iter()
             .map(|m| class_side_mentions(&m.body, name, true, &owners) - class_side_mentions(&m.body, name, false, &owners))

@@ -213,3 +213,25 @@ fn both_forms_keep_a_private_instance_copy_for_includers() {
         assert!(out.contains("def self.match(s)") && out.contains("def match(s)"), "{out}");
     }
 }
+
+#[test]
+fn the_private_copy_replaces_an_earlier_instance_reader_and_a_later_def_wins() {
+    use roundhouse::dialect::{MethodReceiver, MethodVisibility};
+    let classes = ingest_library_classes(
+        b"module Box\n  attr_reader :value\n  module_function\n  def value\n    7\n  end\nend\n",
+        "box.rb",
+    )
+    .unwrap();
+    let instance: Vec<_> = classes[0].methods.iter().filter(|m| m.name.as_str() == "value" && m.receiver == MethodReceiver::Instance).collect();
+    assert_eq!(instance.len(), 1, "{:?}", classes[0].methods.iter().map(|m| (m.name.as_str(), m.receiver)).collect::<Vec<_>>());
+    assert_eq!(instance[0].visibility, MethodVisibility::Private);
+    let out = emit("module Box\n  attr_reader :value\n  module_function\n  def value\n    7\n  end\nend\n");
+    assert!(!out.contains("attr_reader"), "{out}");
+
+    let classes = ingest_library_classes(
+        b"module Box\n  def value\n    1\n  end\n  module_function :value\n  public\n  def other\n    2\n  end\nend\n",
+        "box.rb",
+    )
+    .unwrap();
+    assert!(classes[0].methods.iter().any(|m| m.name.as_str() == "value" && m.receiver == MethodReceiver::Instance && m.visibility == MethodVisibility::Private));
+}

@@ -4059,7 +4059,7 @@ fn hoist_nested_association_tables(model: &ClassId, entries: &mut Vec<(Expr, Exp
 /// (or a chain with no join at all) is left alone.
 fn alias_join_in_chain(expr: &mut Expr, plain: &str, aliased: &str) -> bool {
     let ExprNode::Send { recv, method, args, .. } = &mut *expr.node else { return false };
-    if matches!(method.as_str(), "joins" | "joins!" | "left_outer_joins" | "left_outer_joins!" | "left_joins") {
+    if matches!(method.as_str(), "joins" | "joins!" | "left_outer_joins" | "left_joins") {
         let kind = if method.as_str().starts_with("joins") { "INNER JOIN" } else { "LEFT OUTER JOIN" };
         for a in args.iter_mut() {
             let ExprNode::Lit { value: Literal::Str { value } } = &mut *a.node else { continue };
@@ -4077,14 +4077,35 @@ fn alias_join_in_chain(expr: &mut Expr, plain: &str, aliased: &str) -> bool {
 
 /// Apply every alias `lower_relation_args` asked for to the receiver
 /// chain the `where` hangs off.
-fn apply_join_aliases(recv: &mut Expr, model: &ClassId, aliases: &[Symbol], ctx: &Ctx) {
+fn apply_join_aliases(recv: &mut Expr, model: &ClassId, aliases: &[Symbol], ctx: &Ctx) -> Vec<Symbol> {
+    let mut unapplied = Vec::new();
     for assoc in aliases {
         let (Some(plain), Some(aliased)) =
             (ctx.assocs.join_tail(model, assoc), ctx.assocs.aliased_join_tail(model, assoc))
         else {
             continue;
         };
-        alias_join_in_chain(recv, plain, aliased);
+        if !alias_join_in_chain(recv, plain, aliased) {
+            unapplied.push(assoc.clone());
+        }
+    }
+    unapplied
+}
+
+/// `query.joins!(:article); query.where!(article: { title: t })`: the join
+/// is another statement's, so it keeps the table name, and the condition
+/// names the table too rather than an alias no join declares.
+fn key_unapplied_aliases_by_table(args: &mut [Expr], model: &ClassId, unapplied: &[Symbol], ctx: &Ctx) {
+    for a in args.iter_mut() {
+        let ExprNode::Hash { entries, .. } = &mut *a.node else { continue };
+        for (k, _) in entries.iter_mut() {
+            let ExprNode::Lit { value: Literal::Sym { value } } = &mut *k.node else { continue };
+            if unapplied.contains(value)
+                && let Some(table) = ctx.assocs.assoc_table(model, value)
+            {
+                *value = table.clone();
+            }
+        }
     }
 }
 
@@ -5194,7 +5215,8 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 {
                     let aliases = lower_relation_args(&mr, &method, &mut args, ctx);
                     let mut r = r;
-                    apply_join_aliases(&mut r, &mr, &aliases, ctx);
+                    let unapplied = apply_join_aliases(&mut r, &mr, &aliases, ctx);
+                    key_unapplied_aliases_by_table(&mut args, &mr, &unapplied, ctx);
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return Some(mr);
                 }

@@ -1744,6 +1744,7 @@ impl<'a> BodyTyper<'a> {
                 if recv.is_none()
                     && method.as_str() == "lambda"
                     && args.is_empty()
+                    && !self.owns_operator(ctx.self_ty.as_ref(), method, ctx.class_side)
                     && let Some(b) = block.as_mut().filter(|b| matches!(&*b.node, ExprNode::Lambda { .. }))
                 {
                     return self.analyze_expr(b, ctx);

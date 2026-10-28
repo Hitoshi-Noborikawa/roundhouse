@@ -202,6 +202,17 @@ pub(crate) fn shake(app: &App) -> Option<App> {
                     _ => {}
                 }
             }
+            // `method(:name)` / `recv.method(:name)`: ingest's bound-method reference, a call by name later.
+            ExprNode::MethodRef { recv, name } => {
+                let target = match recv {
+                    None => s.context.map_or(Target::Any, |(c, side, _)| Target::Virtual(c.to_string(), side)),
+                    Some(r) => match &*r.node {
+                        ExprNode::SelfRef => s.context.map_or(Target::Any, |(c, side, _)| Target::Virtual(c.to_string(), side)),
+                        _ => Target::Any,
+                    },
+                };
+                s.calls.push((target, name.as_str().to_string()));
+            }
             ExprNode::Super { .. } => {
                 if let Some((c, side, m)) = s.context {
                     s.calls.push((Target::Super(c.to_string(), side), m.to_string()));

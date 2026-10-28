@@ -1735,16 +1735,23 @@ impl Analyzer {
                 break;
             }
             crate::timings::phase("typing passes (after view param restamp)", || {
-                self.run_typing_passes(
-                    app,
-                    &dynamic_render_ivars,
-                    &existing_view_names,
-                    &module_methods,
-                    &module_includes,
-                    &parent_link_by_name,
-                    TypingMode::Production { dirty: None },
-                );
-                self.harvest_returns_to_registry(app, true);
+                // Not one production pass: a helper return the new params move is read by production callers typed before its harvest.
+                for _ in 0..FIXPOINT_CAP {
+                    let hints = self.capture_dirty_hints();
+                    self.run_typing_passes(
+                        app,
+                        &dynamic_render_ivars,
+                        &existing_view_names,
+                        &module_methods,
+                        &module_includes,
+                        &parent_link_by_name,
+                        TypingMode::Production { dirty: None },
+                    );
+                    self.harvest_returns_to_registry(app, true);
+                    if self.inference_matches(&hints.sig) {
+                        break;
+                    }
+                }
                 self.run_typing_passes(
                     app,
                     &dynamic_render_ivars,
@@ -3720,6 +3727,25 @@ impl Analyzer {
                             .entry(view_name.clone())
                             .or_default()
                             .insert(ctrl_name.clone());
+                        // Not left out of the layout: the inherited page renders through the child's layout as its own actions do.
+                        if let Some(layout_name) = &effective_layout {
+                            let (rendering, assigning) = layout_presence.entry(layout_name.clone()).or_default();
+                            *rendering += 1;
+                            for k in ivars.keys() {
+                                *assigning.entry(k.clone()).or_default() += 1;
+                            }
+                            let layout_map = layout_ivars_by_view.entry(layout_name.clone()).or_default();
+                            for (k, v) in &ivars {
+                                let merged = match layout_map.remove(k) {
+                                    Some(prev) if prev.is_unknown() => v.clone(),
+                                    Some(prev) if v.is_unknown() => prev,
+                                    Some(prev) if prev == *v => prev,
+                                    Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                                    None => v.clone(),
+                                };
+                                layout_map.insert(k.clone(), merged);
+                            }
+                        }
                         let entry = action_ivars_by_view.entry(view_name).or_default();
                         for (k, v) in &ivars {
                             let noise = |t: &Ty| t.is_unknown();
@@ -8915,9 +8941,11 @@ pub(crate) fn extract_ivar_assignments_in(
         let key = key.filter(|k| !matches!(k, Ty::Var { .. } | Ty::Untyped | Ty::Bottom));
         let joined = match index_writes.remove(&name) {
             Some((prev_key, prev)) => (
+                // Not dropped for one unknown key: `@h[:runs] = 1; @h[name] = 2` still writes the Symbol `:runs`.
                 match (prev_key, key) {
                     (Some(a), Some(b)) => Some(crate::analyze::body::union_of(a, b)),
-                    _ => None,
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
                 },
                 crate::analyze::body::union_of(prev, value),
             ),

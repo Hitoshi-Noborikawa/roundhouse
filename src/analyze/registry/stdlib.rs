@@ -1143,7 +1143,6 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("thumbnail_buffer", vips_image.clone()), ("black", vips_image.clone()),
     ], &[
         ("width", Ty::Int), ("height", Ty::Int), ("bands", Ty::Int), ("has_alpha?", Ty::Bool),
-        ("flatten", vips_image.clone()), ("resize", vips_image.clone()), ("insert", vips_image.clone()),
         ("thumbnail_image", vips_image.clone()), ("add", vips_image.clone()), ("cast", vips_image),
         ("write_to_buffer", Ty::Str), ("write_to_file", Ty::Untyped),
     ]);

@@ -49,7 +49,7 @@ module ActiveSupport
   end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
   def self.excluding: [A] (Array[A] list, *A elements) -> Array[A]
-  def self.pluck: (untyped list, *(Symbol | String) keys) -> Array[untyped]
+  def self.pluck: (untyped list, *(Symbol | String | Integer) keys) -> Array[untyped]
   # The lowerer routes Array receivers here, Relation receivers to
   # `size > 1` (campfire `@room.users.many?`), and Array/Relation unions
   # the same way. An Array contract cannot coerce an association into
