@@ -2266,11 +2266,11 @@ fn walk_decl_body_with_visibility<'pr>(
     let mut class_attributes: HashSet<Symbol> = HashSet::default();
     let mut class_attr_defaults: IndexMap<Symbol, Expr> = IndexMap::new();
     // `module_function` (called bare inside a module body) marks every
-    // subsequent direct `def` as a module-function — both an instance
-    // method AND a class method. For our targets (which call these as
-    // `Mod.x(...)`), we only need the class-method form, so flip the
-    // receiver to Class. Doesn't affect nested `class`/`module` bodies
-    // — they get their own walk_decl_body recursion.
+    // subsequent direct `def` as a module-function — both a private
+    // instance method AND a public class method. The def becomes the
+    // class method and a private copy goes to `module_function_copies`.
+    // Doesn't affect nested `class`/`module` bodies — they get their own
+    // walk_decl_body recursion.
     let mut module_function_active = false;
     // `extend self` exposes methods with their instance visibility; unlike
     // module_function, it neither makes a public copy nor ends at `private`.
@@ -2282,6 +2282,7 @@ fn walk_decl_body_with_visibility<'pr>(
     // appended to the same vec but belong to a different scope.
     let mut module_function_named: Vec<String> = Vec::new();
     let mut direct_def_positions: Vec<usize> = Vec::new();
+    let mut module_function_copies = Vec::new();
 
     let Some(b) = body else {
         return Ok(out);
@@ -2548,6 +2549,9 @@ fn walk_decl_body_with_visibility<'pr>(
             }
             visibility.apply(&statement, &mut m);
             if module_function_active && m.receiver == MethodReceiver::Instance {
+                let mut copy = m.clone();
+                copy.visibility = crate::dialect::MethodVisibility::Private;
+                module_function_copies.push(copy);
                 // The retained singleton copy is public even if the original
                 // instance definition is private/protected, unless
                 // `private_class_method` / `public_class_method` already
@@ -3101,11 +3105,11 @@ fn walk_decl_body_with_visibility<'pr>(
     // method — and lobsters uses both spellings of the same name
     // (`EmailBlocklistValidation.email_on_blocklist?` from a mailer and
     // a view; a bare `email_on_blocklist?(email)` from the sibling
-    // validation method that runs on an includer instance). We emit one
-    // method per name, so promoting alone would just move the breakage
-    // from the module spelling to the instance one. Retarget the
-    // sibling bare calls to the module spelling instead, which keeps a
-    // single definition and leaves both call sites resolving.
+    // validation method that runs on an includer instance; parslet's
+    // `match` / `str` called bare inside a parser's rules). Both are kept:
+    // the promoted method here, and a private instance copy appended at
+    // the end. The promoted copy's sibling bare calls are retargeted to
+    // the module spelling, since its `self` is the module.
     if !module_function_named.is_empty() {
         let mut promoted: Vec<Symbol> = Vec::new();
         for pos in &direct_def_positions {
@@ -3113,6 +3117,9 @@ fn walk_decl_body_with_visibility<'pr>(
                 .iter()
                 .any(|n| n == out.methods[*pos].name.as_str())
             {
+                let mut copy = out.methods[*pos].clone();
+                copy.visibility = crate::dialect::MethodVisibility::Private;
+                module_function_copies.push(copy);
                 out.methods[*pos].receiver = MethodReceiver::Class;
                 // Same rule as the bare marker: the copy starts public,
                 // and a later `private_class_method :name` keeps the
@@ -3129,6 +3136,12 @@ fn walk_decl_body_with_visibility<'pr>(
                 // self-recursive call needs the same retarget.
                 retarget_module_function_calls(&mut m.body, owner, &promoted);
             }
+        }
+    }
+
+    for copy in module_function_copies {
+        if !out.methods.iter().any(|e| e.name == copy.name && e.receiver == MethodReceiver::Instance) {
+            out.methods.push(copy);
         }
     }
 

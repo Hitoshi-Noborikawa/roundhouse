@@ -75,9 +75,8 @@ end
 
 #[test]
 fn sibling_bare_calls_retarget_to_the_module_spelling() {
-    // Ruby keeps a private instance copy, so a bare sibling call still
-    // works there. We emit one method per name, so the sibling call has
-    // to move to the module spelling or it resolves to nothing.
+    // The promoted copy runs with the module as `self`, where Ruby has
+    // no instance method to answer a bare sibling call.
     let out = emit(
         r#"
 module Blocklist
@@ -157,8 +156,11 @@ fn module_function_copies_are_public_even_when_the_instance_definition_is_privat
     ] {
         let classes = ingest_library_classes(source.as_bytes(), "util.rb").unwrap();
         for method in &classes[0].methods {
-            assert_eq!(method.receiver, MethodReceiver::Class, "{source}");
-            assert_eq!(method.visibility, MethodVisibility::Public, "{source}");
+            let expected = match method.receiver {
+                MethodReceiver::Class => MethodVisibility::Public,
+                MethodReceiver::Instance => MethodVisibility::Private,
+            };
+            assert_eq!(method.visibility, expected, "{source}");
         }
         let out = emit(source);
         assert!(!out.contains("private_class_method"), "{out}");
@@ -185,5 +187,29 @@ fn only_bare_instance_visibility_markers_end_module_function_mode() {
         }
         assert_eq!(methods[2].receiver, MethodReceiver::Instance, "{source}");
         assert_eq!(methods[2].visibility, visibility, "{source}");
+    }
+}
+
+#[test]
+fn both_forms_keep_a_private_instance_copy_for_includers() {
+    use roundhouse::dialect::{MethodReceiver, MethodVisibility};
+    for source in [
+        "module Atoms; module_function; def match(s); s; end; end",
+        "module Atoms; def match(s); s; end; module_function :match; end",
+    ] {
+        let classes = ingest_library_classes(source.as_bytes(), "atoms.rb").unwrap();
+        let forms: Vec<_> = classes[0]
+            .methods
+            .iter()
+            .filter(|m| m.name.as_str() == "match")
+            .map(|m| (m.receiver, m.visibility))
+            .collect();
+        assert_eq!(
+            forms,
+            [(MethodReceiver::Class, MethodVisibility::Public), (MethodReceiver::Instance, MethodVisibility::Private)],
+            "{source}"
+        );
+        let out = emit(source);
+        assert!(out.contains("def self.match(s)") && out.contains("def match(s)"), "{out}");
     }
 }

@@ -20009,3 +20009,6 @@ end
 
 #[path = "emit_and_run/fresh_builtin_extend.rs"]
 mod fresh_builtin_extend;
+
+#[path = "emit_and_run/module_function_includer.rs"]
+mod module_function_includer;
