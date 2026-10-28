@@ -36,16 +36,31 @@ fn a_binary_asset_reaches_the_emitted_tree_as_the_cli_writes_it() {
 const ENGINE_LOCK: &str = "GEM\n  specs:\n    widget-engine (1.0)\n\nDEPENDENCIES\n  widget-engine\n";
 const ENGINE_RBI: &str = "module WidgetEngine\n  class Client\n    sig { returns(String) }\n    def self.label; end\n  end\nend\n";
 
-#[test]
-fn a_refused_target_reports_its_errors_instead_of_panicking() {
-    let run = app()
+/// A run of an app whose extension refuses `widget-engine` as Rails
+/// dependent, `why` being the YAML for the reason.
+fn refused_run(why: &str) -> emit_and_run::Run {
+    app()
         .write("roundhouse.yml", "extensions: [config/rh]\n")
-        .write("config/rh/gems.yml", "rails_dependent:\n  - {gem: widget-engine, why: requires the Rails framework}\n")
+        .write("config/rh/gems.yml", &format!("rails_dependent:\n  - gem: widget-engine\n    why: {why}"))
         .write("Gemfile.lock", ENGINE_LOCK)
         .write("sorbet/rbi/gems/widget-engine@1.0.rbi", ENGINE_RBI)
         .write("app/models/report.rb", "class Report\n  def self.value\n    WidgetEngine::Client.label\n  end\nend\n")
-        .run_ruby("print Report.value");
+        .run_ruby("print Report.value")
+}
+
+fn assert_refused(run: &emit_and_run::Run) {
     assert!(run.errors.iter().any(|error| error.contains("widget-engine") && error.contains("requires the Rails framework")), "{:#?}", run.errors);
     assert!(!run.success, "a refused target has no program to run:\n{}", run.stdout);
     assert!(std::fs::read_dir(&run.emitted).unwrap().next().is_none(), "a refused target writes no tree");
+}
+
+#[test]
+fn a_refused_target_reports_its_errors_instead_of_panicking() {
+    assert_refused(&refused_run("requires the Rails framework\n"));
+}
+
+#[test]
+fn a_refusal_whose_reason_ends_in_a_newline_is_still_reported() {
+    // A block scalar keeps its trailing newline, and so does the diagnostic.
+    assert_refused(&refused_run("|\n      requires the Rails framework\n"));
 }

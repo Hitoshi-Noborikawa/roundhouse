@@ -334,10 +334,11 @@ impl Overlay {
         let files = match files {
             Ok(files) => files,
             // A refusal of the whole target (`gems::extension_gem_refusals`)
-            // is also reported as error diagnostics: the tree is empty, a run
-            // in it fails, and the caller's assertions read `errors`. A
-            // refusal no diagnostic carries still panics.
-            Err(message) if !errors.is_empty() && message.lines().all(|line| errors.iter().any(|d| d.message == line)) => {
+            // is also reported as error diagnostics, whose messages the
+            // refusal joins with newlines: the tree is empty, a run in it
+            // fails, and the caller's assertions read `errors`. A refusal
+            // no run of diagnostics carries still panics.
+            Err(message) if refusal_is_carried_by(&message, &errors) => {
                 std::fs::create_dir_all(&emitted).expect("mkdir emitted");
                 return (emitted, app, errors);
             }
@@ -352,6 +353,15 @@ impl Overlay {
 }
 
 /// What one emit-and-run produced.
+/// Whether `message` is the messages of a run of consecutive `errors`
+/// joined with newlines, as `project::target_files` reports a refusal. A
+/// message may hold newlines of its own (a YAML block scalar's reason), so
+/// the refusal is not split into lines.
+fn refusal_is_carried_by(message: &str, errors: &[Diagnostic]) -> bool {
+    let messages: Vec<&str> = errors.iter().map(|d| d.message.as_str()).collect();
+    (0..messages.len()).any(|start| (start + 1..=messages.len()).any(|end| messages[start..end].join("\n") == message))
+}
+
 pub struct Run {
     command: String,
     pub emitted: PathBuf,
