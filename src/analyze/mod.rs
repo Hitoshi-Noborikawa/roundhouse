@@ -30,6 +30,7 @@ mod body;
 pub(crate) use body::some_operands_take_it;
 mod class_configuration;
 mod data;
+mod database_identity;
 mod class_new;
 pub(crate) use body::{indexed_pluck, string_answers};
 #[cfg(test)]

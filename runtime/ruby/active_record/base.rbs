@@ -34,6 +34,11 @@ module ActiveRecord
     # SqliteAdapter (CRuby/spinel) already implements both.
     %a{abstract}
     def select_rows: (String sql) -> Array[Hash[String, untyped]]
+    # `select_rows` one row at a time: each row Hash yielded as it is
+    # read. Hydration goes through it so a row reaches `instantiate` as
+    # a Hash rather than as an element of an Array of Hashes.
+    %a{abstract}
+    def each_row: (String sql) { (Hash[String, untyped]) -> void } -> void
     %a{abstract}
     def execute_ddl: (String sql) -> void
     %a{abstract}
