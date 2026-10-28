@@ -10101,19 +10101,25 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 }
 
 /// Take out of `runtime/gem_facades.rb` (and its `.rbs`) each top-level
-/// `module X` / `class X` block whose namespace a program file defines
-/// itself: a gem compiled from source (`ingest::auto_source_gems`) is the
-/// real class, and the façade's raising one would be a second definition
-/// of it (spinel refuses two signatures for one method).
+/// `module X` / `class X` block whose namespace a gem compiled from source
+/// (`ingest::auto_source_gems`) defines: that is the real class, and the
+/// façade's raising one would be a second definition of it (spinel
+/// refuses two signatures for one method).
 fn drop_facades_the_program_defines(files: &mut [(String, String)]) {
     let top_name = |line: &str| -> Option<String> {
         let rest = line.strip_prefix("module ").or_else(|| line.strip_prefix("class "))?;
         let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
         (!name.is_empty()).then_some(name)
     };
+    // Not any program file: campfire's own `module WebPush` reopens the namespace its façade fills.
+    // Only a file compiled from a gem's source (its `#<SPINEL_SOURCE>` line names the mount) is the gem's.
     let defined: std::collections::BTreeSet<String> = files
         .iter()
-        .filter(|(p, _)| !p.starts_with("runtime/") && p.ends_with(".rb"))
+        .filter(|(p, c)| {
+            !p.starts_with("runtime/")
+                && p.ends_with(".rb")
+                && c.lines().any(|l| l.starts_with("#<SPINEL_SOURCE>") && l.contains(crate::ingest::source_gems::MOUNT))
+        })
         .flat_map(|(_, c)| c.lines().filter_map(top_name).collect::<Vec<_>>())
         .collect();
     for (path, content) in files.iter_mut() {
