@@ -20024,3 +20024,6 @@ mod date_time_package;
 
 #[path = "emit_and_run/data_point_shapes.rs"]
 mod data_point_shapes;
+
+#[path = "emit_and_run/bang_relation_builders.rs"]
+mod bang_relation_builders;

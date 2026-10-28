@@ -151,7 +151,10 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
         return true;
     }
     if method.as_str() == "pluck" && block.is_none() {
-        return ground_indexed_pluck(expr);
+        if ground_indexed_pluck(expr) {
+            return true;
+        }
+        return ground_untyped_pluck(expr);
     }
     if method.as_str() == "index_with" {
         return ground_index_with(expr);
@@ -398,6 +401,22 @@ fn ground_indexed_pluck(expr: &mut Expr) -> bool {
         },
     );
     expr.ty = ty;
+    true
+}
+
+/// `value.pluck(:term)` on a receiver with no type → `ActiveSupport.pluck(value, :term)`.
+fn ground_untyped_pluck(expr: &mut Expr) -> bool {
+    let span = expr.span;
+    let ExprNode::Send { recv, method, args, parenthesized, .. } = &mut *expr.node else { return false };
+    let Some(receiver) = recv.as_ref() else { return false };
+    if args.is_empty() || !matches!(receiver.ty.as_ref(), None | Some(Ty::Untyped | Ty::Var { .. })) {
+        return false;
+    }
+    let receiver = recv.take().expect("checked above");
+    *recv = Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] }));
+    args.insert(0, receiver);
+    *method = Symbol::from("pluck");
+    *parenthesized = true;
     true
 }
 

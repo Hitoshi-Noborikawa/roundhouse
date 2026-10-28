@@ -525,6 +525,16 @@ module ActiveSupport
     list - elements.flatten(1)
   end
 
+  # AS `Enumerable#pluck` on a receiver the analyzer could not type
+  # (lobsters' `value.pluck(:term)` over a parslet parse tree). Not
+  # `map` for a Relation: Rails' own `pluck` selects only those columns.
+  def self.pluck(list, *keys)
+    return list.pluck(*keys) if list.is_a?(ActiveRecord::Relation)
+    return list.map { |element| keys.map { |key| element[key] } } if keys.length > 1
+
+    list.map { |element| element[keys[0]] }
+  end
+
   # AS `Enumerable#many?`: the materialized no-block form is a length
   # check; the block form counts matches and stops at the second hit.
   # Another core_ext reopen the transpiled runtimes cannot host — same

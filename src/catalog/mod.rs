@@ -1950,12 +1950,15 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
 /// pair is `(alias, canonical)`.
 ///
 /// `left_joins` is `left_outer_joins`. `where!` and `order!` are the
-/// in-place spellings of `where` and `order`. `without` is `excluding`.
+/// in-place spellings of `where` and `order`, `joins!` and
+/// `left_outer_joins!` of theirs. `without` is `excluding`.
 pub(crate) const BUILDER_ALIASES: &[(&str, &str)] = &[
     ("left_joins", "left_outer_joins"),
     ("where!", "where"),
     ("order!", "order"),
     ("without", "excluding"),
+    ("joins!", "joins"),
+    ("left_outer_joins!", "left_outer_joins"),
 ];
 
 /// True when `name` is a [`ChainKind::Builder`] entry, on any receiver,
