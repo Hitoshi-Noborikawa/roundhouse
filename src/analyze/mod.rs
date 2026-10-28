@@ -5224,7 +5224,8 @@ impl Analyzer {
         let source_methods = SourceMethodIndex::new(app);
         for (class, method) in registry::stdlib::BUILTIN_BLOCK_VALUE_METHODS {
             let class_id = ClassId(Symbol::from(*class));
-            if !source_methods.instance_method(&class_id, method) {
+            // Either side: `RestClient.get` is a class method.
+            if !source_methods.instance_method(&class_id, method) && !source_methods.class_method(&class_id, method) {
                 found.push((class_id, Symbol::from(*method)));
             }
         }

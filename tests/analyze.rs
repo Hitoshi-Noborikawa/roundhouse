@@ -5975,6 +5975,10 @@ fn rest_client_verbs_answer_their_block_value() {
   def self.plain(url)
     RestClient.get(url)
   end
+
+  def self.parsed(url)
+    RestClient.get(url) { |response, _request, _result| JSON.parse(response.body) }
+  end
 end
 "#,
     )]);
@@ -5986,4 +5990,26 @@ end
         "plain form: {:?}",
         ty("plain")
     );
+    assert!(matches!(ty("parsed"), Some(Ty::Untyped)), "untyped block: {:?}", ty("parsed"));
+}
+
+#[test]
+fn an_app_defined_rest_client_get_answers_its_own_type() {
+    let app = app_from_files(&[
+        ("app/models/rest_client.rb", "class RestClient
+  def self.get(url)
+    42
+  end
+end
+"),
+        ("app/models/remote.rb", "class Remote
+  def self.status(url)
+    RestClient.get(url) { \"ok\" }
+  end
+end
+"),
+    ]);
+    let remote = app.library_classes.iter().find(|c| c.name.0.as_str() == "Remote").expect("Remote");
+    let ty = remote.methods.iter().find(|m| m.name.as_str() == "status").expect("status").body.ty.clone();
+    assert!(matches!(ty, Some(Ty::Int)), "the app's own get: {ty:?}");
 }
