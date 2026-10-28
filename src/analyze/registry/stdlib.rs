@@ -952,6 +952,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActiveRecord::RecordInvalid", Some(("record", Ty::Untyped))),
         ("ActiveRecord::RecordNotSaved", Some(("record", Ty::Untyped))),
         ("ActiveRecord::RecordNotDestroyed", Some(("record", Ty::Untyped))),
+        ("ActiveRecord::StaleObjectError", Some(("record", Ty::Untyped))),
         ("ActiveRecord::ReadOnlyRecord", None),
         ("ActiveRecord::ConnectionNotEstablished", None),
         ("ActiveRecord::ConnectionFailed", None),
@@ -974,6 +975,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let methods: Vec<(&str, Ty)> = methods;
         register_stdlib_class(classes, exc, &[], &methods);
     }
+    register_stdlib_class(classes, "ActiveRecord::StaleObjectError", &[], &[("attempted_action", Ty::Untyped)]);
+    classes.entry(ClassId(Symbol::from("ActiveRecord::StaleObjectError"))).or_default().parent =
+        Some(ClassId(Symbol::from("ActiveRecord::ActiveRecordError")));
     // `Associations::Preloader#call` — the ruby-family class in
     // preloading.rb. A two-keyword call is rewritten before it runs.
     register_stdlib_class(classes, "ActiveRecord::Associations::Preloader", &[], &[

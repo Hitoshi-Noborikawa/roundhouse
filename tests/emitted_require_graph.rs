@@ -274,6 +274,7 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
      Arel::Nodes::Not, Arel::Nodes::Case, Arel::Nodes::NamedFunction,
      Arel::Nodes::Ascending, Arel::Nodes::Descending, Arel::Nodes::Predicate,
      ActiveRecord::ConnectionFailed, ActiveRecord::ConnectionTimeoutError,
+     ActiveRecord::StaleObjectError,
      ActiveRecord::Encryption::Errors::Decryption,
      ActiveRecord::Encryption::Errors::Configuration,
      ActiveRecord::Associations::Preloader,

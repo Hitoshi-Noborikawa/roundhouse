@@ -495,7 +495,10 @@ fn untyped_subexpressions_baseline() {
     // `restore_attribute!` take the column name; it is a var on this
     // RBS-less probe (+7 in active_record/connection.rb); the RBS-paired
     // gate types it.
-    const CEILING: usize = 1121;
+    // MEASURED 1130 on 2026-10-28: StaleObjectError accepts arbitrary records
+    // and actions. This probe omits their Object? signatures, so their reads
+    // are vars here (+9 in errors.rb, 1121 -> 1130); the RBS-paired gate adds 2.
+    const CEILING: usize = 1130;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
