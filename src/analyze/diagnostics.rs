@@ -283,6 +283,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     out.extend(super::graphql::diagnose(app, diagnose_expr));
     out.extend(super::enum_raw_input::diagnose(app));
     out.extend(super::data::diagnose(app));
+    out.extend(super::database_identity::diagnose(app));
     // Constructor refusals must also reach executable class constants and
     // parameter defaults, which the ordinary method diagnostic policy omits.
     fn collect_storage_constructors(expr: &Expr, out: &mut Vec<Diagnostic>) {

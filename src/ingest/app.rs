@@ -1566,6 +1566,15 @@ end
     // `config/database.yml`'s `pragmas:`, run on each connection after
     // the Db shim's own (see `database_yml`).
     app.database_pragmas = super::database_yml::database_pragmas(vfs, dir);
+    // Its configurations, resolved at build time; registered as a source
+    // so a refusal points into it. Before the source snapshot below.
+    let database_yml = dir.join("config/database.yml");
+    if let Ok(text) = vfs.read_to_string(&database_yml) {
+        let file = super::sources::register(&database_yml.display().to_string(), &text);
+        let configurations = super::database_yml::database_configurations(&text, file);
+        app.databases = configurations.databases;
+        app.database_refusals.extend(configurations.refusals);
+    }
 
     for root in &roots {
         let controllers_dir = dir.join(root).join("controllers");
@@ -2549,6 +2558,9 @@ end
     // including declarations contributed by either kind of Concern,
     // and reuses the prepared resolver rather than rebuilding it.
     super::concern_accessors::validate(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
+    // Model-to-database ownership reads every model, concern splice and
+    // library module, so it runs once they all exist.
+    super::database_ownership::resolve(&mut app);
 
     // After every library class and include is known: a `...` that only
     // reaches a stdlib method of known signature through `super` takes
