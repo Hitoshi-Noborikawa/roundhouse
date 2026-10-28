@@ -1241,7 +1241,11 @@ fn every_runtime_method_body_concretely_typed() {
     // column's original value, whatever its type, to the column's writer
     // and `clear_attribute_change` stores the current one in the baseline
     // (+2 in active_record/connection.rb, 886 -> 888).
-    const CEILING: usize = 888;
+    // MEASURED 890 on 2026-10-28: StaleObjectError keeps Object? payloads,
+    // since Base?/String? would reject valid Rails constructor arguments.
+    // Its parent initializer call and enclosing sequence remain gradual
+    // (+2 in active_record/errors.rb, 888 -> 890).
+    const CEILING: usize = 890;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

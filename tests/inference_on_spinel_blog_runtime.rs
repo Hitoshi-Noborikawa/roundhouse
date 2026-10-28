@@ -503,7 +503,10 @@ fn untyped_subexpressions_baseline() {
     // `map` bound `row` to that. `_adapter_find_by_id`'s `id` goes through
     // the unmodeled `Db.escape_int` (+2). The RBS-paired gate types all six
     // through `each_row`'s block contract in base.rbs.
-    const CEILING: usize = 1127;
+    // MEASURED 1136 on 2026-10-28: StaleObjectError accepts arbitrary records
+    // and actions. This probe omits their Object? signatures, so their reads
+    // are vars here (+9 in errors.rb, 1127 -> 1136); the RBS-paired gate adds 2.
+    const CEILING: usize = 1136;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

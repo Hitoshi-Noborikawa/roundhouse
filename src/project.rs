@@ -6769,6 +6769,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActiveRecord::ConnectionTimeoutError",
     "ActiveRecord::Encryption::Errors::Decryption",
     "ActiveRecord::Encryption::Errors::Configuration",
+    "ActiveRecord::StaleObjectError",
     // `runtime/ruby/active_record/preloading.rb`. The two-keyword call
     // lowers away; the class value does not ship on a strict target.
     "ActiveRecord::Associations::Preloader",
