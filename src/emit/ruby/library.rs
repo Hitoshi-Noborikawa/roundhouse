@@ -8459,8 +8459,12 @@ fn emit_library_class_decl_inner(
             .filter(|call| !is_preserved_external_include(call) && !in_body(call))
             .collect()
     } else {
-        let mut own = app_extension_calls(lc, app, classes);
-        own.extend(gem_include_macro_calls(lc));
+        let mut picked = app_extension_calls(lc, app, classes);
+        picked.extend(gem_include_macro_calls(lc));
+        // Source order, each call once: `span_method` prepends its wrapper,
+        // and an app macro written after it may read the ancestors.
+        let own: Vec<&Expr> =
+            lc.unknown_calls.iter().filter(|call| picked.iter().any(|p| std::ptr::eq(*p, *call))).collect();
         let mut replayed = own.clone();
         replayed.retain(|call| !in_body(call));
         for call in &lc.unknown_calls {

@@ -4731,6 +4731,37 @@ pricer.report(RuntimeError.new("boom"))"#,
     assert!(gemfile.contains("gem \"elastic-apm\""), "Gemfile does not declare elastic-apm:\n{gemfile}");
 }
 
+/// `span_method` and an app module's class-body macro replay in source
+/// order: a macro written after `span_method` sees the method wrapped.
+#[test]
+fn span_method_replays_in_source_order_with_app_macros() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/worker.rb",
+            "module Audit
+  def audited(name)
+    raise \"span_method must run first\" if ancestors.first == self
+    name
+  end
+end
+
+class Worker
+  include ElasticAPM::SpanHelpers
+
+  def work
+    1
+  end
+  span_method :work, 'worker:work'
+
+  extend Audit
+  audited :work
+end
+",
+        )
+        .run_ruby(r#"raise "work" unless Worker.new.work == 1"#)
+        .assert_passes();
+}
+
 /// Off Ruby and JRuby, each ElasticAPM reference and the `SpanHelpers`
 /// include are refused.
 #[test]
