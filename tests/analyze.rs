@@ -923,6 +923,65 @@ fn hash_each_block_binds_key_and_value() {
     assert_eq!(body.ty, Some(Ty::Int), "block param v should be Int (hash value type)");
 }
 
+#[test]
+fn hash_to_h_block_binds_key_and_value() {
+    // {"a" => 1}.to_h { |k, v| k }  -> k types as String, v as Int.
+    // `Hash#to_h` yields key and value like `each`; with the
+    // parameters unbound, String core-ext calls on `k` (`k.humanize`)
+    // were never grounded and raised at run time.
+    use roundhouse::expr::Expr;
+    use roundhouse::ident::VarId;
+    use roundhouse::span::Span;
+
+    let block_body_ty = |read: (u32, &str)| {
+        let hash = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![(
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Str { value: "a".to_string() } },
+                    ),
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Int { value: 1 } },
+                    ),
+                )],
+                kwargs: false,
+            },
+        );
+        let block_body = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(read.0), name: Symbol::from(read.1) },
+        );
+        let block = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
+                params: vec![Symbol::from("k"), Symbol::from("v")],
+                block_param: None,
+                body: block_body,
+                block_style: Default::default(),
+            },
+        );
+        let send = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(hash),
+                method: Symbol::from("to_h"),
+                args: vec![],
+                block: Some(block),
+                parenthesized: false,
+            },
+        );
+        let analyzed = analyze_action_body(send);
+        let ExprNode::Send { block: Some(b), .. } = &*analyzed.node else { panic!() };
+        let ExprNode::Lambda { body, .. } = &*b.node else { panic!() };
+        body.ty.clone()
+    };
+    assert_eq!(block_body_ty((1, "k")), Some(Ty::Str), "block param k should be String (hash key type)");
+    assert_eq!(block_body_ty((2, "v")), Some(Ty::Int), "block param v should be Int (hash value type)");
+}
+
 // P2 — controller→view ivar channel --------------------------------------
 
 /// Walk an Expr collecting every `@ivar` read and its type.
