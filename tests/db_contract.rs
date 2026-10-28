@@ -1,5 +1,6 @@
 //! The Db contract suite on the CRuby shims (runtime/spinel/db_cruby.rb
-//! today), and the lane table every shim is checked from.
+//! for SQLite, runtime/spinel/db_pg.rb on the pg gem for PostgreSQL), and
+//! the lane table every shim is checked from.
 //!
 //! The suite, its layout and how to point a new shim at it are described
 //! in tests/support/db_contract.rs. The Spinel lanes run from
@@ -9,7 +10,8 @@
 //!   cargo test --test db_contract
 //!   ROUNDHOUSE_PG_TEST_URL=postgres://... cargo test --test db_contract
 //!
-//! A CRuby PostgreSQL lane skips, saying so, without ROUNDHOUSE_PG_TEST_URL.
+//! A CRuby PostgreSQL lane skips, saying so, without ROUNDHOUSE_PG_TEST_URL,
+//! and needs the pg gem with it.
 
 #[path = "support/db_contract.rs"]
 mod db_contract;
@@ -95,4 +97,27 @@ fn a_missing_program_says_what_the_lane_needs() {
         db_contract::LANE_DEADLINE,
         "the lane needs a widget runner",
     );
+}
+
+/// db_pg.rb's two drivers differ only through PgDriver, so the Spinel
+/// file and its CRuby replacement define the same functions, and the
+/// shim reaches the driver's session through it.
+#[test]
+fn both_pg_drivers_define_the_same_functions() {
+    let functions = |path: &str| {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut names: Vec<String> = text
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("def self."))
+            .map(|rest| rest.split(['(', ' ']).next().unwrap().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    let spinel = functions("runtime/spinel/pg_driver.rb");
+    assert_eq!(spinel, ["command_tag", "open", "sqlstate"]);
+    assert_eq!(functions("runtime/spinel/pg_driver_cruby.rb"), spinel);
+    let shim = std::fs::read_to_string("runtime/spinel/db_pg.rb").unwrap();
+    assert!(shim.contains("require_relative \"pg_driver\""));
+    assert!(!shim.contains("PG.connect("), "db_pg.rb opens sessions through PgDriver.open");
 }

@@ -220,6 +220,8 @@ PG_DB_INPUTS = {
     "runtime/spinel/db_pg.rbs",
     "runtime/spinel/pg_errors.rb",
     "runtime/spinel/pg_errors.rbs",
+    "runtime/spinel/pg_driver.rb",
+    "runtime/spinel/pg_driver.rbs",
     "runtime/ruby/db.rbs",
     "runtime/spinel/active_support_time_parsing.rb",
     "runtime/spinel/active_support_time_parsing.rbs",

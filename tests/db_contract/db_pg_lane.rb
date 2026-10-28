@@ -1,4 +1,6 @@
-# The lane file for runtime/spinel/db_pg.rb (Spinel over spinel-pg):
+# The lane file for runtime/spinel/db_pg.rb, on Spinel over spinel-pg and
+# on CRuby over the pg gem (the drivers differ only where pg_driver.rb
+# says):
 # the hook postgres_cases.rb needs, and the cases that check this shim's
 # own implementation rather than the Db contract or PostgreSQL in
 # general: URL parsing, `last_insert_rowid` from the INSERT's own
