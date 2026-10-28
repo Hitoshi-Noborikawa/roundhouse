@@ -26,6 +26,10 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub indexes: Vec<Index>,
     pub foreign_keys: Vec<ForeignKey>,
+    /// A plain `create_table id: false` declaration with no later key or
+    /// id-column changes. False also means unknown: retain the default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub known_keyless: bool,
     /// `create_virtual_table "message_search_index", "fts5", ["body",
     /// "tokenize=porter"]` — a table the DB builds from a MODULE rather
     /// than from a column list. It has no rowid column of its own, no

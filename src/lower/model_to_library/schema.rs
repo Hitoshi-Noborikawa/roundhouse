@@ -377,12 +377,12 @@ pub(super) fn push_schema_methods(
         });
     }
 
-    // def self.primary_key — emitted for custom keys and keyless tables.
-    // The runtime Base's `"id"` still handles the common case.
+    // Custom keys keep their existing declarations. Only a plain,
+    // unchanged id:false table supplies evidence for a nil override.
     let primary_key = model.primary_key.as_ref().or_else(|| {
         table.columns.iter().find(|col| col.primary_key && col.name.as_str() != "id").map(|col| &col.name)
     });
-    if primary_key.is_some() || !table.columns.iter().any(|col| col.primary_key) {
+    if primary_key.is_some() || table.known_keyless {
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,

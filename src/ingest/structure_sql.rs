@@ -294,6 +294,7 @@ fn handle_create_table(
         indexes: Vec::new(),
         foreign_keys: Vec::new(),
         virtual_module: None,
+        known_keyless: false,
     };
     let invalid_generated = crate::schema::generated::validate_table_with_dialect(&table, dialect);
     for (column, reason) in &invalid_generated {

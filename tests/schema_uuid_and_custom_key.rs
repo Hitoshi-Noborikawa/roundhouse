@@ -105,61 +105,54 @@ end
 }
 
 #[test]
-fn column_primary_keys_are_kept_in_schema_declarations() {
-    for (declaration, key) in [
-        ("t.integer :id, primary_key: true", Some("id")),
-        ("t.column :id, :integer, primary_key: true", Some("id")),
-        ("t.primary_key :id", Some("id")),
-        ("t.primary_key :code, :string", Some("code")),
-        ("t.string :code, primary_key: true", Some("code")),
-        ("t.integer :id", None),
-        ("t.integer :id, primary_key: false", None),
+fn only_unchanged_keyless_declarations_allow_a_nil_primary_key() {
+    use roundhouse::ingest::ingest_migration;
+    let create = "create_table :widgets, id: false do |t|\n  t.integer :value\nend";
+    for (later, known_keyless) in [
+        ("", true),
+        ("add_column :widgets, :label, :string", true),
+        ("rename_column :widgets, :value, :amount", true),
+        ("change_column :widgets, :value, :bigint", true),
+        ("remove_column :widgets, :value", true),
+        ("add_column :widgets, :id, :integer, primary_key: true", false),
+        ("add_column :widgets, :id, :integer", false),
+        ("rename_column :widgets, :value, :id", false),
+        ("remove_column :widgets, :id", false),
+        ("change_column :widgets, :id, :string", false),
+        ("add_column :widgets, :code, :string, primary_key: true", false),
+        ("add_primary_key :widgets, :value", false),
+        ("remove_primary_key :widgets", false),
+        ("add_column :widgets, :id, :integer\nremove_column :widgets, :id", false),
+        ("add_column :widgets, :id, :integer, primary_key: true\nrename_column :widgets, :id, :code", false),
     ] {
-        let source = format!(
-            "ActiveRecord::Schema.define do\n  create_table :widgets, id: false do |t|\n    {declaration}\n  end\nend\n"
-        );
-        let schema = ingest_schema(source.as_bytes(), "db/schema.rb").expect("ingest schema");
+        let mut schema = roundhouse::schema::Schema::default();
+        for (i, body) in [create, later].iter().enumerate() {
+            let source = format!("class Step < ActiveRecord::Migration[8.1]\n  def change\n{body}\n  end\nend\n");
+            ingest_migration(source.as_bytes(), &format!("{i}_step.rb"), &mut schema).unwrap();
+        }
         let table = schema.tables.values().next().unwrap();
-        assert_eq!(
-            table.columns.iter().find(|column| column.primary_key).map(|column| column.name.as_str()),
-            key,
-            "{declaration}",
-        );
+        assert_eq!(table.known_keyless, known_keyless, "{later}");
+        // This evidence must not introduce key constraints into the schema.
+        assert!(table.columns.iter().all(|column| !column.primary_key), "{later}");
+    }
+    for declaration in [
+        "t.integer :id",
+        "t.string :code, primary_key: true",
+    ] {
+        let source = format!("ActiveRecord::Schema.define do\n  create_table :widgets, id: false do |t|\n    {declaration}\n  end\nend\n");
+        let schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+        assert!(!schema.tables.values().next().unwrap().known_keyless, "{declaration}");
     }
 }
 
 #[test]
-fn primary_keys_follow_the_final_migration_schema() {
-    let mut schema = roundhouse::schema::Schema::default();
-    for (i, (body, key)) in [
-        ("create_table :widgets, id: false do |t|\n  t.integer :value\nend", None),
-        ("add_column :widgets, :id, :integer", None),
-        ("remove_column :widgets, :id", None),
-        ("add_column :widgets, :id, :integer, primary_key: true", Some("id")),
-        ("change_column :widgets, :id, :bigint, primary_key: true", Some("id")),
-        ("change_column :widgets, :id, :integer, primary_key: false", None),
-        ("change_column :widgets, :id, :integer, primary_key: true", Some("id")),
-        ("rename_column :widgets, :id, :code", Some("code")),
-        ("change_column :widgets, :code, :integer, primary_key: true", Some("code")),
-        ("remove_primary_key :widgets", None),
-        ("add_primary_key :widgets, :code", Some("code")),
-        ("remove_column :widgets, :code", None),
-        ("add_column :widgets, :id, :primary_key", Some("id")),
-        ("remove_column :widgets, :id", None),
-        ("add_column :widgets, :code, :string, primary_key: true", Some("code")),
-        ("change_column :widgets, :code, :string, limit: 32, primary_key: true", Some("code")),
-        ("change_column :widgets, :value, :bigint", Some("code")),
-        ("change_column :widgets, :code, :string", None),
-    ].iter().enumerate() {
-        let source = format!("class ChangeKey < ActiveRecord::Migration[8.1]\n  def change\n{body}\n  end\nend\n");
-        roundhouse::ingest::ingest_migration(source.as_bytes(), &format!("{i}_change_key.rb"), &mut schema)
-            .expect("fold migration");
-        let table = schema.tables.values().next().unwrap();
-        assert_eq!(
-            table.columns.iter().find(|column| column.primary_key).map(|column| column.name.as_str()),
-            *key,
-            "{body}",
+fn primary_key_column_types_keep_mains_unsupported_boundary() {
+    for key_type in [":string", "key_type", "\"string\".to_sym"] {
+        let source = format!(
+            "ActiveRecord::Schema.define do\n  key_type = :string\n  create_table :widgets, id: false do |t|\n    t.primary_key :code, {key_type}\n  end\nend\n"
         );
+        let error = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap_err();
+        assert!(error.to_string().contains("primary_key"), "{error}");
     }
 }
 
