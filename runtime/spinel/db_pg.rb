@@ -53,9 +53,18 @@
 # connection (Parse once, then Bind/Execute), bounded and least recently
 # used, closed on the server when evicted; `prepare_uncached` uses the
 # unnamed statement. Finalizing a read releases its handle, never the
-# named statement. Not here yet: the request query cache. The
-# SQLite-only entry points the server boot calls are no-ops, except
-# `seed_from_file`, which raises (see below).
+# named statement.
+#
+# The request query cache follows db.rb's: an identical SELECT within one
+# lease (or between query_cache_begin and query_cache_end) replays the
+# first result without a round trip, and any write empties the cache. It
+# is simpler here because a result is buffered whole when it runs, so a
+# replay is the same PgResult under a new handle: no partial captures, no
+# promotion. A result is kept up to QC_CAPTURE_ROWS rows, as db.rb keeps,
+# and SQL with a `$` placeholder never takes part, since its rows depend
+# on binds the key does not carry. The SQLite-only entry points the
+# server boot calls are no-ops, except `seed_from_file`, which raises
+# (see below).
 #
 # The SQL-functions hook: project.rs installs an app's SQLite functions
 # by patching a connection-open anchor in runtime/db.rb. This file does
@@ -348,6 +357,55 @@ class PgConn
     # Named statements, least recently used first.
     @named = []
     @name_serial = 0
+    # The request query cache (see the header): off until a lease or
+    # query_cache_begin turns it on.
+    @qc_on = false
+    @qc_by_sql = {}
+  end
+
+  # Results kept by the request query cache are at most this many rows,
+  # as db.rb's are: what it exists for is the point lookup a page repeats.
+  QC_CAPTURE_ROWS = 16
+
+  def qc_on?
+    @qc_on
+  end
+
+  def qc_begin
+    @qc_on = true
+    @qc_by_sql = {}
+    nil
+  end
+
+  def qc_end
+    @qc_on = false
+    @qc_by_sql = {}
+    nil
+  end
+
+  # A write: Rails empties the whole cache.
+  def qc_clear
+    @qc_by_sql = {} if @qc_on
+    nil
+  end
+
+  # A handle over the kept result of `sql`, already run; 0 on a miss.
+  def qc_lookup(sql)
+    return 0 if !@qc_on || sql.include?("$")
+    r = @qc_by_sql[sql]
+    return 0 if r.nil?
+    h = open_stmt(sql, false)
+    stmt(h).finish(r)
+    h
+  end
+
+  # Keep `st`'s result for the next identical SELECT, the first one only.
+  def qc_store(st)
+    return nil if !@qc_on || st.sql.include?("$") || st.params.length > 0
+    r = st.result
+    return nil if r.ntuples > QC_CAPTURE_ROWS
+    @qc_by_sql[st.sql] = r if @qc_by_sql[st.sql].nil?
+    nil
   end
 
   def client
@@ -432,6 +490,7 @@ class PgConn
       else
         st.finish(client.exec_params(st.sql, st.params))
       end
+      qc_store(st)
     rescue PG::Error => e
       PgErrors.raise_mapped(PgDriver.sqlstate(e), e.message)
       raise e
@@ -553,6 +612,7 @@ class PgConn
   # A simple query: the result, with its row count and INSERT target
   # recorded for `changes` and `last_insert_rowid`.
   def simple(sql)
+    qc_clear
     begin
       r = client.exec(sql)
       @last_tag = PgDriver.command_tag(r)
@@ -603,6 +663,7 @@ class PgConn
     c = @client
     @client = nil
     @named = []
+    qc_clear
     release_all
     begin
       c.close if !c.nil?
@@ -914,6 +975,8 @@ module Db
     idx = pool.lease
     conn = pool.conn(idx)
     Thread.current[:db_conn] = conn
+    # Rails wraps every request in the query cache; so does this lease.
+    conn.qc_begin
     request_error = nil
     begin
       result = yield
@@ -922,6 +985,7 @@ module Db
     ensure
       cleanup_error = nil
       begin
+        conn.qc_end
         conn.release_all
       rescue StandardError => e
         cleanup_error = e
@@ -964,8 +1028,6 @@ module Db
   #   reads, and READ COMMITTED gives each statement its own snapshot.
   # - The checkpointer keeps SQLite's WAL short; the server checkpoints
   #   its own WAL.
-  # - The request query cache is a later step here; until then every
-  #   read is a round trip.
   def self.read_snapshot_begin
     true
   end
@@ -978,16 +1040,20 @@ module Db
     nil
   end
 
+  # ── The request query cache ──
+  #
+  # On the current connection, as in db.rb: a lease brackets it, and
+  # these bracket it by hand (`ActiveRecord::Base.cache` / `uncached`).
   def self.query_cache_begin
-    nil
+    current_conn.qc_begin
   end
 
   def self.query_cache_end
-    nil
+    current_conn.qc_end
   end
 
   def self.query_cache_enabled?
-    false
+    current_conn.qc_on?
   end
 
   # A page-level copy of a SQLite file has no PostgreSQL meaning. Seed
@@ -1063,7 +1129,7 @@ module Db
   # A write with a RETURNING clause (roundhouse#91): runs once, inline,
   # like `exec`, and answers a handle over the returned rows
   # (step?/column_*/finalize, as for a read). `changes` is its row count.
-  # There is no query cache to invalidate yet.
+  # Being a write, it empties the request query cache (PgConn#simple).
   def self.exec_returning(sql)
     record_query(sql)
     conn = current_conn
@@ -1082,8 +1148,13 @@ module Db
   # Prepare without re-entering prepare_marked. Post-inline SQL may
   # still contain \x01 inside string literals (unmarked values).
   def self.prepare_plain(sql)
+    conn = current_conn
+    # A replay is not a round trip, and `capture_sql` does not count it
+    # (Rails' SQLCounter skips CACHE events), as in db.rb.
+    hit = conn.qc_lookup(sql)
+    return hit if hit > 0
     record_query(sql)
-    h = current_conn.open_stmt(sql, true)
+    h = conn.open_stmt(sql, true)
     h
   end
 
@@ -1098,8 +1169,13 @@ module Db
   # Reads with too many SQL shapes to cache run as the unnamed statement.
   def self.prepare_uncached(sql)
     sql = sql.to_s
+    conn = current_conn
+    # Statement reuse is skipped; the request result cache still applies,
+    # as in db_cruby.rb.
+    hit = conn.qc_lookup(sql)
+    return hit if hit > 0
     record_query(sql)
-    h = current_conn.open_stmt(sql, false)
+    h = conn.open_stmt(sql, false)
     h
   end
 
