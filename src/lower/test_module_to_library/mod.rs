@@ -59,7 +59,7 @@ pub fn ruby_family_absolute_test_urls(modules: &[TestModule]) -> Vec<TestModule>
         .iter()
         .map(|tm| {
             let shadows: crate::det::HashSet<Symbol> =
-                tm.helpers.iter().map(|h| h.name.clone()).collect();
+                tm.helpers.iter().map(|h| h.name.clone()).chain(tm.included_module_methods().cloned()).collect();
             let rewrite = |e: &Expr| absolute_test_url(e, &shadows);
             let mut tm = tm.clone();
             for t in &mut tm.tests {
@@ -814,6 +814,7 @@ fn build_library_class(
         .helpers
         .iter()
         .map(|h| h.name.clone())
+        .chain(tm.included_module_methods().cloned())
         .filter(|n| n.as_str().ends_with("_path") || n.as_str().ends_with("_url"))
         .collect();
     let mut methods: Vec<MethodDef> = tm

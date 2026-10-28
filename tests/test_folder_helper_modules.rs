@@ -100,6 +100,26 @@ class ForwardingTest < ActiveSupport::TestCase
 end
 "#;
 
+// A carried module's method named like a route helper is the class's
+// own, as `include` makes it: not `RouteHelpers.generate_file_path`.
+const PATH_HELPER: &str = r#"module PathHelper
+  def generate_file_path(name)
+    "files/#{name}"
+  end
+end
+"#;
+
+const PATH_TEST: &str = r#"require "test_helper"
+
+class PathTest < ActiveSupport::TestCase
+  include PathHelper
+
+  test "the module's _path method answers, not a route" do
+    assert_equal "files/a", generate_file_path("a")
+  end
+end
+"#;
+
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("roundhouse.yml", "test_paths:\n  - test/support\n")
@@ -108,6 +128,8 @@ fn app() -> emit_and_run::Overlay {
         .write("test/models/flunk_test.rb", FLUNKING)
         .write("test/support/forwarding_helper.rb", FORWARDING_HELPER)
         .write("test/models/forwarding_test.rb", FORWARDING_TEST)
+        .write("test/support/path_helper.rb", PATH_HELPER)
+        .write("test/models/path_test.rb", PATH_TEST)
 }
 
 #[test]
@@ -135,4 +157,11 @@ fn a_module_that_asserts_nothing_answers_through_the_include() {
     let run = app().run_test("test/models/forwarding_test.rb");
     run.assert_passes();
     assert!(run.stdout.contains("ForwardingTest: 1 tests passed"), "{}", run.stdout);
+}
+
+#[test]
+fn a_carried_modules_path_named_method_is_not_a_route_helper() {
+    let run = app().run_test("test/models/path_test.rb");
+    run.assert_passes();
+    assert!(run.stdout.contains("PathTest: 1 tests passed"), "{}", run.stdout);
 }
