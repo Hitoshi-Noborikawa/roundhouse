@@ -811,7 +811,7 @@ fn a_has_many_readers_to_sql_is_the_scoped_query() {
         .run_ruby(
             r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
 sql = a.comment_sql
-raise "comment_sql: #{sql}" unless sql.include?("comments") && sql.include?("article_id = #{a.id}")
+raise "comment_sql: #{sql}" unless sql.include?("comments") && sql.include?(%("article_id" = #{a.id}))
 puts "has_many to_sql passed"
 "#,
         );

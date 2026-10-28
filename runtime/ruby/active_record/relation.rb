@@ -752,15 +752,17 @@ module ActiveRecord
       record.attributes[col]
     end
 
-    # The bare column an order term names -- `"created_at"` and
-    # `"boosts.created_at DESC"` both answer `"created_at"` -- or nil for
-    # anything that is not one column with an optional ASC/DESC.
+    # The bare column an order term names -- `"created_at"`,
+    # `"boosts.created_at DESC"` and the quoted `"\"created_at\" DESC"`
+    # all answer `"created_at"` -- or nil for anything that is not one
+    # column with an optional ASC/DESC.
     def order_column(term)
       words = term.strip.split(/\s+/)
       return nil if words.length == 0 || words.length > 2
       col = words[0]
       dot = col.rindex(".")
       col = col[(dot + 1)..] unless dot.nil?
+      col = col[1, col.length - 2].to_s if col.length > 2 && col.start_with?("\"") && col.end_with?("\"")
       return nil unless col.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/)
       if words.length == 2
         dir = words[1].upcase
@@ -3020,9 +3022,11 @@ module ActiveRecord
     # (as Rails does for hash conditions) so a condition survives `merge`
     # into a JOINed query where the bare name would be ambiguous —
     # `hidden_stories.user_id`, not `user_id`, after `joins(:hidings)`.
+    # Each part is quoted, as `pluck` does: a column named after an SQL
+    # keyword (`index`, `order`) is a syntax error bare.
     def column_predicate(col, val)
       col = sql_ident(col)
-      qcol = col.include?(".") ? col : "#{@table}.#{col}"
+      qcol = col.include?(".") ? quote_qualified_ident(col) : "#{@table}.#{ActiveRecord.adapter.quote_column_name(col)}"
       if val.is_a?(Relation)
         # A relation value is Rails' subquery form —
         # `where(story_id: Tagging.where(...).select(:story_id))` →
@@ -3480,17 +3484,30 @@ module ActiveRecord
     # Isolated so `each` sees `Hash[Symbol, untyped]` keys as Symbol.
     # `order_term`'s Hash|String union does not narrow, and untyped
     # `col` interpolations blow the Bar B ceiling.
+    # Names are quoted, as Rails quotes them: a column named after an SQL
+    # keyword (`index`, `order`) is a syntax error bare, and a `table.col`
+    # key quoted whole is one (unknown) name. A flat key stays
+    # unqualified, so under a JOIN it still resolves to the output alias
+    # `_columns_sql` gives every column; `order_column` reads it back.
     def format_order_hash(h)
       parts = []
       h.each do |col, dir|
         if dir.is_a?(Hash)
           inner_col = dir.keys[0]
-          parts << "#{sql_ident(col)}.#{sql_ident(inner_col)} #{order_direction(dir[inner_col])}"
+          parts << "#{quote_qualified_ident("#{sql_ident(col)}.#{sql_ident(inner_col)}")} #{order_direction(dir[inner_col])}"
         else
-          parts << "#{sql_ident(col)} #{order_direction(dir)}"
+          name = sql_ident(col)
+          quoted = name.include?(".") ? quote_qualified_ident(name) : ActiveRecord.adapter.quote_column_name(name)
+          parts << "#{quoted} #{order_direction(dir)}"
         end
       end
       parts.join(", ")
+    end
+
+    # `table.col` (already accepted by `sql_ident`) with each part quoted.
+    def quote_qualified_ident(name)
+      table, column = name.split(".", 2)
+      "#{ActiveRecord.adapter.quote_column_name(table)}.#{ActiveRecord.adapter.quote_column_name(column)}"
     end
   end
 end

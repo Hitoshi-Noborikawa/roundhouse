@@ -384,7 +384,7 @@ class BaseTest < Minitest::Test
     rel = ActiveRecord::Relation.new(Item).where(title: "o'k")
     log = Db.capture_sql { assert_equal ["o'k"], rel.to_a.map(&:title) }
     assert_equal 1, log.length
-    assert_match(/items\.title = \?/, log[0])
+    assert_match(/items\."title" = \?/, log[0])
     refute_match(/o''k/, log[0])
     assert_equal [], ActiveRecord::Relation.new(Item).where(id: -1).to_a
   end
@@ -394,8 +394,8 @@ class BaseTest < Minitest::Test
   def test_hash_condition_values_inline_outside_reads
     rel = ActiveRecord::Relation.new(Item).where(title: "o'k", id: 7)
     [rel.to_sql, rel.count_sql, rel.exists_sql(1), rel.arel.to_sql].each do |sql|
-      assert_match(/items\.title = 'o''k'/, sql)
-      assert_match(/items\.id = 7/, sql)
+      assert_match(/items\."title" = 'o''k'/, sql)
+      assert_match(/items\."id" = 7/, sql)
       refute sql.include?("\x01"), sql.inspect
     end
   end
@@ -765,8 +765,8 @@ class BaseTest < Minitest::Test
 
   def test_order_term_nested_hash_qualifies_table_column
     rel = ActiveRecord::Relation.new(Item)
-    assert_equal "rooms.updated_at DESC", rel.order_term({ rooms: { updated_at: :desc } })
-    assert_equal "updated_at DESC", rel.order_term({ updated_at: :desc })
+    assert_equal "\"rooms\".\"updated_at\" DESC", rel.order_term({ rooms: { updated_at: :desc } })
+    assert_equal "\"updated_at\" DESC", rel.order_term({ updated_at: :desc })
     assert_equal "updated_at", rel.order_term(:updated_at)
     assert_equal "id DESC", rel.order_term("id DESC")
   end
@@ -775,11 +775,11 @@ class BaseTest < Minitest::Test
     base = ActiveRecord::Relation.new(Item).where(title: "A")
     prior = base.to_sql
     fork = base.spawn.where(title: "B")
-    assert_match(/title = 'B'/, fork.to_sql)
+    assert_match(/"title" = 'B'/, fork.to_sql)
     assert_equal prior, base.to_sql
     # Copy-on-write: mutating the parent after spawn must not rewrite the fork.
     base.where!(title: "C")
-    assert_match(/title = 'B'/, fork.to_sql)
+    assert_match(/"title" = 'B'/, fork.to_sql)
     refute_match(/title = 'C'/, fork.to_sql)
     ordered = ActiveRecord::Relation.new(Item).where(title: "A")
     prior_order = ordered.to_sql
