@@ -83,7 +83,7 @@ pub struct Overlay {
 }
 
 enum Edit {
-    Write { path: String, content: String },
+    Write { path: String, content: Vec<u8> },
     Replace { path: String, find: String, replace: String },
     Remove { path: String },
 }
@@ -91,7 +91,14 @@ enum Edit {
 impl Overlay {
     /// Add a file, or replace one outright.
     pub fn write(mut self, path: &str, content: &str) -> Self {
-        self.edits.push(Edit::Write { path: path.into(), content: content.into() });
+        self.edits.push(Edit::Write { path: path.into(), content: content.as_bytes().to_vec() });
+        self
+    }
+
+    /// `write` for content that is not UTF-8, such as an image under
+    /// `public/`: ingest carries it as a binary asset, not source.
+    pub fn write_bytes(mut self, path: &str, content: &[u8]) -> Self {
+        self.edits.push(Edit::Write { path: path.into(), content: content.to_vec() });
         self
     }
 
@@ -149,6 +156,12 @@ impl Overlay {
     /// required and the default adapter configured on an in-memory
     /// database before the script's first line.
     pub fn run_ruby(self, script: &str) -> Run {
+        self.run_ruby_env(script, &[])
+    }
+
+    /// [`Overlay::run_ruby`] with more environment for the process, such
+    /// as `RUBYLIB` naming a gem the emitted tree loads natively.
+    pub fn run_ruby_env(self, script: &str, env: &[(&str, &str)]) -> Run {
         let (emitted, errors) = self.emit_tree(BuildTarget::Ruby);
         // `ruby -e` reads its script in the locale's encoding, so under
         // `LANG=C` any non-ASCII literal is a syntax error. The magic
@@ -161,6 +174,7 @@ impl Overlay {
             .arg(&script)
             .current_dir(&emitted)
             .env("BLOG_DB", ":memory:")
+            .envs(env.iter().copied())
             .output()
             .expect("spawn ruby");
         Run::new("ruby -e <script>".into(), emitted, errors, output)
@@ -317,8 +331,22 @@ impl Overlay {
             roundhouse::project::target_files(&app, &source, target)
         });
         errors.extend(emit_diags.into_iter().filter(|d| d.severity == Severity::Error));
-        let files = files.expect("target files");
+        let files = match files {
+            Ok(files) => files,
+            // A refusal of the whole target (`gems::extension_gem_refusals`)
+            // is also reported as error diagnostics: the tree is empty, a run
+            // in it fails, and the caller's assertions read `errors`. A
+            // refusal no diagnostic carries still panics.
+            Err(message) if !errors.is_empty() && message.lines().all(|line| errors.iter().any(|d| d.message == line)) => {
+                std::fs::create_dir_all(&emitted).expect("mkdir emitted");
+                return (emitted, app, errors);
+            }
+            Err(message) => panic!("target files: {message:?}"),
+        };
         roundhouse::project::write_to_dir(&files, &emitted).expect("write ruby target tree");
+        // The verbatim copy of binary assets the CLI writes after the tree.
+        roundhouse::project::write_binary_assets(&app.binary_assets, &files, &emitted)
+            .expect("write binary assets");
         (emitted, app, errors)
     }
 }
