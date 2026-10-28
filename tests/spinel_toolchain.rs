@@ -100,6 +100,8 @@ mod erb_template_contract;
 mod bare_permit_contract;
 #[path = "support/data_paths.rs"]
 mod data_paths_contract;
+#[path = "support/eager_load_filter.rs"]
+mod eager_load_filter_contract;
 #[path = "spinel_toolchain/erb_template.rs"]
 mod erb_template;
 #[path = "support/anonymous_keywords.rs"]
@@ -190,6 +192,30 @@ mod stdlib_rnp;
 mod representable_decorator;
 #[path = "spinel_toolchain/representable.rs"]
 mod representable;
+#[path = "support/for_loops.rs"]
+mod for_loops_contract;
+#[path = "spinel_toolchain/for_loops.rs"]
+mod for_loops;
+#[path = "support/block_macros.rs"]
+mod block_macros_contract;
+#[path = "spinel_toolchain/block_macros.rs"]
+mod block_macros;
+#[path = "support/stdlib_scan_zlib.rs"]
+mod stdlib_scan_zlib_contract;
+#[path = "spinel_toolchain/stdlib_scan_zlib.rs"]
+mod stdlib_scan_zlib;
+#[path = "support/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include_contract;
+#[path = "spinel_toolchain/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include;
+#[path = "support/mutable_literals.rs"]
+mod mutable_literals_contract;
+#[path = "spinel_toolchain/mutable_literals.rs"]
+mod mutable_literals;
+#[path = "support/auto_source_gem.rs"]
+mod auto_source_gem_contract;
+#[path = "spinel_toolchain/auto_source_gem.rs"]
+mod auto_source_gem;
 #[path = "support/active_model_serializer.rs"]
 mod active_model_serializer_app;
 #[path = "spinel_toolchain/active_model_serializer.rs"]

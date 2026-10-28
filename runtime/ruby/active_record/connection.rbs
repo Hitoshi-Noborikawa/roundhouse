@@ -146,7 +146,7 @@ module ActiveRecord
     def self.delete_by: (Hash[Symbol, untyped] | String conditions) -> Integer
     def self.destroy_by: (Hash[Symbol, untyped] | String conditions) -> Array[Base]
     def self.distinct: (?(bool | Symbol | String) value) -> Relation
-    def self.eager_load: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def self.eager_load: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def self.excluding: (*untyped records) -> Relation
     def self.find_each: () { (Base) -> void } -> Relation
     def self.find_in_batches: () { (Array[Base]) -> void } -> Relation
@@ -156,7 +156,7 @@ module ActiveRecord
     def self.group: (*(String | Symbol) parts) -> Relation
     def self.having: (String condition, *untyped args) -> Relation
     def self.ids: () -> Array[Integer]
-    def self.includes: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def self.includes: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def self.joins: (String | Symbol spec) -> Relation
     def self.left_joins: (String | Symbol spec) -> Relation
     def self.left_outer_joins: (String | Symbol spec) -> Relation
@@ -171,7 +171,7 @@ module ActiveRecord
     def self.order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def self.pick: (String | Symbol col) -> untyped
     def self.pluck: (String | Symbol col) -> Array[untyped]
-    def self.preload: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def self.preload: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def self.references: (*Symbol names) -> Relation
     def self.reorder: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def self.select: (*(String | Symbol) specs) -> Relation
@@ -201,6 +201,8 @@ module ActiveRecord
     def self.first: () -> Base?
     def self.take: () -> Base?
     def self._hydrate_all: (String sql) -> Array[Base]
+    def self._adapter_all: () -> Array[Base]
+    def self._adapter_find_by_id: (Integer id) -> Base?
     def self.decode_plucked: (String | Symbol column, untyped value) -> untyped
     def save: () -> bool
     def valid?: () -> bool
@@ -236,5 +238,7 @@ module ActiveRecord
     def saved_changes: () -> Hash[String, untyped]
     def changes_to_save: () -> Hash[String, untyped]
     def attribute_was: (String name) -> untyped
+    def clear_attribute_change: (String name) -> nil
+    def restore_attribute!: (String name) -> nil
   end
 end

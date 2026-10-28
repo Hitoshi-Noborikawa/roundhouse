@@ -39,7 +39,7 @@
 //! `key:`, `if:` / `unless:` (a Symbol naming a method), or a block
 //! without parameters, and instance methods.
 
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 use crate::dialect::{LibraryClass, LibraryClassOrigin};
 use crate::expr::{Expr, ExprNode, Literal};
@@ -97,20 +97,20 @@ pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[So
     if selected.is_empty() {
         return Ok(());
     }
-    let mut decls: HashMap<ClassId, Decl> = HashMap::new();
-    let mut refused: HashMap<ClassId, IngestError> = HashMap::new();
+    let mut decls: HashMap<ClassId, Decl> = HashMap::default();
+    let mut refused: HashMap<ClassId, IngestError> = HashMap::default();
     // A serializer named anywhere but its declaration and the renders the
     // rewrite takes keeps the gem's class, which that use needs. Refused at
     // its declaration, naming the use: a gap in the using file would claim
     // that file's own findings.
-    let mut used: HashMap<ClassId, String> = HashMap::new();
+    let mut used: HashMap<ClassId, String> = HashMap::default();
     let known: HashSet<String> = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
     for source in sources {
         if !selected.iter().any(|id| source.text.contains(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()))) {
             continue;
         }
         let parsed = super::prism::parse_silent(source.text.as_bytes());
-        let mut uses = OtherUses { selected: &selected, known: &known, nesting: Vec::new(), found: HashMap::new() };
+        let mut uses = OtherUses { selected: &selected, known: &known, nesting: Vec::new(), found: HashMap::default() };
         ruby_prism::Visit::visit(&mut uses, &parsed.node());
         for (id, offset) in uses.found {
             let (line, _) = source.line_col(offset as u32);
@@ -181,7 +181,7 @@ pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[So
     }
     // A class whose expansion doesn't ingest is refused like any other,
     // left as it was.
-    let mut lowered_ok: HashSet<ClassId> = HashSet::new();
+    let mut lowered_ok: HashSet<ClassId> = HashSet::default();
     for class in &mut app.library_classes {
         if let Some(decl) = decls.get(&class.name) {
             let before = class.clone();
@@ -250,7 +250,7 @@ fn collect_fields(class: &ruby_prism::ClassNode<'_>, source: &SourceFile) -> Ing
     let stmts = flatten_statements(body);
     // The serializer's own instance methods: an attribute of that name
     // reads the method, as `read_attribute_for_serialization` does.
-    let mut methods: HashSet<String> = HashSet::new();
+    let mut methods: HashSet<String> = HashSet::default();
     for stmt in &stmts {
         if let Some(def) = stmt.as_def_node() {
             let offset = stmt.location().start_offset();
@@ -373,7 +373,7 @@ fn collect_fields(class: &ruby_prism::ClassNode<'_>, source: &SourceFile) -> Ing
             other => return Err(fail(&format!("`{other}` is outside the ActiveModel::Serializer subset (attributes)"))),
         }
     }
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for f in &fields {
         if !seen.insert(f.key.clone()) {
             return Err(refuse(source, class.location().start_offset(), &format!("the key `{}` is declared twice", f.key)));
@@ -586,9 +586,14 @@ impl OtherUses<'_> {
     /// the innermost first, then at the top level. A name found nowhere
     /// there (one an ancestor's constants would answer) counts as every
     /// selected class it's a suffix of, so none is lowered while it may
-    /// still be used.
-    fn named(&self, path: &[String]) -> Vec<ClassId> {
+    /// still be used. A rooted path (`::ArticleSerializer`) names only the
+    /// top-level class.
+    fn named(&self, path: &[String], rooted: bool) -> Vec<ClassId> {
         let written = path.join("::");
+        if rooted {
+            let id = ClassId(Symbol::from(written.as_str()));
+            return if self.selected.contains(&id) { vec![id] } else { Vec::new() };
+        }
         let candidates = self.nesting.iter().rev().map(|scope| format!("{scope}::{written}")).chain([written.clone()]);
         for full in candidates {
             if self.known.contains(&full) {
@@ -604,7 +609,7 @@ impl OtherUses<'_> {
 
     fn note(&mut self, node: &ruby_prism::Node<'_>) -> bool {
         let Some(path) = super::util::constant_path_of(node) else { return false };
-        let ids = self.named(&path);
+        let ids = self.named(&path, is_rooted(node));
         if ids.is_empty() {
             return false;
         }
@@ -612,6 +617,17 @@ impl OtherUses<'_> {
             self.found.entry(id).or_insert(node.location().start_offset());
         }
         true
+    }
+
+    /// Whether a render's `serializer:` written as `path` is one
+    /// `rewrite_renders` takes: it matches the written name to a lowered
+    /// class's full name, so a short name that resolves through the
+    /// nesting (`ArticleSerializer` inside `module Api`) stays with the
+    /// gem's class and is a use like any other.
+    fn rewritten(&self, node: &ruby_prism::Node<'_>) -> bool {
+        let Some(path) = super::util::constant_path_of(node) else { return false };
+        let written = path.join("::");
+        matches!(self.named(&path, is_rooted(node)).as_slice(), [id] if id.0.as_str() == written)
     }
 
     /// Enters a class or module written as `name` from the current nesting.
@@ -651,9 +667,10 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
         }
     }
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        // `render json: x, serializer: S`: S is not another use. A render
-        // the rewrite takes calls the lowered class; one with another
-        // option is already the reported residue.
+        // `render json: x, serializer: S`, S written by its full name: not
+        // another use. A render the rewrite takes calls the lowered class;
+        // one with another option is already the reported residue. S
+        // written by a shorter name the rewrite doesn't match is a use.
         if node.receiver().is_none() && constant_id_str(&node.name()) == "render" {
             if let Some(args) = node.arguments() {
                 let list: Vec<_> = args.arguments().iter().collect();
@@ -664,7 +681,7 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
                                 let Some(assoc) = el.as_assoc_node() else { continue };
                                 let key = super::util::symbol_value(&assoc.key());
                                 if matches!(key.as_deref(), Some("serializer" | "each_serializer"))
-                                    && super::util::constant_path_of(&assoc.value()).is_some_and(|p| !self.named(&p).is_empty())
+                                    && self.rewritten(&assoc.value())
                                 {
                                     continue;
                                 }
@@ -684,6 +701,21 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
     fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
         if !self.note(&node.as_node()) {
             ruby_prism::visit_constant_path_node(self, node);
+        }
+    }
+}
+
+/// Whether a constant path is written from the top level (`::A::B`): its
+/// leftmost segment has no parent.
+fn is_rooted(node: &ruby_prism::Node<'_>) -> bool {
+    let Some(mut path) = node.as_constant_path_node() else { return false };
+    loop {
+        match path.parent() {
+            None => return true,
+            Some(parent) => match parent.as_constant_path_node() {
+                Some(p) => path = p,
+                None => return false,
+            },
         }
     }
 }

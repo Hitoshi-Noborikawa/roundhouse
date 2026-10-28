@@ -1375,6 +1375,13 @@ module ActiveStorage
       b.nil? ? nil : b.content_type
     end
 
+    # The blob's bytes, or nil when nothing is attached — Rails'
+    # `Attached::One` delegates to its attachment with `allow_nil: true`.
+    def download
+      b = blob
+      b.nil? ? nil : b.download
+    end
+
     def key
       b = blob
       b.nil? ? "" : b.key

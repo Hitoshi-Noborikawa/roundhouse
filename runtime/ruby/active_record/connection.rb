@@ -1479,7 +1479,30 @@ module ActiveRecord
     # targets' adapter contract stops at `all`/`find`/`count`, and
     # their models always carry the emitted override.
     def self._hydrate_all(sql)
-      ActiveRecord.adapter.select_rows(sql).map { |row| instantiate(row) }
+      records = []
+      # Through a local, as `Relation#load_records` explains.
+      adapter = ActiveRecord.adapter
+      adapter.each_row(sql) { |row| records << instantiate(row) }
+      records
+    end
+
+    # base.rb's `_adapter_all` / `_adapter_find_by_id` defaults, for the
+    # same hand-written models: the adapter's `all` / `find` queries,
+    # each row yielded to `instantiate` rather than taken from the Array
+    # `all`/`find` build (on Spinel that row reached every model's
+    # `<Model>Row.from_raw` boxed). Lowerer-emitted models override both.
+    def self._adapter_all
+      records = []
+      adapter = ActiveRecord.adapter
+      adapter.each_row("SELECT * FROM #{table_name}") { |row| records << instantiate(row) }
+      records
+    end
+
+    def self._adapter_find_by_id(id)
+      found = nil
+      adapter = ActiveRecord.adapter
+      adapter.each_row("SELECT * FROM #{table_name} WHERE id = #{Db.escape_int(id)} LIMIT 1") { |row| found = instantiate(row) }
+      found
     end
 
     # A plucked value as the record would hold it (`Relation#pluck`). A
@@ -2019,6 +2042,27 @@ module ActiveRecord
     def attribute_was(name)
       pair = changes_to_save[name]
       pair.nil? ? attributes[name] : pair[0]
+    end
+
+    # Rails' `clear_<col>_change`: the column's current value becomes its
+    # baseline, so it is no longer pending. Other columns stay as they were.
+    def clear_attribute_change(name)
+      baseline = @__last_saved_attributes
+      baseline = baseline.nil? ? {} : baseline.dup
+      baseline[name] = attributes[name]
+      @__last_saved_attributes = baseline
+      @__touched_updated_at = nil if name == "updated_at"
+      nil
+    end
+
+    # Rails' `restore_<col>!`: a pending change is written back to its
+    # original value and cleared.
+    def restore_attribute!(name)
+      if attribute_changed?(name)
+        __send__("#{name}=", attribute_was(name))
+        clear_attribute_change(name)
+      end
+      nil
     end
 
     # ---- cache_key / cache_version / cache_key_with_version ---------

@@ -78,7 +78,7 @@
 //! too; the literal is exactly what Ruby's `defined?` returns for a
 //! constant that exists/doesn't, so behaviour is unchanged.
 
-use std::collections::HashSet;
+use crate::det::HashSet;
 
 use crate::app::App;
 use crate::expr::{BoolOpKind, Expr, ExprNode, Literal};
@@ -211,7 +211,7 @@ struct Facts {
 
 impl Facts {
     fn of(app: &App) -> Facts {
-        let mut tree: HashSet<String> = HashSet::new();
+        let mut tree: HashSet<String> = HashSet::default();
         for m in &app.models {
             tree.insert(m.name.0.as_str().to_string());
         }
@@ -226,7 +226,7 @@ impl Facts {
             tree.insert(name);
         }
         let mut tree_and_prefixes = tree.clone();
-        let mut segments = HashSet::new();
+        let mut segments = HashSet::default();
         for name in &tree {
             let mut acc = String::new();
             for seg in name.split("::") {
@@ -395,8 +395,8 @@ struct LoadTimeRoots {
 
 impl LoadTimeRoots {
     fn of(app: &App) -> LoadTimeRoots {
-        let mut class_stmts: HashSet<usize> = HashSet::new();
-        let mut load_time: HashSet<usize> = HashSet::new();
+        let mut class_stmts: HashSet<usize> = HashSet::default();
+        let mut load_time: HashSet<usize> = HashSet::default();
         for m in &app.models {
             for item in &m.body {
                 if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
@@ -475,13 +475,13 @@ pub fn apply_defined_const_fold(app: &mut App) {
         if class_stmts.contains(&addr(body)) {
             fold_class_statement(body, owner, &facts);
         } else {
-            walk(body, owner, &facts, load_time.contains(&addr(body)));
+            walk(body, owner, &facts, load_time.contains(&addr(body)), false);
         }
     });
     // Templates belong to no class: an unrooted name is looked up from
     // the top level.
     for view in &mut app.views {
-        walk(&mut view.body, None, &facts, false);
+        walk(&mut view.body, None, &facts, false, false);
     }
 }
 
@@ -500,11 +500,11 @@ fn fold_class_statement(e: &mut Expr, owner: Option<&ClassId>, facts: &Facts) {
     // Class-body statements run while the tree loads.
     let guarded = matches!(&*e.node, ExprNode::If { .. } | ExprNode::BoolOp { .. });
     if !guarded {
-        walk(e, owner, facts, true);
+        walk(e, owner, facts, true, false);
         return;
     }
     let mut folded = e.clone();
-    if !walk(&mut folded, owner, facts, true) {
+    if !walk(&mut folded, owner, facts, true, false) {
         return;
     }
     let keep = match &*folded.node {
@@ -542,10 +542,22 @@ fn lit(like: &Expr, value: Literal, ty: Ty) -> Expr {
     out
 }
 
-/// Fold `e` in place; true when anything under it changed.
-fn walk(e: &mut Expr, owner: Option<&ClassId>, facts: &Facts, lt: bool) -> bool {
+/// Fold `e` in place; true when anything under it changed. `cond`:
+/// only `e`'s truthiness is read (an `if`/`while` condition, the left
+/// of `&&`/`||`, the operand of `!`, or the right of a `&&`/`||` that
+/// is itself one).
+fn walk(e: &mut Expr, owner: Option<&ClassId>, facts: &Facts, lt: bool, cond: bool) -> bool {
+    let child_cond: &[bool] = match &*e.node {
+        ExprNode::If { .. } | ExprNode::While { .. } => &[true],
+        ExprNode::BoolOp { .. } => &[true, cond],
+        ExprNode::Send { recv: Some(_), method, args, .. } if method.as_str() == "!" && args.is_empty() => &[true],
+        _ => &[],
+    };
     let mut changed: Vec<bool> = Vec::new();
-    e.node.for_each_child_mut(&mut |c| changed.push(walk(c, owner, facts, lt)));
+    e.node.for_each_child_mut(&mut |c| {
+        let cond = child_cond.get(changed.len()).copied().unwrap_or(false);
+        changed.push(walk(c, owner, facts, lt, cond))
+    });
     let any = changed.iter().any(|c| *c);
 
     if let ExprNode::Defined { operand } = &*e.node {
@@ -553,6 +565,14 @@ fn walk(e: &mut Expr, owner: Option<&ClassId>, facts: &Facts, lt: bool) -> bool 
             let path: Vec<String> = path.iter().map(|s| s.as_str().to_string()).collect();
             let answer = facts.decide(owner, &path, lt);
             match answer {
+                // Where only truthiness is read, `true`: a String
+                // literal there is Ruby's "string literal in condition"
+                // warning, which a warnings-as-errors boot raises.
+                // Elsewhere the value is `defined?`'s own.
+                Some(true) if cond => {
+                    *e = lit(e, Literal::Bool { value: true }, Ty::Bool);
+                    return true;
+                }
                 Some(true) => {
                     *e = lit(e, Literal::Str { value: "constant".into() }, Ty::Str);
                     return true;

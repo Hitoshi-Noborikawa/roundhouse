@@ -256,6 +256,7 @@ module ActiveStorage
     def blob: () -> ActiveStorage::Blob?
     def filename: () -> ActiveStorage::Filename?
     def content_type: () -> String?
+    def download: () -> String?
     def key: () -> String
     def signed_id: () -> String
     def byte_size: () -> Integer

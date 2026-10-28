@@ -75,7 +75,7 @@ pub(crate) fn rewrite_bare_permits(expr: &mut Expr) {
 /// The private helpers whose value is a nested `params.permit` (`def
 /// moderation_params = @moderation_params ||= params.permit(:page, what:
 /// [...])`), so their call sites can carry the String-keyed type.
-pub(crate) fn filtered_permit_helpers(privs: &[crate::dialect::Action]) -> std::collections::HashSet<Symbol> {
+pub(crate) fn filtered_permit_helpers(privs: &[crate::dialect::Action]) -> crate::det::HashSet<Symbol> {
     fn tail(e: &Expr) -> &Expr {
         match &*e.node {
             ExprNode::Seq { exprs } if !exprs.is_empty() => tail(exprs.last().unwrap()),
@@ -93,7 +93,7 @@ pub(crate) fn filtered_permit_helpers(privs: &[crate::dialect::Action]) -> std::
 /// `moderation_params.dig(:what, :stories)` → `.dig("what", "stories")`,
 /// the indifferent read Rails' Parameters gives on String-keyed storage.
 /// Not left to the Ruby emit's typed key coercion: these helper calls reach it untyped.
-pub(crate) fn stringify_filtered_helper_reads(expr: &mut Expr, helpers: &std::collections::HashSet<Symbol>) {
+pub(crate) fn stringify_filtered_helper_reads(expr: &mut Expr, helpers: &crate::det::HashSet<Symbol>) {
     expr.node.for_each_child_mut(&mut |c| stringify_filtered_helper_reads(c, helpers));
     let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr.node else { return };
     let helper_call = matches!(&*r.node, ExprNode::Send { recv, method, args, block: None, .. }

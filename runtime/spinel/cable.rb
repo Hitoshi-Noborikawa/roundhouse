@@ -285,6 +285,8 @@ module Cable
     if start
       Cable.spawn_heartbeat
     end
+    # This process's Redis subscription, when broadcasts go through Redis.
+    RedisCable.ensure_subscriber
     0
   end
 
@@ -683,8 +685,8 @@ module Cable
   # `"message":"{\"roomId\":1}"`, valid JSON in the wrong shape, and
   # wrong in the silent way because only the browser notices.
   #
-  # Returns without publishing when no subscriber has named the stream,
-  # same as `Transport#broadcast`.
+  # `publish_local` returns without publishing when no subscriber here
+  # has named the stream; `Transport#broadcast` comes through it too.
   # The identifier JSON a subscriber sent for `stream`, or "" when none
   # has. Read under the map's lock: subscribes on other connections
   # write it concurrently.
@@ -696,7 +698,24 @@ module Cable
     id
   end
 
+  # Under config/cable.yml's `adapter: redis` (runtime/redis_cable.rb)
+  # every message goes through Redis, and comes back to this process's
+  # sockets, and every other process's, through `deliver_json`.
   def self.publish_raw(stream, message_json)
+    if RedisCable.enabled?
+      RedisCable.publish(stream, message_json)
+    else
+      Cable.publish_local(stream, message_json)
+    end
+    nil
+  end
+
+  # A message from Redis for this process's sockets.
+  def self.deliver_json(stream, message_json)
+    Cable.publish_local(stream, message_json)
+  end
+
+  def self.publish_local(stream, message_json)
     id = Cable.identifier_for(stream)
     if id.length == 0
       return nil
@@ -739,16 +758,10 @@ module Cable
   # and publish to every WS fd subscribed to the stream.
   class Transport
     def broadcast(stream, fragment)
-      id = Cable.identifier_for(stream)
-      if id.length == 0
-        return nil   # no subscriber has named this stream yet
-      end
       # The fragment as Rails writes it: ActiveSupport::JSON escapes `<`,
       # `>` and `&` inside strings (`\u003cturbo-stream ...`), which plain
       # JSON.generate does not. Same text as the overlay's `Registry.deliver`.
-      envelope = "{\"identifier\":" + JSON.generate(id) +
-                 ",\"message\":" + JsonBuilder.escape_html_entities(JSON.generate(fragment)) + "}"
-      Tep::Broadcast.publish(stream, envelope)
+      Cable.publish_raw(stream, JsonBuilder.escape_html_entities(JSON.generate(fragment)))
       nil
     end
   end

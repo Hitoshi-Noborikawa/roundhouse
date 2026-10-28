@@ -15,9 +15,9 @@
 //! its own declarations and shadow the parent's. This pass prepends the
 //! parent's declarations to the child's body instead: its
 //! `include ActiveModel::*`, `attribute` (unless the child redeclares the
-//! name), `attr_*`, validations and callbacks. Methods and aliases are
-//! not copied: the emitted child is still `< Parent`, so Ruby inherits
-//! them.
+//! name), `attr_*`, validations (`validates_with` too) and callbacks.
+//! Methods and aliases are not copied: the emitted child is still
+//! `< Parent`, so Ruby inherits them.
 
 use crate::dialect::{Model, ModelBodyItem};
 use crate::expr::{Expr, ExprNode};
@@ -26,29 +26,10 @@ use crate::ident::Symbol;
 use crate::App;
 
 pub(super) fn inherit_tableless_parents(app: &mut App) {
-    let index: std::collections::HashMap<String, usize> =
+    let index: crate::det::HashMap<String, usize> =
         app.models.iter().enumerate().map(|(i, m)| (m.name.0.as_str().to_string(), i)).collect();
-    let resolved: Vec<Option<usize>> = app
-        .models
-        .iter()
-        .map(|m| resolve_parent(&index, m.name.0.as_str(), m.parent.as_ref()?.0.as_str()))
-        .collect();
-    // Each child's tableless parent. A parent qualifies by its own body
-    // or, in the middle of a chain, by having a tableless parent itself;
-    // closed over until nothing changes, so file order doesn't matter.
-    let mut tableless: Vec<bool> = app.models.iter().map(|m| m.parent.is_none() && is_tableless_parent(m)).collect();
-    loop {
-        let mut added = false;
-        for (i, m) in app.models.iter().enumerate() {
-            if !tableless[i] && !defines_initialize(m) && resolved[i].is_some_and(|p| tableless[p]) {
-                tableless[i] = true;
-                added = true;
-            }
-        }
-        if !added {
-            break;
-        }
-    }
+    let resolved = resolved_parents(app, &index);
+    let tableless = tableless_flags(app, &resolved);
     let parent_of: Vec<Option<usize>> = resolved.iter().map(|p| p.filter(|&p| tableless[p])).collect();
     let depth = |mut i: usize| {
         let mut d = 0;
@@ -78,9 +59,95 @@ pub(super) fn inherit_tableless_parents(app: &mut App) {
     }
 }
 
+/// A model under an abstract parent model runs the parent's validations
+/// before its own (#1360; activerecord 8.1.4). `ModelBases` makes a
+/// class a model under an app model only when that parent is abstract
+/// (`self.abstract_class = true`, `ApplicationRecord`): a concrete
+/// parent means STI, and its subclass stays a library class.
+///
+/// Each model synthesizes one `validate` from its own body, so a
+/// subclass's covered only its declarations, and nothing reported the
+/// parent's as left out. The parent's `validate` / `validates` items, and
+/// its `validates_with` calls (expanded per class later), now start the
+/// subclass's body, a grandparent's first. Its methods aren't copied: the
+/// emitted subclass is still `< Parent`. A tableless parent is
+/// `inherit_tableless_parents`' own.
+pub(super) fn inherit_abstract_parent_validations(app: &mut App) {
+    let index: crate::det::HashMap<String, usize> =
+        app.models.iter().enumerate().map(|(i, m)| (m.name.0.as_str().to_string(), i)).collect();
+    let resolved = resolved_parents(app, &index);
+    // Every tableless parent, a chain's middle classes too: their
+    // validations are already copied down.
+    let tableless = tableless_flags(app, &resolved);
+    let parent_of: Vec<Option<usize>> = resolved.iter().map(|p| p.filter(|&p| !tableless[p])).collect();
+    let depth = |mut i: usize| {
+        let mut d = 0;
+        while let Some(p) = parent_of[i] {
+            d += 1;
+            i = p;
+            if d > parent_of.len() {
+                break;
+            }
+        }
+        d
+    };
+    let mut order: Vec<usize> = (0..app.models.len()).filter(|&i| parent_of[i].is_some()).collect();
+    order.sort_by_key(|&i| depth(i));
+    for child in order {
+        let parent = parent_of[child].expect("filtered above");
+        let inherited: Vec<ModelBodyItem> = app.models[parent]
+            .body
+            .iter()
+            .filter(|item| inherited_validation(item))
+            .cloned()
+            .map(without_layout)
+            .collect();
+        if inherited.is_empty() {
+            continue;
+        }
+        let body = std::mem::take(&mut app.models[child].body);
+        app.models[child].body = inherited.into_iter().chain(body).collect();
+    }
+}
+
+/// Each model's parent among the app's models.
+fn resolved_parents(app: &App, index: &crate::det::HashMap<String, usize>) -> Vec<Option<usize>> {
+    app.models.iter().map(|m| resolve_parent(index, m.name.0.as_str(), m.parent.as_ref()?.0.as_str())).collect()
+}
+
+/// Which models are tableless parents. A parent qualifies by its own body
+/// or, in the middle of a chain, by having a tableless parent itself;
+/// closed over until nothing changes, so file order doesn't matter.
+fn tableless_flags(app: &App, resolved: &[Option<usize>]) -> Vec<bool> {
+    let mut tableless: Vec<bool> = app.models.iter().map(|m| m.parent.is_none() && is_tableless_parent(m)).collect();
+    loop {
+        let mut added = false;
+        for (i, m) in app.models.iter().enumerate() {
+            if !tableless[i] && !defines_initialize(m) && resolved[i].is_some_and(|p| tableless[p]) {
+                tableless[i] = true;
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    tableless
+}
+
+fn inherited_validation(item: &ModelBodyItem) -> bool {
+    match item {
+        ModelBodyItem::Validation { .. } => true,
+        ModelBodyItem::Unknown { expr, .. } => {
+            matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "validates_with")
+        }
+        _ => false,
+    }
+}
+
 /// `parent` as written in `child`'s file, resolved the way Ruby's
 /// constant lookup walks the child's enclosing modules.
-fn resolve_parent(index: &std::collections::HashMap<String, usize>, child: &str, parent: &str) -> Option<usize> {
+fn resolve_parent(index: &crate::det::HashMap<String, usize>, child: &str, parent: &str) -> Option<usize> {
     if !parent.contains("::") {
         let mut segs: Vec<&str> = child.split("::").collect();
         segs.pop();
@@ -119,6 +186,8 @@ fn inherited_item(item: &ModelBodyItem, own_attributes: &[Symbol]) -> bool {
             let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return false };
             match method.as_str() {
                 "attr_accessor" | "attr_reader" | "attr_writer" => true,
+                // Expanded per class later, as the abstract-parent pass's.
+                "validates_with" => true,
                 "attribute" => attribute_name(args).is_some_and(|name| !own_attributes.contains(&name)),
                 _ => false,
             }

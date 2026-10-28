@@ -5,7 +5,7 @@
 //! machinery doesn't apply; we just collect methods and `include`
 //! directives.
 
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 use ruby_prism::{parse, Node};
@@ -133,7 +133,7 @@ fn ingest_library_classes_impl(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, class.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
-        let made = class_new_constant_classes(&owner, class.body(), file);
+        let made = super::class_new_factory::constant_classes(Some(&owner), class.body(), file);
         lc.constants.retain(|(name, _)| !made.iter().any(|(s, _)| s == name));
         out.extend(super::data_factory::collect(class.body(), &owner, file)?);
         out.push(lc);
@@ -159,7 +159,7 @@ fn ingest_library_classes_impl(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, module.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
-        let made = class_new_constant_classes(&owner, module.body(), file);
+        let made = super::class_new_factory::constant_classes(Some(&owner), module.body(), file);
         lc.constants.retain(|(name, _)| !made.iter().any(|(s, _)| s == name));
         out.extend(super::data_factory::collect(module.body(), &owner, file)?);
         out.push(lc);
@@ -186,14 +186,48 @@ fn ingest_library_classes_impl(
     // carries the lexical scope it was written in. The corpus has no
     // cross-file reader; a new one surfaces as a NameError naming the
     // constant, not as a silent wrong answer.
-    if let Some(first) = out.first_mut() {
-        let mut file_constants = file_level_constants(&root, file)?;
-        if !file_constants.is_empty() {
-            file_constants.extend(std::mem::take(&mut first.constants));
-            first.constants = file_constants;
+    //
+    // A file-level `X = Class.new(Parent)` is not hoisted: it defines the
+    // top-level class X, which any file reads, so it is that class here
+    // too. Factories with external parents go ahead of the file's other
+    // classes (any of which may subclass them); a factory that subclasses
+    // an in-file class follows that class — Ruby resolves the superclass
+    // while defining the subclass. A file of nothing else defines just
+    // those classes. The nested walk (`nested_in`) takes no top-level
+    // declaration.
+    let made = match (nested_in, root.as_program_node()) {
+        (None, Some(program)) => {
+            super::class_new_factory::constant_classes(None, Some(program.statements().as_node()), file)
+        }
+        _ => Vec::new(),
+    };
+    // Hoist remaining file-level constants into the first class of the
+    // file — including when that first class is a Class.new factory and
+    // the file has no ordinary `class`/`module`. Otherwise a
+    // Class.new-only library file drops `TIMEOUT = 5` beside the
+    // factories, and a refused factory that should stay a constant has
+    // nowhere to land.
+    let file_constants = if nested_in.is_none() {
+        file_level_constants(&root, file, &made)?
+    } else {
+        Vec::new()
+    };
+    let mut factories: Vec<LibraryClass> = made.into_iter().map(|(_, c)| c).collect();
+    if !file_constants.is_empty() {
+        // A Class.new-only file with admitted factories: hoist onto the
+        // first factory. Refuse when there is no host, or when the hoist
+        // would put a constant where another factory/class cannot read it
+        // or where its value names a class defined after the host —
+        // emitting those shapes claims a program that NameErrors at load
+        // or call time (invariant 6).
+        super::file_constant_hoist::ensure_safe(file, &file_constants, &out, &factories)?;
+        if let Some(host) = out.first_mut().or_else(|| factories.first_mut()) {
+            let mut consts = file_constants;
+            consts.extend(std::mem::take(&mut host.constants));
+            host.constants = consts;
         }
     }
-    Ok(out)
+    Ok(super::class_new_factory::order_with_file_classes(factories, out))
 }
 
 /// The block of `NAME = Data.define(:a, :b) do def … end end`, when that
@@ -398,10 +432,12 @@ fn data_members(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Symbol>> {
 /// `NAME = <expr>` statements at the top level of a file, in source
 /// order. Only direct program-body statements — anything inside a
 /// class or module body is that declaration's own constant and is
-/// collected by `walk_decl_body`.
+/// collected by `walk_decl_body`. The classes `made` by file-level
+/// `Class.new` are not values to hoist.
 fn file_level_constants(
     root: &ruby_prism::Node<'_>,
     file: &str,
+    made: &[(Symbol, LibraryClass)],
 ) -> IngestResult<Vec<(Symbol, Expr)>> {
     let mut out = Vec::new();
     let Some(prog) = root.as_program_node() else {
@@ -410,6 +446,9 @@ fn file_level_constants(
     for stmt in prog.statements().body().iter() {
         let Some(cw) = stmt.as_constant_write_node() else { continue };
         if is_sorbet_type_alias(&cw.value()) {
+            continue;
+        }
+        if made.iter().any(|(name, _)| name.as_str() == constant_id_str(&cw.name())) {
             continue;
         }
         out.push((
@@ -771,8 +810,8 @@ pub(super) fn literal_sorbet_members(
     if members.len() != statements.len() {
         return None;
     }
-    let mut names = HashSet::new();
-    let mut serialized = HashSet::new();
+    let mut names = HashSet::default();
+    let mut serialized = HashSet::default();
     members.into_iter().map(|member| {
         if !names.insert(member.name.clone()) {
             return None;
@@ -1112,6 +1151,9 @@ struct SorbetStructMember {
     /// `factory: -> { … }`'s body, which Ruby evaluates per call just
     /// as sorbet evaluates the factory per instance.
     default: Option<Expr>,
+    /// The type is `T.nilable(…)`: sorbet makes such a prop optional,
+    /// and an omitted one is nil.
+    nilable: bool,
 }
 
 /// `T::Struct` and its variants in superclass position. `T::Struct` is
@@ -1151,9 +1193,18 @@ fn sorbet_struct_members(body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<
         }) else {
             continue;
         };
-        // The type is the second argument and belongs to the analyzer,
-        // not to the emit: `ingest::sorbet_sig` has already read it.
-        let _ty = args.next();
+        // The type belongs to the analyzer, not to the emit:
+        // `ingest::sorbet_sig` has already read it. Only whether it is
+        // `T.nilable(…)` matters here, because that makes the keyword
+        // optional.
+        let nilable = args.next().is_some_and(|ty| {
+            ty.as_call_node().is_some_and(|c| {
+                c.name().as_slice() == b"nilable"
+                    && c.receiver()
+                        .and_then(|r| constant_path_of(&r))
+                        .is_some_and(|path| path == vec!["T".to_string()])
+            })
+        });
         let mut default = None;
         for arg in args {
             let Some(hash) = arg.as_keyword_hash_node() else { continue };
@@ -1177,7 +1228,7 @@ fn sorbet_struct_members(body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<
                 }
             }
         }
-        members.push(SorbetStructMember { name, writable, default });
+        members.push(SorbetStructMember { name, writable, default, nilable });
     }
     members
 }
@@ -1201,13 +1252,25 @@ fn synth_sorbet_struct_methods(
             methods.push(synth_attr_writer(owner, &member.name, MethodReceiver::Instance));
         }
     }
-    let params: Vec<Param> = members
+    let hash_prologue = if with_constructor { struct_hash_prologue(members) } else { None };
+    let params: Vec<Param> = hash_prologue
         .iter()
-        .map(|m| Param::keyword(m.name.clone(), m.default.clone()))
-        .collect();
-    let assigns: Vec<Expr> = members
-        .iter()
+        .map(|(param, _)| Param::with_default(Symbol::from(param.as_str()), Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })))
+        .chain(members.iter()
         .map(|m| {
+            // A `T.nilable` prop with no default is optional and nil
+            // when omitted, as sorbet's generated constructor has it.
+            let default = m.default.clone().or_else(|| {
+                m.nilable
+                    .then(|| Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }))
+            });
+            Param::keyword(m.name.clone(), default)
+        }))
+        .collect();
+    let assigns: Vec<Expr> = hash_prologue
+        .into_iter()
+        .map(|(_, prologue)| prologue)
+        .chain(members.iter().map(|m| {
             Expr::new(
                 Span::synthetic(),
                 ExprNode::Assign {
@@ -1218,7 +1281,7 @@ fn synth_sorbet_struct_methods(
                     ),
                 },
             )
-        })
+        }))
         .collect();
     // A base that STAYS brings its own constructor. `T::Struct` is
     // lowered away, so the class would have none — but a gem base
@@ -1251,6 +1314,51 @@ fn synth_sorbet_struct_methods(
         methods.push(synth_struct_equality(owner, members));
     }
     methods
+}
+
+/// sorbet's `T::Struct#initialize(hash = {})` takes the props as one
+/// positional Hash as well as keywords, and apps build one from a
+/// config Hash (`RequiredAccess.new(access)`). The keyword
+/// constructor rejects that as `given 1, expected 0`.
+///
+/// Where every prop is optional (nilable or defaulted) the constructor
+/// also takes a leading optional Hash and each prop reads from it first;
+/// a key that names no prop raises, as sorbet's does. A struct with a
+/// required prop keeps keywords only: a Hash cannot be told apart from
+/// missing keywords there without a `new` override, and a class that
+/// declares `new` stops being typed as its own instance.
+///
+/// Known gap: a `factory:` default still runs when the Hash supplies its
+/// prop (the keyword default is evaluated before the body), where sorbet
+/// skips it. The value is discarded; only a factory's side effects show.
+///
+/// Returns the Hash parameter's name, `attributes_hash` unless a prop
+/// already has it, and the prologue.
+fn struct_hash_prologue(members: &[SorbetStructMember]) -> Option<(String, Expr)> {
+    if members.is_empty() || !members.iter().all(|m| m.default.is_some() || m.nilable) {
+        return None;
+    }
+    let mut param = String::from("attributes_hash");
+    while members.iter().any(|m| m.name.as_str() == param) {
+        param.push('_');
+    }
+    let declared: Vec<String> = members.iter().map(|m| format!(":{}", m.name.as_str())).collect();
+    let mut source = format!(
+        "unless {param}.nil?\n  {param} = {param}.to_h.transform_keys(&:to_sym)\n  \
+         unknown = {param}.keys - [{}]\n  \
+         raise ArgumentError, \"Unrecognized properties: #{{unknown.join(\", \")}}\" unless unknown.empty?\n",
+        declared.join(", ")
+    );
+    for member in members {
+        let name = member.name.as_str();
+        source.push_str(&format!("  {name} = {param}.fetch(:{name}, {name})\n"));
+    }
+    source.push_str("end\n");
+    let parsed = ruby_prism::parse(source.as_bytes());
+    let node = parsed.node();
+    let program = node.as_program_node()?;
+    let stmt = program.statements().body().iter().next()?;
+    Some((param, ingest_expr(&stmt, "(sorbet struct)").ok()?))
 }
 
 /// `include T::Struct::ActsAsComparable` gives a struct value equality.
@@ -1561,59 +1669,6 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
 /// the constant names they replace.
-/// `Error = Class.new(StandardError)` in a class or module body: the
-/// class it defines, as `class Error < StandardError; end` would, under
-/// the owner (`Owner::Error`). A parent written bare that names an
-/// earlier such class of the same owner (`FunctionExecutionError =
-/// Class.new(Error)`) is that one, as Ruby's lexical lookup finds it.
-/// Only the block-less form with one constant argument.
-fn class_new_constant_classes(owner: &ClassId, body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<(Symbol, LibraryClass)> {
-    let mut out: Vec<(Symbol, LibraryClass)> = Vec::new();
-    let Some(body) = body else { return out };
-    for stmt in flatten_statements(body) {
-        let Some(cw) = stmt.as_constant_write_node() else { continue };
-        let value = cw.value();
-        let Some(call) = value.as_call_node() else { continue };
-        if constant_id_str(&call.name()) != "new" || call.block().is_some() {
-            continue;
-        }
-        let Some(recv) = call.receiver() else { continue };
-        if constant_path_of(&recv).map(|p| p.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>()) != Some(vec!["Class".to_string()]) {
-            continue;
-        }
-        let args: Vec<ruby_prism::Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
-        let [parent_node] = args.as_slice() else { continue };
-        let Some(written) = constant_path_of(parent_node) else { continue };
-        let rooted = parent_node.as_constant_path_node().is_some_and(|p| super::util::constant_path_is_rooted(&p));
-        let written: Vec<String> = written.into_iter().filter(|s| !s.is_empty()).collect();
-        let parent = match written.as_slice() {
-            [one] if !rooted && out.iter().any(|(n, _)| n.as_str() == one) => format!("{}::{one}", owner.0.as_str()),
-            // Kept `::`-rooted: emitted inside the owner, a bare name would resolve to the sibling.
-            _ if rooted => format!("::{}", written.join("::")),
-            _ => written.join("::"),
-        };
-        let name = Symbol::from(constant_id_str(&cw.name()));
-        out.push((
-            name.clone(),
-            LibraryClass {
-                name: ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), name.as_str()))),
-                is_module: false,
-                parent: Some(ClassId(Symbol::from(parent))),
-                parent_span: super::util::node_span(parent_node, file),
-                includes: Vec::new(),
-                include_spans: Vec::new(),
-                methods: Vec::new(),
-                nullable_columns: Vec::new(),
-                origin: None,
-                constants: Vec::new(),
-                unknown_calls: Vec::new(),
-                class_ivar_initializers: Vec::new(),
-            },
-        ));
-    }
-    out
-}
-
 fn struct_constant_classes(
     owner: &ClassId,
     body: Option<ruby_prism::Node<'_>>,
@@ -1704,7 +1759,7 @@ fn take_class_ivar_initializers(calls: &mut Vec<Expr>) -> Vec<Expr> {
 /// The declaration context determines which receivers/accessors are
 /// synthesized and whether include-like calls affect the class side.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DeclBodyMode {
+pub(super) enum DeclBodyMode {
     Instance,
     ClassMethods,
     /// `class << self`. `included_hook` is set only for a module's own
@@ -1721,18 +1776,18 @@ impl DeclBodyMode {
     }
 }
 #[derive(Default)]
-struct DeclBody {
-    includes: Vec<ClassId>,
+pub(super) struct DeclBody {
+    pub(super) includes: Vec<ClassId>,
     /// Parallel to `includes`: the span of each `include` call, so an
     /// unresolved one can be pointed at.
-    include_spans: Vec<Span>,
-    methods: Vec<MethodDef>,
-    constants: Vec<(Symbol, Expr)>,
-    unknown_calls: Vec<Expr>,
-    class_initializers: Vec<Expr>,
+    pub(super) include_spans: Vec<Span>,
+    pub(super) methods: Vec<MethodDef>,
+    pub(super) constants: Vec<(Symbol, Expr)>,
+    pub(super) unknown_calls: Vec<Expr>,
+    pub(super) class_initializers: Vec<Expr>,
     /// `mattr_*` / `cattr_*` attribute names declared in this body —
     /// used when folding ClassMethods seeds onto the enclosing module.
-    class_attributes: HashSet<Symbol>,
+    pub(super) class_attributes: HashSet<Symbol>,
 }
 
 impl DeclBody {
@@ -2135,7 +2190,7 @@ fn reject_conditional_accessor(node: &ruby_prism::Node<'_>, file: &str) -> Inges
     Ok(())
 }
 
-fn walk_decl_body<'pr>(
+pub(super) fn walk_decl_body<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
     file: &str,
@@ -2190,7 +2245,7 @@ fn walk_decl_body_with_visibility<'pr>(
     visibility: &Visibility,
 ) -> IngestResult<DeclBody> {
     let mut out = DeclBody::default();
-    let mut class_attributes: HashSet<Symbol> = HashSet::new();
+    let mut class_attributes: HashSet<Symbol> = HashSet::default();
     let mut class_attr_defaults: IndexMap<Symbol, Expr> = IndexMap::new();
     // `module_function` (called bare inside a module body) marks every
     // subsequent direct `def` as a module-function — both an instance
@@ -2307,7 +2362,7 @@ fn walk_decl_body_with_visibility<'pr>(
             .collect()
     });
     let concern_class_defs: Option<HashSet<String>> = concern_direct_defs.as_ref().map(|_| {
-        let mut names = HashSet::new();
+        let mut names = HashSet::default();
         for stmt in &statements {
             if let Some(m) = stmt.as_module_node()
                 && module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])
@@ -3775,10 +3830,10 @@ fn declares_abstract_class(class: &ruby_prism::ClassNode<'_>) -> bool {
 /// the pre-pass collects, so a chain of any depth resolves.
 #[derive(Debug, Default, Clone)]
 pub struct ModelBases {
-    names: std::collections::HashSet<String>,
+    names: crate::det::HashSet<String>,
     /// Tableless models a subclass extends on the model path (see
     /// `record_tableless`).
-    tableless: std::collections::HashSet<String>,
+    tableless: crate::det::HashSet<String>,
     /// Every `class X < Y` under `app/models`: the child, its lexical
     /// scope, the parent as written, and whether the child writes its
     /// own `initialize`.
@@ -3787,7 +3842,7 @@ pub struct ModelBases {
 
 impl ModelBases {
     pub fn new() -> Self {
-        let mut names = std::collections::HashSet::new();
+        let mut names = crate::det::HashSet::default();
         names.insert("ApplicationRecord".to_string());
         names.insert("ActiveRecord::Base".to_string());
         // Rails' Action Text abstract base (`ActionText::Record <
@@ -4041,6 +4096,11 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         // `Breadcrumb = Data.define(:name, :path)`: the file declares a
         // value class, not a model (see `file_data_class`).
         if file_data_factory(&root).is_some_and(|(_, call)| data_members(&call).is_some()) {
+            return Some(ClassKind::LibraryClass);
+        }
+        // `ExampleError = Class.new(StandardError)`: the file declares a
+        // class, not a model (see `class_new_factory::constant_classes`).
+        if super::class_new_factory::file_has_factory(&root) {
             return Some(ClassKind::LibraryClass);
         }
         return None;
@@ -4395,7 +4455,7 @@ pub fn ingest_concern_class_method_spans(
     // Framework identity must not depend on which declarations survive
     // library-shape ingestion. This walk records binding barriers only;
     // it neither evaluates constants nor executes class bodies.
-    let mut shadows = HashSet::new();
+    let mut shadows = HashSet::default();
     framework_shadow_scopes(&root, &mut shadows);
     (out, shadows.into_iter().map(|scope| ClassId(Symbol::from(scope.join("::")))).collect())
 }
@@ -5300,7 +5360,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
 /// that includes `T::Props` — flattening that by hand at the sidecar
 /// would be the app asserting something it did not write.
 fn includes_t_props(id: &ClassId, includes: &HashMap<ClassId, Vec<ClassId>>) -> bool {
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::default();
     let mut stack = vec![id.clone()];
     while let Some(current) = stack.pop() {
         if !seen.insert(current.0.as_str().to_string()) {
@@ -5338,8 +5398,15 @@ fn struct_member_from_expr(call: &Expr) -> Option<SorbetStructMember> {
         ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
         _ => return None,
     };
-    // The type is the second argument and belongs to the analyzer.
-    let _ty = args.next();
+    // The type belongs to the analyzer; only `T.nilable(…)` matters here.
+    let nilable = args.next().is_some_and(|ty| {
+        matches!(
+            &*ty.node,
+            ExprNode::Send { recv: Some(r), method, .. }
+                if method.as_str() == "nilable"
+                    && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "T")
+        )
+    });
     let mut default = None;
     for arg in args {
         let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
@@ -5367,7 +5434,7 @@ fn struct_member_from_expr(call: &Expr) -> Option<SorbetStructMember> {
             }
         }
     }
-    Some(SorbetStructMember { name, writable, default })
+    Some(SorbetStructMember { name, writable, default, nilable })
 }
 
 /// Expand `const` / `prop` under a base whose ancestry a sidecar says

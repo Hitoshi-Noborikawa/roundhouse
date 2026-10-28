@@ -573,8 +573,8 @@ fn every_runtime_method_body_is_fully_typed() {
     // cross-class method dispatch resolves during body-typing (e.g.,
     // RecordInvalid#initialize calls `record.errors.join(...)`, which
     // requires Base#errors to be known).
-    let mut class_registry: std::collections::HashMap<ClassId, ClassInfo> =
-        std::collections::HashMap::new();
+    let mut class_registry: roundhouse::det::HashMap<ClassId, ClassInfo> =
+        roundhouse::det::HashMap::default();
     // The Db primitive shim's contract — connection.rb calls
     // `Db.prepare`/`step?`/`column_*` directly (same pre-seed the
     // production pipelines get via `seed_well_known_classes` /
@@ -591,8 +591,8 @@ fn every_runtime_method_body_is_fully_typed() {
     // Per-class include lists, accumulated across all .rbs files.
     // Key: short class id (last segment); Value: list of short module
     // ids the class includes.
-    let mut includes_by_class: std::collections::HashMap<ClassId, Vec<ClassId>> =
-        std::collections::HashMap::new();
+    let mut includes_by_class: roundhouse::det::HashMap<ClassId, Vec<ClassId>> =
+        roundhouse::det::HashMap::default();
     let mut missing_rbs: Vec<String> = Vec::new();
 
     let short_id = |class_id: &ClassId| {
@@ -631,7 +631,13 @@ fn every_runtime_method_body_is_fully_typed() {
             let methods_vec: Vec<(roundhouse::ident::Symbol, Ty)> = methods
                 .into_iter()
                 .map(|(name, ty)| {
+                    // A block-yielding method keeps its whole `Fn`, as
+                    // `runtime_src`'s typing registry does: the block
+                    // contract is what binds the block's parameters
+                    // (`each_row`'s `row`). Dispatch answers the `Fn`'s
+                    // return either way.
                     let ret_ty = match ty {
+                        Ty::Fn { block: Some(_), .. } => ty,
                         Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                         other => other,
                     };
@@ -807,10 +813,10 @@ fn every_runtime_method_body_is_fully_typed() {
 #[test]
 fn every_runtime_method_body_concretely_typed() {
     let stems = runtime_ruby_stems();
-    let mut class_registry: std::collections::HashMap<ClassId, ClassInfo> =
-        std::collections::HashMap::new();
-    let mut includes_by_class: std::collections::HashMap<ClassId, Vec<ClassId>> =
-        std::collections::HashMap::new();
+    let mut class_registry: roundhouse::det::HashMap<ClassId, ClassInfo> =
+        roundhouse::det::HashMap::default();
+    let mut includes_by_class: roundhouse::det::HashMap<ClassId, Vec<ClassId>> =
+        roundhouse::det::HashMap::default();
 
     let short_id = |class_id: &ClassId| {
         let last = class_id
@@ -865,8 +871,8 @@ fn every_runtime_method_body_concretely_typed() {
     }
 
     let mut total_gradual: usize = 0;
-    let mut by_file: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut by_file: roundhouse::det::HashMap<String, usize> =
+        roundhouse::det::HashMap::default();
     for stem in &stems {
         let ruby_path = Path::new("runtime/ruby").join(format!("{stem}.rb"));
         let rbs_path = Path::new("runtime/ruby").join(format!("{stem}.rbs"));
@@ -1231,7 +1237,11 @@ fn every_runtime_method_body_concretely_typed() {
     // `ActiveRecord::Bounds` element (`where(created_at: [nil, 7.days.ago..])`),
     // and the element read off the untyped Array reaches `bounds_predicate`
     // through it (+2 in active_record/relation.rb, 884 -> 886).
-    const CEILING: usize = 886;
+    // MEASURED 888 on 2026-10-27 (on 886): `restore_attribute!` hands the
+    // column's original value, whatever its type, to the column's writer
+    // and `clear_attribute_change` stores the current one in the baseline
+    // (+2 in active_record/connection.rb, 886 -> 888).
+    const CEILING: usize = 888;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

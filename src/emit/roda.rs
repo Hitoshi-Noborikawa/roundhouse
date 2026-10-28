@@ -1250,7 +1250,7 @@ fn emit_terminal_body(
     // callbacks and scoped/skipped declarations, until it is converted.
     if action.name_span.is_synthetic() {
         let mut current = Some(controller);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::det::HashSet::default();
         while let Some(c) = current {
             if !seen.insert(&c.name) || c.body.iter().any(|item| match item {
                 ControllerBodyItem::Filter { .. } => true,
@@ -2193,6 +2193,7 @@ mod tests {
             .collect();
         FlatRoute {
             method,
+            source_path: path.to_string(),
             path: path.to_string(),
             controller: ClassId(Symbol::from(controller)),
             action: Symbol::from(action),

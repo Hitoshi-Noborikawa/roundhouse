@@ -70,6 +70,8 @@ mod rspec_specs;
 mod discard;
 #[path = "emit_and_run/callback_abort.rs"]
 mod callback_abort;
+#[path = "emit_and_run/dirty_clear_restore.rs"]
+mod dirty_clear_restore;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
 #[path = "emit_and_run/constantize_by_name.rs"]
@@ -86,6 +88,30 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "support/for_loops.rs"]
+mod for_loops_contract;
+#[path = "emit_and_run/for_loops.rs"]
+mod for_loops;
+#[path = "support/block_macros.rs"]
+mod block_macros_contract;
+#[path = "emit_and_run/block_macros.rs"]
+mod block_macros;
+#[path = "support/stdlib_scan_zlib.rs"]
+mod stdlib_scan_zlib_contract;
+#[path = "emit_and_run/stdlib_scan_zlib.rs"]
+mod stdlib_scan_zlib;
+#[path = "support/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include_contract;
+#[path = "emit_and_run/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include;
+#[path = "support/mutable_literals.rs"]
+mod mutable_literals_contract;
+#[path = "emit_and_run/mutable_literals.rs"]
+mod mutable_literals;
+#[path = "support/auto_source_gem.rs"]
+mod auto_source_gem_contract;
+#[path = "emit_and_run/auto_source_gem.rs"]
+mod auto_source_gem;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]
@@ -188,6 +214,8 @@ mod erb_template_contract;
 mod bare_permit_contract;
 #[path = "support/data_paths.rs"]
 mod data_paths_contract;
+#[path = "support/eager_load_filter.rs"]
+mod eager_load_filter_contract;
 #[path = "emit_and_run/data_paths.rs"]
 mod data_paths;
 #[path = "emit_and_run/bare_permit.rs"]
@@ -10341,6 +10369,78 @@ puts "ok"
         .assert_passes();
 }
 
+#[test]
+fn an_app_tag_helper_override_owns_helper_and_view_calls() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/tag_defaults.rb",
+            r#"module TagDefaults
+  def content_tag(name, text)
+    "default tag"
+  end
+
+  def safe_join(parts, separator)
+    separator
+  end
+end
+"#,
+        )
+        .write(
+            "app/helpers/application_helper.rb",
+            r#"module ApplicationHelper
+  include TagDefaults
+
+  def content_tag(name, text)
+    37
+  end
+
+  def override_value
+    content_tag(:span, "ignored") + 3
+  end
+end
+"#,
+        )
+        .write(
+            "app/views/articles/_custom_tag.html.erb",
+            "<%= content_tag(:span, \"ignored\").div(2) %>|<%= \"nested #{content_tag(:i, 'ignored') + 5}\" %>|<%= override_value %>|<%= safe_join([\"a\", \"b\"], 11).div(2) %>",
+        )
+        .run_ruby(
+            r#"raise "helper override lost" unless ApplicationHelper.override_value == 40
+raise "view override lost" unless Views::Articles.custom_tag(nil) == "18|nested 42|40|5"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn promoted_module_helpers_and_controller_helpers_keep_their_view_dispatch() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/bare_helper.rb",
+            "module BareHelper\n  module_function\n  def bare_value\n    17\n  end\nend\n",
+        )
+        .write(
+            "app/helpers/named_helper.rb",
+            "module NamedHelper\n  def named_value\n    19\n  end\n  module_function :named_value\nend\n",
+        )
+        .write(
+            "app/helpers/extended_helper.rb",
+            "module ExtendedHelper\n  extend self\n  def extended_value\n    23\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  helper_method :content_tag\n  def content_tag(name, text)\n    37\n  end\nend\n",
+        )
+        .write(
+            "app/views/articles/_helper_channels.html.erb",
+            "<%= bare_value.div(2) %>|<%= named_value.div(2) %>|<%= extended_value.div(2) %>|<%= content_tag(:span, \"ignored\").div(2) %>",
+        )
+        .run_ruby(
+            "raise \"helper dispatch lost\" unless Views::Articles.helper_channels(nil) == \"8|9|11|18\"\n",
+        )
+        .assert_passes();
+}
+
 /// #139 typed `Model.human_attribute_name` as a String, but no runtime
 /// defined it, so every page rendering the form raised `undefined method
 /// 'human_attribute_name' for class Article` (#147). A literal attribute
@@ -19834,6 +19934,8 @@ mod initializer_top_level_def;
 mod unknown_gem_namespace;
 #[path = "emit_and_run/record_rebinding.rs"]
 mod record_rebinding;
+#[path = "emit_and_run/eager_load_filter.rs"]
+mod eager_load_filter;
 #[path = "emit_and_run/url_helpers_include.rs"]
 mod url_helpers_include;
 #[path = "emit_and_run/length_is_in_within.rs"]

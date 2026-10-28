@@ -337,6 +337,41 @@ fn post_rest_target_reorders_lhs(node: &Node<'_>) -> bool {
     })
 }
 
+/// A String literal a variable holds, in a file without
+/// `# frozen_string_literal: true`: Ruby gives each evaluation a new,
+/// mutable String there (`data = ""; doc.write(data, 0)` appends to it),
+/// so it carries the mutable hint the `+"…"` spelling does. Spinel freezes
+/// every bare literal.
+fn assigned_literal(mut value: Expr, file: &str) -> Expr {
+    if matches!(&*value.node, ExprNode::Lit { value: Literal::Str { .. } })
+        && value.hint().is_none()
+        && super::sources::with_text(file, |text| !freezes_literals(text)).unwrap_or(false)
+    {
+        value.set_hint(Some(crate::expr::IrHint::MutableStringLiteral));
+    }
+    value
+}
+
+/// Does the source's leading comment block say `frozen_string_literal: true`?
+fn freezes_literals(text: &str) -> bool {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(comment) = line.strip_prefix('#') else { return false };
+        let comment = comment.to_ascii_lowercase().replace('-', "_");
+        // Ruby allows space before the colon too (`frozen_string_literal : true`).
+        if let Some(at) = comment.find("frozen_string_literal") {
+            let rest = comment[at + "frozen_string_literal".len()..].trim_start();
+            if let Some(value) = rest.strip_prefix(':') {
+                return value.trim_start().starts_with("true");
+            }
+        }
+    }
+    false
+}
+
 fn fresh_reserved_local(loc: &ruby_prism::Location<'_>, stem: &str) -> Symbol {
     let mut name = stem.to_string();
     let mut suffix = 0;
@@ -1806,7 +1841,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let w = n.as_instance_variable_write_node().unwrap();
             let raw = constant_id_str(&w.name());
             let name = raw.strip_prefix('@').unwrap_or(raw);
-            let value = ingest_expr(&w.value(), file)?;
+            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
             let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
             ExprNode::Assign {
                 target: crate::expr::LValue::Ivar { name: Symbol::from(name) },
@@ -1816,7 +1851,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_local_variable_write_node().is_some() => {
             let w = n.as_local_variable_write_node().unwrap();
             let name = Symbol::from(constant_id_str(&w.name()));
-            let value = ingest_expr(&w.value(), file)?;
+            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
             let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
             ExprNode::Assign {
                 target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
@@ -1889,7 +1924,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_local_variable_or_write_node().is_some() => {
             let w = n.as_local_variable_or_write_node().unwrap();
             let name = Symbol::from(constant_id_str(&w.name()));
-            let value = ingest_expr(&w.value(), file)?;
+            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
             ExprNode::OpAssign {
                 target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
                 op: crate::expr::OpAssignOp::OrOr,
@@ -2001,7 +2036,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let w = n.as_instance_variable_or_write_node().unwrap();
             let raw = constant_id_str(&w.name());
             let name = Symbol::from(raw.strip_prefix('@').unwrap_or(raw));
-            let value = ingest_expr(&w.value(), file)?;
+            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
             let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
             ExprNode::OpAssign {
                 target: crate::expr::LValue::Ivar { name },
@@ -2622,6 +2657,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             ExprNode::While { cond, body, until_form: true }
         }
+        n if n.as_for_node().is_some() => ingest_for(&n.as_for_node().unwrap(), span, file)?,
         n if n.as_range_node().is_some() => {
             let r = n.as_range_node().unwrap();
             let begin = match r.left() {
@@ -3363,6 +3399,9 @@ fn collect_interp_parts(
             })?;
             let inner = ingest_expr(&stmts.as_node(), file)?;
             out.push(InterpPart::Expr { expr: inner });
+        } else if let Some(ev) = part.as_embedded_variable_node() {
+            // `"#@name"`, `"#@@count"`, `"#$stdout"`: the same as `#{…}` around the variable.
+            out.push(InterpPart::Expr { expr: ingest_expr(&ev.variable(), file)? });
         } else if let Some(nested) = part.as_interpolated_string_node() {
             // Adjacent / line-continued string concatenation — flatten
             // the inner parts into the outer list. The inner's quote
@@ -3828,6 +3867,100 @@ fn try_ingest_method_ref(
 /// evaluates to nil. A `next` or `redo` aimed at the loop itself is
 /// refused: in the source `next` goes to the test, and here it would
 /// skip it.
+/// `for x in coll; body; end` is `coll.each { |e| x = e; body }` with
+/// every local it writes declared first (`x = x`, nil when new, its value
+/// kept when not). Not a plain block: a `for` opens no scope, so the loop
+/// variable and the locals its body assigns stay visible after the loop,
+/// which a block's own locals would not. The rest is `each`'s: the loop's
+/// value, `break value`, `next`, `redo`, a lazy or each-only collection.
+fn ingest_for(f: &ruby_prism::ForNode<'_>, span: Span, file: &str) -> IngestResult<ExprNode> {
+    let loc = f.as_node().location();
+    let element = fresh_reserved_local(&loc, &format!("__for_e_{}", loc.start_offset()));
+    let var = |name: &Symbol| Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+    let local_target = |name: &Symbol| crate::expr::LValue::Var { id: crate::ident::VarId(0), name: name.clone() };
+    let mut written: Vec<Symbol> = Vec::new();
+    for_written_locals(&f.index(), &mut written);
+    if let Some(body) = f.statements() {
+        for_written_locals(&body.as_node(), &mut written);
+    }
+    let mut exprs: Vec<Expr> = written
+        .iter()
+        .map(|name| Expr::new(span, ExprNode::Assign { target: local_target(name), value: var(name) }))
+        .collect();
+    let target = f.index();
+    let mut step = match target.as_multi_target_node() {
+        Some(mt) => destructure_target(&mt, var(&element), span, file)?,
+        None => vec![Expr::new(span, ExprNode::Assign { target: multi_write_target(&target, file)?, value: var(&element) })],
+    };
+    if let Some(s) = f.statements() {
+        step.push(ingest_expr(&s.as_node(), file)?);
+    }
+    let block = Expr::new(
+        span,
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: vec![element],
+            block_param: None,
+            body: Expr::new(span, ExprNode::Seq { exprs: step }),
+            block_style: crate::expr::BlockStyle::Do,
+        },
+    );
+    exprs.push(Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ingest_expr(&f.collection(), file)?),
+            method: Symbol::from("each"),
+            args: Vec::new(),
+            block: Some(block),
+            parenthesized: false,
+        },
+    ));
+    Ok(ExprNode::Seq { exprs })
+}
+
+/// The locals `node` writes in its own scope, in order, once each: not
+/// those of a block, lambda, `def` or class body inside it.
+fn for_written_locals(node: &Node<'_>, out: &mut Vec<Symbol>) {
+    struct Writes<'a>(&'a mut Vec<Symbol>);
+    impl Writes<'_> {
+        fn add(&mut self, name: &[u8]) {
+            let name = Symbol::from(String::from_utf8_lossy(name).as_ref());
+            if !self.0.contains(&name) {
+                self.0.push(name);
+            }
+        }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Writes<'_> {
+        fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+            self.add(node.name().as_slice());
+            ruby_prism::visit_local_variable_write_node(self, node);
+        }
+        fn visit_local_variable_target_node(&mut self, node: &ruby_prism::LocalVariableTargetNode<'pr>) {
+            self.add(node.name().as_slice());
+        }
+        fn visit_local_variable_operator_write_node(&mut self, node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>) {
+            self.add(node.name().as_slice());
+            ruby_prism::visit_local_variable_operator_write_node(self, node);
+        }
+        fn visit_local_variable_or_write_node(&mut self, node: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+            self.add(node.name().as_slice());
+            ruby_prism::visit_local_variable_or_write_node(self, node);
+        }
+        fn visit_local_variable_and_write_node(&mut self, node: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
+            self.add(node.name().as_slice());
+            ruby_prism::visit_local_variable_and_write_node(self, node);
+        }
+        fn visit_block_node(&mut self, _: &ruby_prism::BlockNode<'pr>) {}
+        fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+        fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {}
+        fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {}
+        fn visit_singleton_class_node(&mut self, _: &ruby_prism::SingletonClassNode<'pr>) {}
+    }
+    ruby_prism::Visit::visit(&mut Writes(out), node);
+}
+
 fn do_loop(
     statements: Option<ruby_prism::StatementsNode<'_>>,
     predicate: &Node<'_>,

@@ -28,6 +28,7 @@
 //!   cross-target-safe. Each target's test_helper handles them; Ruby's
 //!   TestBase provides both.)
 //!   - `assert_predicate o, :sym`       → `raise "…" if !o.sym` (sym from Symbol literal)
+//!   - `flunk msg`                      → `raise msg` (Minitest's "Epic Fail!" without one)
 //!   - `assert_difference("X.m"[, d]) { body }` → before/after capture
 //!   - `assert_no_difference("X.m") { body }`   → same, delta 0
 //!
@@ -175,6 +176,17 @@ fn rewrite_send(e: &Expr, own: &dyn Fn(&str) -> bool) -> Option<Expr> {
         "assert" if !args.is_empty() => {
             let cond = args[0].clone();
             Some(raise_if(span, not_expr(span, cond), "assertion failed".to_string()))
+        }
+        // `flunk(msg = "Epic Fail!")`: an unconditional failure carrying
+        // the test's own message, which is the whole point of the call
+        // (`flunk("@args instance variable is not defined")`). Typed by
+        // the harness signatures and defined by no harness, it used to
+        // pass `check` and die as `undefined method 'flunk'`.
+        "flunk" if args.len() <= 1 => {
+            let msg = args.first().cloned().unwrap_or_else(|| {
+                Expr::new(span, ExprNode::Lit { value: Literal::Str { value: "Epic Fail!".into() } })
+            });
+            Some(Expr::new(span, ExprNode::Raise { value: msg }))
         }
         "assert_not" | "refute" if !args.is_empty() => {
             let cond = args[0].clone();

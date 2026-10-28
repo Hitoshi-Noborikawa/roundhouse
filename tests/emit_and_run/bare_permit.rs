@@ -9,6 +9,18 @@ class FindsControllerTest < ActionDispatch::IntegrationTest
     assert_select "p#q", "<rails>"
     assert_select "p#other", "one"
     assert_select "p#log", "Alice|1||2|1"
+    assert_select "a#next[href=?]", "/finds/page/2?q=rails"
+    assert_select "a#later[href=?]", "/finds/page/3?q=rails"
+    assert_select "a#strict[href=?]", "/finds/page/4?q=rails"
+  end
+
+  test "a partial an action renders links against that action" do
+    get "/finds/pager", params: { q: "rails" }
+    assert_response :success
+    assert_includes response.body, 'href="/finds/pager?page=3&amp;q=rails"'
+    get "/finds/helper_pager", params: { q: "rails" }
+    assert_response :success
+    assert_includes response.body, 'href="/finds/helper_pager?page=3&amp;q=rails"'
   end
 
   test "absent keys take the fallbacks" do

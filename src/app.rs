@@ -10,7 +10,8 @@
 //! local types, view ivar contexts, render edges — so lowerers and
 //! IDE consumers read them instead of re-deriving.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
+use crate::det::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -303,6 +304,12 @@ pub struct App {
     /// worker's own `-c`, `-t` and `-q` win over them.
     #[serde(default, skip_serializing_if = "SidekiqWorkerDefaults::is_empty")]
     pub sidekiq_worker: SidekiqWorkerDefaults,
+    /// `config/cable.yml`'s production Redis, when its adapter is
+    /// `redis`, read at ingest by `ingest::cable_yml`. A tree on
+    /// `:sidekiq` then sends every broadcast through it, so one a
+    /// worker makes reaches the web processes' sockets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cable_redis: Option<CableRedisConfig>,
     /// Model names whose attachment sgid the app resolves even when
     /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
     /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
@@ -334,7 +341,7 @@ pub struct App {
     /// Class methods a model took from a module only it extends
     /// (`ingest::extend_splice`), by name.
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
-    pub spliced_class_methods: std::collections::HashSet<Symbol>,
+    pub spliced_class_methods: crate::det::HashSet<Symbol>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -439,6 +446,12 @@ pub struct App {
     /// Object, which the emitted app does not define.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_defs: Vec<crate::ident::Symbol>,
+    /// Installed gems compiled from source because the app's code needs
+    /// them and nothing models or ports them (`ingest::auto_source_gems`).
+    /// The Spinel tree carries their code; the ruby family loads the real
+    /// gem instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_source_gems: Vec<String>,
     /// `X.after_action(only: …) { response.set_header(k, v) }` from a
     /// `config/initializers/` file, bare or inside `ActiveSupport.on_load`:
     /// campfire marks the disk service's file responses cacheable this
@@ -479,6 +492,20 @@ pub struct App {
     /// `ingest::database_yml`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub database_pragmas: Vec<(String, Vec<String>)>,
+    /// `config/database.yml`'s configurations, every environment's,
+    /// resolved at build time ([`crate::database`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub databases: Vec<crate::database::Database>,
+    /// Each model's database, read from source (`connects_to` through
+    /// its ancestry). Empty when every model runs on the primary.
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub model_databases: indexmap::IndexMap<ClassId, crate::database::ModelDatabase>,
+    /// Database-identity facts the emitted runtime does not carry (a
+    /// second database, unresolvable routing, and as warnings a
+    /// configuration build-time resolution cannot read), reported by
+    /// `analyze::database_identity`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub database_refusals: Vec<crate::database::DatabaseRefusal>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -588,6 +615,13 @@ pub struct App {
     /// this is the only record that an includer's reader `x` is replaced.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_included_redefs: HashMap<ClassId, Vec<Symbol>>,
+    /// `validates_with` calls an STI subclass declares, moved onto its
+    /// model ancestor's body (`ingest::sti_validations`): each call's
+    /// position and the subclass, whose `is_a?` guards the `validate` the
+    /// call expands into. A list, not a map keyed by the position: JSON
+    /// takes only string keys, and the ingested App round-trips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validates_with_guards: Vec<ValidatesWithGuard>,
     /// Classes that were `ActiveSupport::CurrentAttributes` subclasses
     /// before `ingest::current_attributes` flattened them. Recorded
     /// because that pass CLEARS the parent — nothing downstream could
@@ -894,8 +928,9 @@ impl App {
     /// body items, a library class's `includes`.
     pub fn sole_includer_of_modules(
         &self,
-    ) -> std::collections::HashMap<crate::ident::ClassId, crate::ident::ClassId> {
-        use std::collections::{BTreeMap, BTreeSet, HashMap};
+    ) -> crate::det::HashMap<crate::ident::ClassId, crate::ident::ClassId> {
+        use std::collections::{BTreeMap, BTreeSet};
+        use crate::det::HashMap;
         let modules: BTreeSet<&crate::ident::ClassId> = self
             .library_classes
             .iter()
@@ -903,7 +938,7 @@ impl App {
             .map(|lc| &lc.name)
             .collect();
         if modules.is_empty() {
-            return HashMap::new();
+            return HashMap::default();
         }
         // Every class's DIRECT includes, modules included (for the
         // transitive walk).
@@ -936,7 +971,7 @@ impl App {
             let ids = crate::analyze::controller_includes(controller);
             direct.entry(controller.name.clone()).or_default().extend(ids);
         }
-        let mut includers: HashMap<crate::ident::ClassId, BTreeSet<crate::ident::ClassId>> = HashMap::new();
+        let mut includers: HashMap<crate::ident::ClassId, BTreeSet<crate::ident::ClassId>> = HashMap::default();
         for (id, includes) in &direct {
             if modules.contains(id) || includes.is_empty() {
                 continue;
@@ -971,8 +1006,9 @@ impl App {
     /// `self`, so they are typed as its class methods.
     pub fn sole_extender_of_modules(
         &self,
-    ) -> std::collections::HashMap<crate::ident::ClassId, crate::ident::ClassId> {
-        use std::collections::{BTreeSet, HashMap, HashSet};
+    ) -> crate::det::HashMap<crate::ident::ClassId, crate::ident::ClassId> {
+        use std::collections::BTreeSet;
+        use crate::det::{HashMap, HashSet};
         let modules: HashSet<&crate::ident::ClassId> =
             self.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
         let mixed = |exprs: &mut dyn Iterator<Item = &crate::expr::Expr>, mixin: &str, out: &mut Vec<crate::ident::ClassId>| {
@@ -988,8 +1024,8 @@ impl App {
                 }
             }
         };
-        let mut included: HashSet<crate::ident::ClassId> = HashSet::new();
-        let mut extenders: HashMap<crate::ident::ClassId, BTreeSet<crate::ident::ClassId>> = HashMap::new();
+        let mut included: HashSet<crate::ident::ClassId> = HashSet::default();
+        let mut extenders: HashMap<crate::ident::ClassId, BTreeSet<crate::ident::ClassId>> = HashMap::default();
         for model in &self.models {
             let mut items = model.body.iter().filter_map(|item| match item {
                 crate::dialect::ModelBodyItem::Unknown { expr, .. } => Some(expr),
@@ -1056,6 +1092,12 @@ impl App {
             .map(|(m, set)| (m, set.into_iter().next().unwrap()))
             .collect()
     }
+    /// The path a span's file was read from (`sources[n - 1]`), for an app
+    /// whose ingest has finished; `None` for the synthetic `FileId(0)`.
+    pub fn source_path(&self, file: crate::span::FileId) -> Option<&str> {
+        (file.0 as usize).checked_sub(1).and_then(|i| self.sources.get(i)).map(|s| s.path.as_str())
+    }
+
     pub const SCHEMA_VERSION: u32 = 1;
 
     pub fn new() -> Self {
@@ -1079,8 +1121,8 @@ impl App {
             inertia: None,
             vite_manifest: None,
             stylesheets: Vec::new(),
-            rbs_signatures: HashMap::new(),
-            rbs_includes: HashMap::new(),
+            rbs_signatures: HashMap::default(),
+            rbs_includes: HashMap::default(),
             gem_lock: None,
             loaded_frameworks: None,
             assume_ssl_envs: Vec::new(),
@@ -1088,8 +1130,8 @@ impl App {
             extensions: Default::default(),
             content_helper_allowed_attributes: Vec::new(),
             content_helper_allowed_tags: Vec::new(),
-            inferred_method_params: HashMap::new(),
-            helper_method_index: HashMap::new(),
+            inferred_method_params: HashMap::default(),
+            helper_method_index: HashMap::default(),
             view_visible_controller_methods: BTreeSet::new(),
             generated_helper_methods: BTreeMap::new(),
             global_id_locate_models: BTreeSet::new(),
@@ -1098,13 +1140,14 @@ impl App {
             queue_adapter: None,
             sidekiq_redis: SidekiqRedisConfig::default(),
             sidekiq_worker: SidekiqWorkerDefaults::default(),
+            cable_redis: None,
             attachable_unsigned_models: Vec::new(),
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
             load_hook_extended_macros: Vec::new(),
             spliced_class_methods: Default::default(),
-            partial_local_types: HashMap::new(),
-            view_ivar_types: HashMap::new(),
+            partial_local_types: HashMap::default(),
+            view_ivar_types: HashMap::default(),
             html_safe_methods: BTreeSet::new(),
             html_safe_method_owners: BTreeSet::new(),
             time_formats: BTreeMap::new(),
@@ -1113,27 +1156,32 @@ impl App {
             rake_task_gaps: Vec::new(),
             initializer_filters: Vec::new(),
             initializer_defs: Vec::new(),
+            auto_source_gems: Vec::new(),
             initializer_response_headers: Vec::new(),
             collection_cache_store: None,
             app_requires: Vec::new(),
             sql_functions: Vec::new(),
             database_pragmas: Vec::new(),
+            databases: Vec::new(),
+            model_databases: indexmap::IndexMap::new(),
+            database_refusals: Vec::new(),
             rails_application: None,
-            concern_filters: HashMap::new(),
+            concern_filters: HashMap::default(),
             graphql_types: Vec::new(),
             graphql_signatures: Vec::new(),
-            concern_spliced_actions: HashMap::new(),
+            concern_spliced_actions: HashMap::default(),
             unreachable_views: BTreeSet::new(),
             helper_diagnostics: None,
             helper_modules: BTreeSet::new(),
-            concern_spliced_class_methods: HashMap::new(),
-            concern_model_items: HashMap::new(),
-            concern_guarded_items: HashMap::new(),
-            concern_included_redefs: HashMap::new(),
+            concern_spliced_class_methods: HashMap::default(),
+            concern_model_items: HashMap::default(),
+            concern_guarded_items: HashMap::default(),
+            concern_included_redefs: HashMap::default(),
+            validates_with_guards: Vec::new(),
             current_attribute_classes: Vec::new(),
-            render_edges: HashMap::new(),
-            view_feeders: HashMap::new(),
-            controller_resolutions: HashMap::new(),
+            render_edges: HashMap::default(),
+            view_feeders: HashMap::default(),
+            controller_resolutions: HashMap::default(),
             sources: Vec::new(),
             wrap_parameters_by_default: false,
             ports_active_model_validator: false,
@@ -1197,6 +1245,15 @@ impl SidekiqRedisConfig {
     }
 }
 
+/// `config/cable.yml`'s production `adapter: redis` settings: where
+/// broadcasts are published, and the prefix Action Cable puts on each
+/// channel (`""` for none).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CableRedisConfig {
+    pub url: RedisSetting,
+    pub channel_prefix: String,
+}
+
 /// `config/sidekiq.yml`'s literal worker settings: each `None` (or the
 /// queues empty) when the file doesn't give it in a form ingest reads.
 /// A queue's weight is 0 when it has none.
@@ -1221,4 +1278,13 @@ pub enum RedisSetting {
     Literal(String),
     Env(String),
     EnvFetch { name: String, default: Option<String> },
+}
+
+/// A `validates_with` an STI subclass declares, by its call's position
+/// (file id and start offset), and that subclass (`App::validates_with_guards`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatesWithGuard {
+    pub file: u32,
+    pub start: u32,
+    pub class: String,
 }

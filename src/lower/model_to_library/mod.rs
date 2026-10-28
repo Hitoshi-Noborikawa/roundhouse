@@ -33,7 +33,7 @@ pub(crate) mod broadcasts;
 pub(crate) mod markers;
 pub mod row;
 
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Model, Param};
 use crate::expr::{Expr, ExprNode, Literal};
@@ -236,7 +236,7 @@ pub fn lower_models_to_library_classes_unfolding(
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
-    unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
+    unfolded: &crate::det::HashSet<(ClassId, Symbol)>,
 ) -> Vec<LibraryClass> {
     lower_models_inner(models, schema, extra_class_infos, params_specs, unfolded, Materialization::Emit, FinderInputs::Request).0
 }
@@ -261,7 +261,7 @@ pub(crate) fn lower_models_inner(
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
-    unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
+    unfolded: &crate::det::HashSet<(ClassId, Symbol)>,
     materialization: Materialization<'_>,
     finder_inputs: FinderInputs,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
@@ -276,7 +276,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
-    unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
+    unfolded: &crate::det::HashSet<(ClassId, Symbol)>,
     materialization: Materialization<'_>,
     finder_inputs: FinderInputs,
     ruby_read_values: bool,
@@ -285,7 +285,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     runtime_relation: RuntimeRelation,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
-    let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
+    let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::default();
     let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {
         let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation);
@@ -442,7 +442,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             if !unfold {
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
-                    &HashSet::new(),
+                    &HashSet::default(),
                     crate::lower::arel::SqliteVisitor { param_binds },
                 );
             }
@@ -493,9 +493,9 @@ pub fn class_info_from_library_class(lc: &LibraryClass) -> crate::analyze::Class
     // shouldn't add `()` to such calls since the field is read as
     // a property. Reclassify those Method entries as AttributeReader
     // so the typer treats them like field accesses.
-    let mut ivar_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    fn collect_ivars(e: &crate::expr::Expr, out: &mut std::collections::HashSet<String>) {
+    let mut ivar_names: crate::det::HashSet<String> =
+        crate::det::HashSet::default();
+    fn collect_ivars(e: &crate::expr::Expr, out: &mut crate::det::HashSet<String>) {
         match &*e.node {
             ExprNode::Assign { target: LValue::Ivar { name }, value } => {
                 out.insert(name.as_str().to_string());
@@ -585,7 +585,7 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
         build_methods(model, std::slice::from_ref(model), schema, &Default::default());
     let table = schema.tables.get(&model.table.0);
     let class_info = build_class_info(model, &methods, table);
-    let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
+    let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::default();
     classes.insert(model.name.clone(), class_info);
     insert_integer_key_cast_info(&mut classes);
     // Register Row classes so `<Model>.from_row(r)` / `<Model>Row.from_raw(h)`
@@ -770,6 +770,11 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 {
             continue;
         }
+        // `connects_to` / `establish_connection`: the model's database,
+        // decided (or refused) by `ingest::database_ownership`.
+        if crate::ingest::database_ownership::claims_model_statement(expr) {
+            continue;
+        }
         // Claimed by `apply_inherited_visibility` and `analyze::private_calls`.
         if expr.decisions & crate::expr::INHERITED_VISIBILITY != 0 {
             continue;
@@ -789,6 +794,11 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
                 || !name.ends_with('=')
                 || matches!(name, "==" | "!=" | "<=" | ">=" | "===")
             {
+                continue;
+            }
+            // `inheritance_column = nil` / `false` turns STI off, which
+            // `lower::sti_scope` models. A column name stays unsupported.
+            if crate::lower::sti_scope::turns_sti_off(expr).is_some() {
                 continue;
             }
             // Literal table settings are consumed by ingest::model's
@@ -1267,7 +1277,7 @@ pub(crate) fn unretained_model_contracts<'a>(
     crate::emit::diagnostics::scope(|| {
         let mut specs = crate::lower::controller_to_library::params::collect_specs(&app.controllers);
         specs.mark_file_fields(&app.models);
-        let mut missing = HashSet::new();
+        let mut missing = HashSet::default();
         let _body_names = schema::share_model_body_names(&app.models, &Default::default());
         for model in &app.models {
             let selected = selected(model);
@@ -1615,7 +1625,7 @@ fn build_methods_with_finder_inputs(
 fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &HashSet<crate::ident::Symbol>) {
     use crate::dialect::{AccessorKind, ModelBodyItem};
     use crate::expr::{ExprNode, LValue};
-    let mut selected_source_methods = HashSet::new();
+    let mut selected_source_methods = HashSet::default();
     for item in &model.body {
         let ModelBodyItem::Method { method, .. } = item else { continue };
         if let Some(idx) = methods
@@ -1778,7 +1788,7 @@ fn resolve_model_aliases(
     // must refuse rather than fall through to the inherited-method
     // forwarder (which would be synthesizing a forwarder for a name
     // that is, in fact, about to become a plain local method).
-    let mut declared_anywhere: HashSet<Symbol> = HashSet::new();
+    let mut declared_anywhere: HashSet<Symbol> = HashSet::default();
     for item in &model.body {
         match item {
             ModelBodyItem::Method { method, .. } if method.receiver == MethodReceiver::Instance => {
@@ -1806,7 +1816,7 @@ fn resolve_model_aliases(
     // that one synthesized copy is what's live from here on, until a
     // later hand-written redefinition — tracked by the arm below —
     // changes it again).
-    let mut live: HashMap<Symbol, MethodDef> = HashMap::new();
+    let mut live: HashMap<Symbol, MethodDef> = HashMap::default();
 
     for (idx, item) in model.body.iter().enumerate() {
         match item {
@@ -2088,7 +2098,7 @@ pub(crate) fn push_scope_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
     scopes: &crate::lower::scope_chain::ScopeRegistry,
-    models_set: &std::collections::HashSet<ClassId>,
+    models_set: &crate::det::HashSet<ClassId>,
     assocs: &crate::lower::scope_chain::AssocRegistry,
 ) {
     use crate::dialect::{AccessorKind, ModelBodyItem, Param};
@@ -2238,7 +2248,7 @@ pub(crate) fn push_scope_methods(
 pub(crate) fn push_scope_variants(
     methods: &mut Vec<MethodDef>,
     model_name: &ClassId,
-    registered: &std::collections::HashMap<Symbol, Vec<crate::dialect::Param>>,
+    registered: &crate::det::HashMap<Symbol, Vec<crate::dialect::Param>>,
 ) {
     use crate::dialect::{AccessorKind, Param};
     use crate::lower::scope_chain::{delegable_name, scope_variant_name, DelegableShape};
@@ -2462,7 +2472,7 @@ fn build_class_info_with_finder_inputs(
     // `/rooms/#<Room:0x000000010…>`. Uses the analyzer's own seed rule
     // rather than a second copy of it.
     {
-        let scope_names: std::collections::HashSet<Symbol> =
+        let scope_names: crate::det::HashSet<Symbol> =
             model.scopes().map(|s| s.name.clone()).collect();
         for scope in model.scopes() {
             info.class_methods.entry(scope.name.clone()).or_insert_with(|| {
@@ -3356,7 +3366,7 @@ mod tests {
         let marker = Symbol::from("application_marker");
         let mut application = crate::analyze::ClassInfo::default();
         application.class_methods.insert(marker.clone(), fn_sig(vec![], Ty::Str));
-        let mut classes = HashMap::from([(app_id.clone(), application)]);
+        let mut classes = HashMap::from_iter([(app_id.clone(), application)]);
 
         insert_integer_key_cast_info(&mut classes);
 
@@ -3376,7 +3386,7 @@ mod tests {
             files
                 .into_iter()
                 .map(|(path, text)| (PathBuf::from(path), text.into_bytes()))
-                .collect::<HashMap<_, _>>(),
+                .collect::<crate::vfs::FileTree>(),
         )
         .expect("ingest test app")
     }
@@ -3436,7 +3446,7 @@ mod tests {
             parent.params[0].default.as_mut().unwrap().ty = Some(Ty::Hash {
                 key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str),
             });
-            let classes = HashMap::from([
+            let classes = HashMap::from_iter([
                 (ClassId(Symbol::from("Article")), article_info(&app, &methods)),
             ]);
             let probe = methods.iter_mut().find(|m| m.name.as_str() == "probe").unwrap();

@@ -294,7 +294,8 @@ end
 #[test]
 fn or_equals_on_a_parameter_is_left_alone() {
     let out = emit_classes(
-        r#"
+        // The magic comment keeps the literal bare: this pins `||=`, not its spelling.
+        r#"# frozen_string_literal: true
 class Cache
   def fetch(key)
     key ||= "default"

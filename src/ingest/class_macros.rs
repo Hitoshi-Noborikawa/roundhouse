@@ -30,7 +30,7 @@
 //! was and reports it, rather than dropping the methods it would have
 //! defined.
 
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 use crate::App;
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, MethodVisibility, ModelBodyItem, Param};
@@ -67,7 +67,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             })
         })
         .collect();
-    let mut module_methods: HashMap<String, Vec<MethodDef>> = HashMap::new();
+    let mut module_methods: HashMap<String, Vec<MethodDef>> = HashMap::default();
     for lc in app.library_classes.iter().filter(|lc| lc.is_module) {
         module_methods.entry(lc.name.0.as_str().to_string()).or_default().extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).cloned());
     }
@@ -111,7 +111,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
         let model = &app.models[model_index];
         // Not one this can follow: a class that redefines the definers, or a macro also called where the class body does not always run it.
         let redefined = table.contains_key(&Symbol::from("define_method")) || table.contains_key(&Symbol::from("define_singleton_method"));
-        let mut nested: HashSet<Symbol> = HashSet::new();
+        let mut nested: HashSet<Symbol> = HashSet::default();
         for item in &model.body {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
             let root = match &*expr.node {
@@ -133,11 +133,11 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
         let own: HashSet<(Symbol, MethodReceiver)> = model.methods().map(|m| (m.name.clone(), m.receiver)).collect();
         let prefix = slot_prefix(model.name.0.as_str());
         let mut counter = 0usize;
-        let mut defined: HashSet<(Symbol, MethodReceiver)> = HashSet::new();
+        let mut defined: HashSet<(Symbol, MethodReceiver)> = HashSet::default();
         let mut reserved: Option<HashSet<Symbol>> = None;
-        let mut expansions: HashMap<usize, Vec<ModelBodyItem>> = HashMap::new();
+        let mut expansions: HashMap<usize, Vec<ModelBodyItem>> = HashMap::default();
         let mut defaults: indexmap::IndexMap<Symbol, Expr> = indexmap::IndexMap::new();
-        let mut extended: HashSet<ClassId> = HashSet::new();
+        let mut extended: HashSet<ClassId> = HashSet::default();
         let mut included: Vec<String> = app.load_hook_class_macros.iter().map(|id| id.0.as_str().to_string()).collect();
         for id in ancestors.iter().chain(std::iter::once(&model.name)) {
             for item in app.models.iter().filter(|m| &m.name == id).flat_map(|m| m.body.iter()) {
@@ -161,9 +161,9 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             if !macros.contains(method) || recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
                 continue;
             }
-            let mut run = Run { table: &table, constants: &constants, frozen: &frozen, cvar_readers: &cvar_readers, included: included.clone(), module_methods: &module_methods, extended: HashMap::new(), evaluated: Vec::new(), known: &known, scope: None, prefix: &prefix, counter, out: Vec::new(), replayed: HashSet::new(), class_attrs: HashMap::new(), unset_cattrs: HashMap::new(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::new(), owner: model.name.0.clone(), sources };
-            let result = if block.is_some() {
-                Err("it is passed a block".to_string())
+            let mut run = Run { table: &table, constants: &constants, frozen: &frozen, cvar_readers: &cvar_readers, included: included.clone(), module_methods: &module_methods, extended: HashMap::default(), evaluated: Vec::new(), known: &known, scope: None, prefix: &prefix, counter, out: Vec::new(), replayed: HashSet::default(), class_attrs: HashMap::default(), unset_cattrs: HashMap::default(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::default(), owner: model.name.0.clone(), sources, instance_methods: None };
+            let result = if block.as_ref().is_some_and(|b| !matches!(&*b.node, ExprNode::Lambda { .. })) {
+                Err("it is passed a block other than a literal one".to_string())
             } else if redefined {
                 Err("the class redefines `define_method`".to_string())
             } else if nested.contains(method) {
@@ -171,7 +171,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             } else if !call_syntax_kept(expr, sources) {
                 Err("its arguments use a splat or a block argument".to_string())
             } else {
-                run.call(method, args, &HashMap::new(), 0)
+                run.call(method, args, block.as_ref(), &HashMap::default(), 0)
             }
             .and_then(|()| {
                 for m in &run.methods {
@@ -251,6 +251,8 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
     // `define_method` with a computed name is one the Spinel target refuses.
     // Only a run that just defines methods expands; a call that can't is
     // reported once, here, and not replayed.
+    let mut expanded_total: HashMap<Symbol, usize> = HashMap::default();
+    let mut failed_total: HashSet<Symbol> = HashSet::default();
     for lc_index in 0..app.library_classes.len() {
         let lc = &app.library_classes[lc_index];
         if lc.is_module || lc.origin.is_some() || lc.unknown_calls.is_empty() {
@@ -272,30 +274,59 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             .flat_map(|id| app.library_classes.iter().filter(move |c| &c.name == id))
             .flat_map(|c| c.includes.iter().map(|i| i.0.as_str().trim_start_matches("::").to_string()))
             .collect();
+        // Not answered past a parent this program does not define: its methods are not known here.
+        let known_root = lineage.last().is_none_or(|top| {
+            app.library_classes.iter().filter(|c| &c.name == top).all(|c| {
+                c.parent.as_ref().is_none_or(|p| app.library_classes.iter().any(|o| &o.name == p) || app.models.iter().any(|m| &m.name == p))
+            })
+        });
+        // Not a private one: `method_defined?` answers public and protected methods only.
+        let instance_methods: Option<HashSet<Symbol>> = known_root.then(|| {
+            lineage
+                .iter()
+                .flat_map(|id| app.library_classes.iter().filter(move |c| &c.name == id))
+                .flat_map(|c| c.methods.iter())
+                .chain(included.iter().flat_map(|full| module_methods.get(full).into_iter().flatten()))
+                .filter(|m| m.receiver == MethodReceiver::Instance && m.visibility != MethodVisibility::Private)
+                .map(|m| m.name.clone())
+                .collect()
+        });
+        let mut slot_constants: Vec<(Symbol, Expr)> = Vec::new();
         let mut counter = 0usize;
-        let mut defined: HashSet<(Symbol, MethodReceiver)> = HashSet::new();
+        let mut defined: HashSet<(Symbol, MethodReceiver)> = HashSet::default();
         let mut added: Vec<MethodDef> = Vec::new();
-        let mut consumed: HashSet<usize> = HashSet::new();
-        let mut expanded: HashMap<Symbol, usize> = HashMap::new();
-        let mut failed: HashSet<Symbol> = HashSet::new();
+        let mut consumed: HashSet<usize> = HashSet::default();
+        let mut expanded: HashMap<Symbol, usize> = HashMap::default();
+        let mut failed: HashSet<Symbol> = HashSet::default();
         for (index, expr) in lc.unknown_calls.iter().enumerate() {
             let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { continue };
             if !macros.contains(method) || recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
                 continue;
             }
-            let mut run = Run { table: &table, constants: &constants, frozen: &frozen, cvar_readers: &cvar_readers, included: included.clone(), module_methods: &module_methods, extended: HashMap::new(), evaluated: Vec::new(), known: &known, scope: None, prefix: &prefix, counter, out: Vec::new(), replayed: HashSet::new(), class_attrs: HashMap::new(), unset_cattrs: HashMap::new(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::new(), owner: lc.name.0.clone(), sources };
-            let result = if block.is_some() {
-                Err("it is passed a block".to_string())
+            let mut run = Run { table: &table, constants: &constants, frozen: &frozen, cvar_readers: &cvar_readers, included: included.clone(), module_methods: &module_methods, extended: HashMap::default(), evaluated: Vec::new(), known: &known, scope: None, prefix: &prefix, counter, out: Vec::new(), replayed: HashSet::default(), class_attrs: HashMap::default(), unset_cattrs: HashMap::default(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::default(), owner: lc.name.0.clone(), sources, instance_methods: instance_methods.as_ref() };
+            let result = if block.as_ref().is_some_and(|b| !matches!(&*b.node, ExprNode::Lambda { .. })) {
+                Err("it is passed a block other than a literal one".to_string())
             } else if redefined {
                 Err("the class redefines `define_method`".to_string())
             } else if !call_syntax_kept(expr, sources) {
                 Err("its arguments use a splat or a block argument".to_string())
             } else {
-                run.call(method, args, &HashMap::new(), 0)
+                run.call(method, args, block.as_ref(), &HashMap::default(), 0)
             }
             .and_then(|()| {
+                // A value the defined bodies capture is the class's constant (`precedence BASE` -> `ROUNDHOUSE_MACRO_…_1 = BASE`).
+                let slots: Vec<(Symbol, Expr)> = run
+                    .out
+                    .iter()
+                    .filter_map(|st| match &*st.node {
+                        ExprNode::Assign { target: LValue::Const { path }, value } if path.len() == 1 && path[0].as_str().starts_with(prefix.as_str()) => {
+                            Some((path[0].clone(), value.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 // Not a plain class's to carry: what a model's expansion places in its body.
-                if !run.out.is_empty() || !run.evaluated.is_empty() || !run.aliases.is_empty() || !run.extended.is_empty() || !run.class_attrs.is_empty() {
+                if slots.len() != run.out.len() || !run.evaluated.is_empty() || !run.aliases.is_empty() || !run.extended.is_empty() || !run.class_attrs.is_empty() {
                     return Err("it does more than define methods".to_string());
                 }
                 for m in &run.methods {
@@ -304,6 +335,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
                         return Err(format!("`{}` is defined twice", m.name.as_str()));
                     }
                 }
+                slot_constants.extend(slots);
                 Ok(())
             });
             consumed.insert(index);
@@ -324,6 +356,10 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
                 }
             }
         }
+        for (name, calls) in &expanded {
+            *expanded_total.entry(name.clone()).or_default() += calls;
+        }
+        failed_total.extend(failed.iter().cloned());
         if consumed.is_empty() {
             continue;
         }
@@ -337,14 +373,42 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
         let lc = &mut app.library_classes[lc_index];
         lc.methods.retain(|m| !(m.receiver == MethodReceiver::Class && spent.contains(&m.name)));
         lc.methods.extend(added);
+        lc.constants.extend(slot_constants);
         let calls = std::mem::take(&mut lc.unknown_calls);
         lc.unknown_calls = calls.into_iter().enumerate().filter(|(i, _)| !consumed.contains(i)).map(|(_, e)| e).collect();
+    }
+    // So does an ancestor's (`class Phrases < RuleBase; rule(:word) { … }`), once every call anywhere expanded.
+    // Not counted: the name inside the macro's own body (`define_method(:precedence)` in `def self.precedence`).
+    let own_mentions = |name: &Symbol| -> usize {
+        app.library_classes
+            .iter()
+            .flat_map(|lc| lc.methods.iter())
+            .filter(|m| m.receiver == MethodReceiver::Class && &m.name == name)
+            .filter_map(|m| source_text(m.body.span, sources))
+            .map(|text| {
+                let mut words = HashMap::default();
+                count_words(std::str::from_utf8(text).unwrap_or(""), &mut words);
+                words.get(name.as_str()).copied().unwrap_or(0)
+            })
+            .sum()
+    };
+    let spent: HashSet<Symbol> = expanded_total
+        .iter()
+        .filter(|(name, calls)| {
+            !failed_total.contains(*name) && mention_counts.count(name.as_str()).saturating_sub(own_mentions(name)) == **calls
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    if !spent.is_empty() {
+        for lc in app.library_classes.iter_mut().filter(|lc| !lc.is_module) {
+            lc.methods.retain(|m| !(m.receiver == MethodReceiver::Class && spent.contains(&m.name)));
+        }
     }
 }
 
 pub(crate) fn hook_macro_calls(app: &App) -> HashSet<Symbol> {
     let hooks = hook_macro_table(app);
-    let mut called = HashSet::new();
+    let mut called = HashSet::default();
     for model in &app.models {
         for item in &model.body {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
@@ -381,7 +445,7 @@ pub(crate) fn drop_expanded_hook_macros(app: &mut App, expanded: &HashSet<Symbol
         .filter(|m| !expanded.contains(&m.name) && !implicitly_called(m.name.as_str()) && !mention_counts.mentioned(m.name.as_str()))
         .map(|m| m.name.clone())
         .collect();
-    let mut called: HashSet<Symbol> = HashSet::new();
+    let mut called: HashSet<Symbol> = HashSet::default();
     let mut note = |e: &Expr| {
         visit(e, &mut |x| {
             if let ExprNode::Send { method, .. } = &*x.node
@@ -424,7 +488,7 @@ pub(crate) fn drop_expanded_hook_macros(app: &mut App, expanded: &HashSet<Symbol
 /// every model: an included module's class methods, an extended
 /// module's instance methods, each as a class method of the model.
 fn hook_macro_table(app: &App) -> HashMap<Symbol, MethodDef> {
-    let mut table = HashMap::new();
+    let mut table = HashMap::default();
     let sources = app
         .load_hook_class_macros
         .iter()
@@ -448,7 +512,7 @@ fn hook_macro_table(app: &App) -> HashMap<Symbol, MethodDef> {
 /// exists, so a call to it anywhere (or a `class_variable_set` naming
 /// the variable) keeps the reader a value known only when it runs.
 fn frozen_readers(app: &App, sources: &[SourceFile], mention_counts: &Mentions<'_>) -> HashMap<(String, Symbol), Expr> {
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     // Not computed up front: it indexes every source, and most apps have no frozen reader to ask about.
     let dead: std::cell::OnceCell<Vec<(usize, usize, usize)>> = std::cell::OnceCell::new();
     for class in &app.library_classes {
@@ -586,9 +650,35 @@ impl<'a> Mentions<'a> {
             return count;
         }
         let words = self.words.get_or_init(|| {
-            let mut words = HashMap::new();
-            for source in self.sources {
-                count_words(&source.text, &mut words);
+            // Each chunk of sources counts on its own thread, and the totals are
+            // sums merged in chunk order, so the schedule cannot change them.
+            // `count_words` reads only its text: no thread-local compiler state,
+            // which a worker would not have. Only this build runs in parallel;
+            // `Mentions` itself (the `scans` memo) stays on the calling thread.
+            // When `par::map` would not spawn workers (wasm / one core / one
+            // chunk), stay on one accumulator — buffering every chunk map is
+            // pure peak-memory cost with no schedule gain.
+            let chunk = self.sources.len().div_ceil(64).max(1);
+            let n_parts = self.sources.len().div_ceil(chunk);
+            if crate::par::workers_for(n_parts) <= 1 {
+                let mut words: HashMap<&'a str, usize> = HashMap::default();
+                for source in self.sources {
+                    count_words(&source.text, &mut words);
+                }
+                return words;
+            }
+            let parts: Vec<&'a [SourceFile]> = self.sources.chunks(chunk).collect();
+            let mut words: HashMap<&'a str, usize> = HashMap::default();
+            for part in crate::par::map(&parts, |part| {
+                let mut words = HashMap::default();
+                for source in *part {
+                    count_words(&source.text, &mut words);
+                }
+                words
+            }) {
+                for (word, n) in part {
+                    *words.entry(word).or_default() += n;
+                }
             }
             words
         });
@@ -769,7 +859,7 @@ fn ancestors(app: &App, parents: &HashMap<ClassId, ClassId>, model: &ClassId) ->
 
 /// The class methods the ancestors define, the nearest one's winning.
 fn class_method_table(app: &App, ancestors: &[ClassId]) -> HashMap<Symbol, MethodDef> {
-    let mut table = HashMap::new();
+    let mut table = HashMap::default();
     for id in ancestors.iter().rev() {
         let methods: Vec<&MethodDef> = match app.models.iter().find(|m| &m.name == id) {
             Some(model) => model.methods().collect(),
@@ -807,7 +897,7 @@ fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 /// Constants the ancestors assign a list of Strings or Symbols
 /// (`PROTECTED_KEYS = %w[var value].freeze`), for a guard that reads one.
 fn literal_constants(app: &App, ancestors: &[ClassId]) -> HashMap<Symbol, Expr> {
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for id in ancestors.iter().rev() {
         let assigned: Vec<(Symbol, Expr)> = match app.models.iter().find(|m| &m.name == id) {
             Some(model) => model
@@ -886,20 +976,24 @@ struct Run<'a> {
     strings: HashMap<(String, usize), Symbol>,
     owner: Symbol,
     sources: &'a [SourceFile],
+    /// The instance methods the class has without this run, by name, for
+    /// `method_defined?`; not known for a model, whose attribute readers
+    /// Rails defines later.
+    instance_methods: Option<&'a HashSet<Symbol>>,
 }
 
 type Env = HashMap<Symbol, Val>;
 
 impl Run<'_> {
-    fn call(&mut self, name: &Symbol, args: &[Expr], env: &Env, depth: usize) -> Result<(), String> {
+    fn call(&mut self, name: &Symbol, args: &[Expr], block: Option<&Expr>, env: &Env, depth: usize) -> Result<(), String> {
         if depth > MAX_DEPTH {
             return Err("its calls nest too deep".into());
         }
         let def = self.method_def(name).cloned().ok_or_else(|| format!("`{}` is not one of the class's methods", name.as_str()))?;
-        if !super::model_macros::supported_source_signature(&def, self.sources, true, true) {
+        if !super::model_macros::supported_source_signature(&def, self.sources, true, true, true) {
             return Err(format!("`{}`'s parameters are not ones it binds", name.as_str()));
         }
-        let mut bound = self.bind(&def, args, env)?;
+        let mut bound = self.bind(&def, args, block, env)?;
         let statements: Vec<Expr> = match &*def.body.node {
             ExprNode::Seq { exprs } => exprs.clone(),
             _ => vec![def.body.clone()],
@@ -922,14 +1016,37 @@ impl Run<'_> {
         self.table.get(name).or_else(|| self.extended.get(name))
     }
 
-    fn bind(&mut self, def: &MethodDef, args: &[Expr], env: &Env) -> Result<Env, String> {
-        if def.block_param.is_some() || def.params.iter().any(|p| p.from_kwrest) {
-            return Err("its parameters include a keyword rest or a block".into());
+    fn bind(&mut self, def: &MethodDef, args: &[Expr], block: Option<&Expr>, env: &Env) -> Result<Env, String> {
+        if def.params.iter().any(|p| p.from_kwrest) {
+            return Err("its parameters include a keyword rest".into());
+        }
+        let mut bound = Env::default();
+        // The block is captured as written: the defined bodies run it where they `instance_eval` or pass it.
+        match (&def.block_param, block) {
+            (Some(name), Some(block)) => {
+                bound.insert(name.name.clone(), Val::Lit(block.clone()));
+            }
+            (Some(name), None) => {
+                bound.insert(name.name.clone(), Val::Lit(lit(def.name_span, Literal::Nil)));
+            }
+            (None, Some(_)) => return Err("it is passed a block it does not name".into()),
+            (None, None) => {}
         }
         let takes_keywords = def.params.iter().any(|p| p.keyword || p.from_keyword);
+        // Not split off without keyword parameters: Ruby hands the trailing Hash to the last positional (`opts = {}`) or a `*rest`.
+        let as_hash: Vec<Expr>;
+        let args: &[Expr] = match args.last().map(|a| &*a.node) {
+            Some(ExprNode::Hash { entries, kwargs: true }) if !takes_keywords => {
+                let mut owned = args.to_vec();
+                let last = owned.last_mut().expect("matched");
+                *last = Expr::new(last.span, ExprNode::Hash { entries: entries.clone(), kwargs: false });
+                as_hash = owned;
+                &as_hash
+            }
+            _ => args,
+        };
         let (positional, keywords): (&[Expr], Vec<(Symbol, Expr)>) = match args.last().map(|a| &*a.node) {
-            // Not split off without keyword parameters: Ruby hands a `*rest` the trailing Hash as one more element.
-            Some(ExprNode::Hash { entries, kwargs: true }) if takes_keywords || !def.params.iter().any(|p| p.rest) => {
+            Some(ExprNode::Hash { entries, kwargs: true }) if takes_keywords => {
                 let mut kw = Vec::new();
                 for (k, v) in entries {
                     let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else {
@@ -943,7 +1060,6 @@ impl Run<'_> {
         };
         let mut keywords: HashMap<Symbol, Expr> = keywords.into_iter().collect();
         let mut positional = positional.iter();
-        let mut bound = Env::new();
         let required_after_rest = |at: usize| def.params[at + 1..].iter().filter(|p| !p.keyword && !p.from_keyword && p.default.is_none() && !p.rest).count();
         for (at, p) in def.params.iter().enumerate() {
             if p.rest {
@@ -1152,7 +1268,7 @@ impl Run<'_> {
                         Err(format!("it declares a `{}` whose name is built from its arguments", method.as_str()))
                     }
                     name if CLASS_BODY_DECLARATIONS.contains(&name) && block.is_none() && self.method_def(method).is_none() => {
-                        let declared = self.substitute(st, env, &HashSet::new())?;
+                        let declared = self.substitute(st, env, &HashSet::default())?;
                         if matches!(name, "cattr_accessor" | "cattr_reader" | "mattr_accessor" | "mattr_reader")
                             && let ExprNode::Send { args, .. } = &*declared.node
                             && let [arg] = args.as_slice()
@@ -1163,9 +1279,20 @@ impl Run<'_> {
                         self.declare(declared);
                         Ok(false)
                     }
-                    _ if self.method_def(method).is_some() && block.is_none() => {
+                    _ if self.method_def(method).is_some() => {
                         let args: Vec<Expr> = args.clone();
-                        self.call(method, &args, env, depth + 1).map(|()| false)
+                        // A block forwarded on (`&definition`) is the one this run holds; a literal one is passed as written.
+                        let block = match block.as_ref().map(|b| &*b.node) {
+                            None => None,
+                            Some(ExprNode::Var { name, .. }) => match env.get(name) {
+                                Some(Val::Lit(held)) if matches!(&*held.node, ExprNode::Lambda { .. }) => Some(held.clone()),
+                                Some(Val::Lit(held)) if matches!(&*held.node, ExprNode::Lit { value: Literal::Nil }) => None,
+                                _ => return Err(format!("it passes `{}` a block known only when it runs", method.as_str())),
+                            },
+                            Some(ExprNode::Lambda { .. }) => Some(self.substitute(block.as_ref().unwrap(), env, &HashSet::default())?),
+                            Some(_) => return Err(format!("it passes `{}` a block known only when it runs", method.as_str())),
+                        };
+                        self.call(method, &args, block.as_ref(), env, depth + 1).map(|()| false)
                     }
                     _ => Err(format!("it calls `{}`", method.as_str())),
                 }
@@ -1268,7 +1395,7 @@ impl Run<'_> {
             }
             // The class's own state: run where the macro runs, in the calling class's body.
             _ if touches_class_state(st) => {
-                let substituted = self.substitute(st, env, &HashSet::new())?;
+                let substituted = self.substitute(st, env, &HashSet::default())?;
                 self.out.push(substituted);
                 Ok(false)
             }
@@ -1371,7 +1498,7 @@ impl Run<'_> {
         for p in extra_params {
             let mut p = p.clone();
             if let Some(d) = &p.default {
-                p.default = Some(self.substitute(d, env, &HashSet::new())?);
+                p.default = Some(self.substitute(d, env, &HashSet::default())?);
             }
             method_params.push(p);
         }
@@ -1409,7 +1536,7 @@ impl Run<'_> {
         if let Some(v) = self.fold(e, env) {
             return Ok(v);
         }
-        let value = self.substitute(e, env, &HashSet::new())?;
+        let value = self.substitute(e, env, &HashSet::default())?;
         let truthy = matches!(&*value.node, ExprNode::Hash { .. } | ExprNode::Array { .. } | ExprNode::StringInterp { .. }).then_some(true);
         Ok(Val::Slot { name: self.slot(value), truthy })
     }
@@ -1429,6 +1556,22 @@ impl Run<'_> {
                     )) =>
             {
                 Some(Val::Lit(Expr { span: e.span, ..value.clone() }))
+            }
+            // Not answered for a name `Object` may hold: whether Ruby counts it turns on its visibility.
+            ExprNode::Send { recv, method, args, block: None, .. }
+                if method.as_str() == "method_defined?"
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                    && self.method_def(method).is_none()
+                    && let [arg] = args.as_slice()
+                    && let Some(Val::Lit(name)) = self.fold(arg, env)
+                    && let ExprNode::Lit { value: Literal::Sym { value: name } } = &*name.node =>
+            {
+                let defined = self.instance_methods?.contains(name)
+                    || self.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && m.visibility != MethodVisibility::Private && &m.name == name);
+                if !defined && crate::emit::audit::OBJECT_METHODS.contains(&name.as_str()) {
+                    return None;
+                }
+                Some(Val::Lit(lit(e.span, Literal::Bool { value: defined })))
             }
             ExprNode::Hash { entries, kwargs } => {
                 let mut folded = Vec::new();
@@ -1745,11 +1888,22 @@ impl Run<'_> {
         e.node.for_each_child_mut(&mut |c| self.substitute_in(c, env, shadow, failed));
         // Only a name being spelled (`:"#{name}="`): other folds read the macro owner's constants, not this body's.
         if (matches!(&*e.node, ExprNode::StringInterp { .. }) || matches!(&*e.node, ExprNode::Send { method, .. } if method.as_str() == "to_sym"))
-            && let Some(Val::Lit(folded)) = self.fold(e, &Env::new())
+            && let Some(Val::Lit(folded)) = self.fold(e, &Env::default())
         {
             *e = folded;
         }
         collapse_literal_send(e);
+        // `instance_eval(&definition)` on the defining object, once the block is the call's own: its body, run where it is.
+        if let ExprNode::Send { recv, method, args, block: Some(block), .. } = &*e.node
+            && matches!(method.as_str(), "instance_eval" | "instance_exec")
+            && args.is_empty()
+            && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+            && let ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. } = &*block.node
+            && params.is_empty()
+            && extra_params.is_empty()
+        {
+            *e = body.clone();
+        }
     }
 
     fn read(&mut self, v: &Val, span: Span) -> Expr {
@@ -1792,6 +1946,8 @@ fn call_syntax_kept(call: &Expr, sources: &[SourceFile]) -> bool {
         fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
             self.0 |= node.as_splat_node().is_some() || node.as_assoc_splat_node().is_some() || node.as_block_argument_node().is_some();
         }
+        // Not the literal block's body: the IR keeps a splat there as written (`Alternative.new(*words)`).
+        fn visit_block_node(&mut self, _: &ruby_prism::BlockNode<'pr>) {}
     }
     let mut erased = Erased(false);
     ruby_prism::Visit::visit(&mut erased, &parsed.node());
@@ -1810,7 +1966,7 @@ fn definition_syntax_kept(statement: &Expr, sources: &[SourceFile]) -> bool {
     if parsed.errors().next().is_some() {
         return false;
     }
-    struct Erased(bool, std::collections::HashSet<usize>);
+    struct Erased(bool, crate::det::HashSet<usize>);
     impl<'pr> ruby_prism::Visit<'pr> for Erased {
         fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
             for e in node.exceptions().iter() {
@@ -2059,6 +2215,23 @@ mod tests {
             assert_eq!(mentions.mentioned(name), mentions_scan(name, &sources) > 0, "{name:?}");
         }
         assert!(mentions.count("foo") > 0 && mentions.count("foo?") > 0 && mentions.count("a") > 0);
+    }
+
+    /// Many sources split into several chunks and counted on worker threads: the index
+    /// holds the totals the one-pass scan gives, whatever the chunk boundaries.
+    #[test]
+    fn the_parallel_index_counts_what_the_scan_counts() {
+        let sources: Vec<SourceFile> = (0..500)
+            .map(|i| SourceFile {
+                path: format!("{i}.rb"),
+                text: format!("def run_{}\n  helper_{}(x)\n  shared? && flag!\n  self.shared = {i}\nend\nshared shared= [] ==\n", i % 7, i % 5),
+            })
+            .collect();
+        let mentions = Mentions::new(&sources);
+        for name in ["shared", "shared?", "shared=", "flag!", "helper_0", "helper_4", "run_3", "x", "end", "self", "[]", "==", "absent"] {
+            assert_eq!(mentions.count(name), mentions_scan(name, &sources), "{name:?}");
+        }
+        assert_eq!(mentions.count("shared"), 1000);
     }
 
     /// A name the word index does not answer (an operator) is scanned once, however often

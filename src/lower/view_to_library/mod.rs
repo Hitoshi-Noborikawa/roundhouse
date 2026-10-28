@@ -100,8 +100,8 @@ pub fn type_view_library_classes(
     // Merge: caller extras + framework runtime stubs + view modules
     // themselves (so cross-view dispatch like Views::Articles.article
     // resolves from one view to another).
-    let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
-        std::collections::HashMap::new();
+    let mut classes: crate::det::HashMap<ClassId, crate::analyze::ClassInfo> =
+        crate::det::HashMap::default();
     for (id, info) in extras {
         classes.insert(id, info);
     }
@@ -149,8 +149,8 @@ pub fn type_view_library_classes(
     // be made one.
     crate::lower::route_helper_receiver::qualify_lcs(lcs, app);
 
-    let empty_ivars: std::collections::HashMap<Symbol, crate::ty::Ty> =
-        std::collections::HashMap::new();
+    let empty_ivars: crate::det::HashMap<Symbol, crate::ty::Ty> =
+        crate::det::HashMap::default();
     for lc in lcs.iter_mut() {
         for method in &mut lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
@@ -231,44 +231,46 @@ pub fn flatten_lcs_to_functions(
 pub struct ViewLowerCtx<'a> {
     app: &'a App,
     known_models: Vec<String>,
-    closures: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    closures: std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Symbol>>>,
     /// See the ViewCtx field of the same name.
-    view_formats: std::rc::Rc<std::collections::HashSet<(ViewKey, ViewKind, String)>>,
-    dyn_pools: std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
+    view_formats: std::rc::Rc<crate::det::HashSet<(ViewKey, ViewKind, String)>>,
+    dyn_pools: std::rc::Rc<crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
     /// Partials whose body renders a `file_field` — see
     /// `ViewCtx::multipart_partials`.
-    multipart_partials: std::rc::Rc<std::collections::HashSet<ViewKey>>,
-    partial_extras: std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
-    locals_keys: std::collections::HashMap<(String, String), Vec<String>>,
-    reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
-    reference_targets: std::rc::Rc<std::collections::HashMap<String, String>>,
-    nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
-    html_safe_methods: std::rc::Rc<std::collections::HashSet<String>>,
-    model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
-    slug_models: std::rc::Rc<std::collections::HashSet<String>>,
-    bool_readers: std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    multipart_partials: std::rc::Rc<crate::det::HashSet<ViewKey>>,
+    partial_extras: std::rc::Rc<crate::det::HashMap<(String, String), Vec<String>>>,
+    /// See [`request_context_views`].
+    request_context: std::rc::Rc<crate::det::HashSet<String>>,
+    locals_keys: crate::det::HashMap<(String, String), Vec<String>>,
+    reference_reads: std::rc::Rc<crate::det::HashSet<String>>,
+    reference_targets: std::rc::Rc<crate::det::HashMap<String, String>>,
+    nilable_scalar_reads: std::rc::Rc<crate::det::HashSet<String>>,
+    html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
+    model_singulars: std::rc::Rc<crate::det::HashSet<String>>,
+    slug_models: std::rc::Rc<crate::det::HashSet<String>>,
+    bool_readers: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
     store_readers:
-        std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
-    partial_form_bindings: std::collections::HashMap<ViewKey, PartialFormBinding>,
-    route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
+        std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
+    partial_form_bindings: crate::det::HashMap<ViewKey, PartialFormBinding>,
+    route_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
     i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
     /// positionals it takes. See the ViewCtx field of the same name.
-    route_helper_arity: std::rc::Rc<std::collections::HashMap<String, usize>>,
+    route_helper_arity: std::rc::Rc<crate::det::HashMap<String, usize>>,
     /// Partials with a `<%# locals: (…) -%>` header, keyed by ViewKey →
     /// their declared keyword locals (excluding the first/positional
     /// record). Render call sites consult it to bind provided locals by
     /// name and to suppress convention closure-threading.
-    strict_locals: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Param>>>,
+    strict_locals: std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Param>>>,
     /// For a partial rendered as a COLLECTION with an explicit name, the
     /// local its callers bind each element to — `as:` when given, else
     /// the partial's own base name. Rails' rule, read off the call site;
     /// absent for every partial nobody renders that way, which then keeps
     /// the dir-singular convention arg.
-    collection_element_locals: std::rc::Rc<std::collections::HashMap<ViewKey, String>>,
+    collection_element_locals: std::rc::Rc<crate::det::HashMap<ViewKey, String>>,
     /// Helper methods that are a thin wrapper around a BUILDER-YIELDING
     /// form helper (see [`form_wrapper_helpers`]).
-    form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    form_wrappers: std::rc::Rc<crate::det::HashMap<String, FormWrapperHelper>>,
     /// See the ViewCtx field of the same name. Off unless the emitter
     /// opts in with [`ViewLowerCtx::observe_form_with_entry`].
     form_with_entry: bool,
@@ -307,6 +309,7 @@ impl<'a> ViewLowerCtx<'a> {
             dyn_pools: std::rc::Rc::new(dynamic_partial_pools(&app.controllers)),
             multipart_partials: std::rc::Rc::new(multipart_partials(&app.views)),
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
+            request_context: std::rc::Rc::new(request_context_views(&app.views)),
             locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
@@ -445,7 +448,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // Flash rename → ivar rewrite → extras collect, one pipeline shared
     // with the call-site contracts (see `extra_params::rewritten_extras`).
     let (rewritten, extra_params) =
-        rewritten_extras(view, &ivar_locals, &arg_name, keys.map(Vec::as_slice));
+        rewritten_extras(view, &ivar_locals, &arg_name, keys.map(Vec::as_slice), lx.request_context.contains(view.name.as_str()));
 
     // Rewrite `defined?(name)` marker Sends to `!name.nil?` checks.
     // Runs AFTER collect_extra_params so the inner Var name has been
@@ -639,7 +642,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // `!x.nil? && !x.empty?` form, not a bare `!x.empty?` that crashes on
     // nil. Blog-neutral: its present?/any? receivers are all Array-typed
     // collections or already-nullable — never bare Untyped params.
-    let mut nullable: std::collections::HashSet<String> =
+    let mut nullable: crate::det::HashSet<String> =
         extra_params.iter().cloned().collect();
     for (n, ty) in &typed {
         if matches!(ty, crate::ty::Ty::Untyped) {
@@ -673,7 +676,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         // declares `story:` and reads `@story`) collapses to one identifier
         // after the ivar→local rewrite, so the declared param covers it —
         // threading it again would emit a duplicate argument name.
-        let declared: std::collections::HashSet<&str> = std::iter::once(record_name.as_str())
+        let declared: crate::det::HashSet<&str> = std::iter::once(record_name.as_str())
             .chain(kw_locals.iter().map(|p| p.name.as_str()))
             .collect();
         let closure: Vec<String> = closure_ivars
@@ -721,6 +724,25 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
                 kind: ParamKind::Keyword { required: p.default.is_none() },
             });
         }
+        // Keywords, not positional extras: a strict partial's callers bind by name, and an omitted one stays nil.
+        if lx.request_context.contains(view.name.as_str()) {
+            for name in ["action_name", "controller_name", "path_parameters"] {
+                if declared.contains(name) {
+                    continue;
+                }
+                new_params.push(Param::keyword(Symbol::from(name), Some(nil_lit())));
+                let ty = if name == "path_parameters" {
+                    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }
+                } else {
+                    Ty::Str
+                };
+                sig_params.push(TyParam {
+                    name: Symbol::from(name),
+                    ty: Ty::Union { variants: vec![ty, Ty::Nil].into() }.into(),
+                    kind: ParamKind::Keyword { required: false },
+                });
+            }
+        }
         params = new_params;
         // Nullable-for-predicates: nil-defaulted keyword locals PLUS any
         // Untyped record/closure param. Built BEFORE sig_params is moved
@@ -751,6 +773,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         locals = std::iter::once(record_name.clone())
             .chain(closure.iter().cloned())
             .chain(kw_locals.iter().map(|p| p.name.as_str().to_string()))
+            .chain(
+                ["action_name", "controller_name", "path_parameters"]
+                    .into_iter()
+                    .filter(|n| lx.request_context.contains(view.name.as_str()) && !declared.contains(n))
+                    .map(str::to_string),
+            )
             .collect();
     }
 
@@ -913,7 +941,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
 /// lowerer the same way `Db` is; the bodies are ordinary transpiled
 /// Ruby, so this only has to teach the app-side typer the signatures.
 pub fn insert_params_stub(
-    classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+    classes: &mut crate::det::HashMap<ClassId, crate::analyze::ClassInfo>,
 ) {
     use crate::lower::typing::fn_sig;
     use crate::ty::Ty;
@@ -1003,7 +1031,7 @@ pub fn insert_params_stub(
 /// facade in runtime/ruby/active_record/connection.rb calls Db
 /// directly, so the runtime body-typer needs the same contract.
 pub fn insert_db_stub(
-    classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+    classes: &mut crate::det::HashMap<ClassId, crate::analyze::ClassInfo>,
 ) {
     use crate::lower::typing::fn_sig;
     use crate::ty::Ty;
@@ -1369,7 +1397,7 @@ pub fn insert_db_stub(
 /// in the rust emit, which is how `encode_value(article_json_path(…))`
 /// reached CI.
 pub(crate) fn insert_route_helper_stubs(
-    classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+    classes: &mut crate::det::HashMap<ClassId, crate::analyze::ClassInfo>,
     app: &crate::App,
 ) {
     use crate::dialect::AccessorKind;
@@ -1391,7 +1419,7 @@ pub(crate) fn insert_route_helper_stubs(
 }
 
 pub(crate) fn insert_framework_stubs(
-    classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+    classes: &mut crate::det::HashMap<ClassId, crate::analyze::ClassInfo>,
 ) {
     use crate::dialect::AccessorKind;
     use crate::lower::typing::{fn_sig, fn_sig_with_block};
@@ -1984,10 +2012,10 @@ fn type_method_body(method: &mut MethodDef) {
     // where no shared cross-class registry exists; without these
     // stubs, the rewrite fails silently and Ruby gets bare refs
     // that can't resolve under nested-module lexical scope.
-    let mut classes: std::collections::HashMap<
+    let mut classes: crate::det::HashMap<
         crate::ident::ClassId,
         crate::analyze::ClassInfo,
-    > = std::collections::HashMap::new();
+    > = crate::det::HashMap::default();
     insert_framework_stubs(&mut classes);
     let typer = crate::analyze::BodyTyper::new(&classes);
     let mut ctx = crate::analyze::Ctx::default();
@@ -2179,8 +2207,8 @@ pub(crate) struct PartialFormBinding {
 
 pub(crate) fn partial_form_bindings(
     views: &[View],
-) -> std::collections::HashMap<ViewKey, PartialFormBinding> {
-    use std::collections::{HashMap, HashSet};
+) -> crate::det::HashMap<ViewKey, PartialFormBinding> {
+    use crate::det::{HashMap, HashSet};
 
     // A "simple reference" — the shapes a form's record expr and a
     // locals value can share (`@story`, a bare local).
@@ -2337,7 +2365,7 @@ pub(crate) fn partial_form_bindings(
                     // A block with optional or keyword parameters is not the
                     // `|f|` scope this binds; it seeds nothing.
                     if let Some(form_param) = params.first().filter(|_| extra_params.is_empty()) {
-                        let mut record_refs: HashSet<String> = HashSet::new();
+                        let mut record_refs: HashSet<String> = HashSet::default();
                         let mut id_prefix = String::new();
                         for arg in args {
                             if let ExprNode::Hash { entries, .. } = &*arg.node {
@@ -2387,8 +2415,8 @@ pub(crate) fn partial_form_bindings(
         seed_scopes(&v.body, own, &mut edges);
     }
 
-    let mut out: HashMap<ViewKey, PartialFormBinding> = HashMap::new();
-    let mut poisoned: HashSet<ViewKey> = HashSet::new();
+    let mut out: HashMap<ViewKey, PartialFormBinding> = HashMap::default();
+    let mut poisoned: HashSet<ViewKey> = HashSet::default();
     let mut pending = edges;
     // Transitive closure: a partial that just gained a binding acts as
     // a form scope for its own render calls. Conflicts poison.
@@ -2416,7 +2444,7 @@ pub(crate) fn partial_form_bindings(
                 }
                 let (dir, _) = split_view_name(v.name.as_str());
                 let own = (!dir.is_empty()).then_some(dir);
-                let mut refs: HashSet<String> = HashSet::new();
+                let mut refs: HashSet<String> = HashSet::default();
                 refs.insert(binding.record_local.clone());
                 // A forwarded partial inherits the defining form's id
                 // prefix along with its builder.
@@ -2439,11 +2467,12 @@ pub(crate) fn render_locals_keys(
     views: &[View],
     controllers: &[crate::dialect::Controller],
     library_classes: &[crate::dialect::LibraryClass],
-) -> std::collections::HashMap<(String, String), Vec<String>> {
-    use std::collections::{BTreeSet, HashMap};
-    let mut acc: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
+) -> crate::det::HashMap<(String, String), Vec<String>> {
+    use std::collections::BTreeSet;
+    use crate::det::HashMap;
+    let mut acc: HashMap<(String, String), BTreeSet<String>> = HashMap::default();
 
-    fn scan(e: &Expr, own_dir: Option<&str>, acc: &mut std::collections::HashMap<(String, String), std::collections::BTreeSet<String>>) {
+    fn scan(e: &Expr, own_dir: Option<&str>, acc: &mut crate::det::HashMap<(String, String), std::collections::BTreeSet<String>>) {
         if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
             if (method.as_str() == "render" || method.as_str() == "render_to_string")
                 && !args.is_empty()
@@ -2580,6 +2609,9 @@ pub struct PartialCallContract {
     /// non-record locals as KEYWORD params (see the strict-locals
     /// override in the view lowering), not trailing positionals.
     pub keyword_extras: bool,
+    /// The keyword locals a strict-locals partial declares itself, whose
+    /// header default stands when a caller omits them.
+    pub declared: Vec<String>,
 }
 
 impl PartialCallContract {
@@ -2642,13 +2674,14 @@ pub(crate) fn partial_call_contracts(
     views: &[View],
     controllers: &[crate::dialect::Controller],
     library_classes: &[crate::dialect::LibraryClass],
-) -> std::collections::HashMap<(String, String), PartialCallContract> {
+) -> crate::det::HashMap<(String, String), PartialCallContract> {
     let closures = view_ivar_closures(views, controllers);
     let keys_map = render_locals_keys(views, controllers, library_classes);
     // Same record derivation as `build_library_class` / `partial_extras_map`
     // so `flash_locals` sees one handed name across def and callers.
     let (collection_locals, _) = collection_element_locals_from_views(views);
-    let mut out = std::collections::HashMap::new();
+    let request_context = request_context_views(views);
+    let mut out = crate::det::HashMap::default();
     for view in views {
         let (dir, base) = split_view_name(view.name.as_str());
         if dir.is_empty() || !base.starts_with('_') {
@@ -2675,8 +2708,19 @@ pub(crate) fn partial_call_contracts(
                 PartialCallContract {
                     record: declared[0].clone(),
                     closure,
-                    extras: declared[1..].to_vec(),
+                    // The request-context keywords the def adds (`request_context_views`).
+                    extras: declared[1..]
+                        .iter()
+                        .cloned()
+                        .chain(
+                            ["action_name", "controller_name", "path_parameters"]
+                                .into_iter()
+                                .filter(|n| request_context.contains(view.name.as_str()) && !declared.iter().any(|d| d == n))
+                                .map(str::to_string),
+                        )
+                        .collect(),
                     keyword_extras: true,
+                    declared: declared[1..].to_vec(),
                 },
             );
             continue;
@@ -2685,7 +2729,7 @@ pub(crate) fn partial_call_contracts(
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
         let keys = keys_map.get(&key).map(Vec::as_slice);
-        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys);
+        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys, request_context.contains(view.name.as_str()));
         // The def side names each closure param by `ivar_locals` and
         // skips the one the record covers. The caller passes `@<ivar>`
         // for the rest, so the contract keeps the RAW ivar name: the
@@ -2703,7 +2747,7 @@ pub(crate) fn partial_call_contracts(
             }
         }
         drop_closure_names(&mut extras, &closure_locals);
-        out.insert(key, PartialCallContract { record, closure, extras, keyword_extras: false });
+        out.insert(key, PartialCallContract { record, closure, extras, keyword_extras: false, declared: Vec::new() });
     }
     out
 }
@@ -2712,7 +2756,7 @@ pub(crate) fn action_view_ivar_map(
     views: &[crate::dialect::View],
     controllers: &[crate::dialect::Controller],
     models: &[crate::dialect::Model],
-) -> std::collections::HashMap<(String, String), ViewArgs> {
+) -> crate::det::HashMap<(String, String), ViewArgs> {
     // The controller passes an action view its full render-tree ivar
     // closure (its own reads ∪ its partials' needs, including dynamic-
     // partial pools), matching the view's generated params — so an ivar a
@@ -2720,7 +2764,8 @@ pub(crate) fn action_view_ivar_map(
     // view itself doesn't read it.
     let closures = view_ivar_closures(views, controllers);
     let json_closures = crate::lower::jbuilder_to_library::jbuilder_ivar_closures(views, models);
-    let mut out = std::collections::HashMap::new();
+    let request_context = request_context_views(views);
+    let mut out = crate::det::HashMap::default();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
         if dir == "layouts" || base.starts_with('_') {
@@ -2791,9 +2836,9 @@ pub(crate) fn action_view_ivar_map(
             key,
             ViewArgs {
                 ivars,
-                uses_action_name: view_uses_bare_name(&v.body, "action_name"),
-                uses_controller_name: view_uses_bare_name(&v.body, "controller_name"),
-                uses_path_parameters: view_uses_url_options_hash(&v.body),
+                uses_action_name: view_uses_bare_name(&v.body, "action_name") || request_context.contains(v.name.as_str()),
+                uses_controller_name: view_uses_bare_name(&v.body, "controller_name") || request_context.contains(v.name.as_str()),
+                uses_path_parameters: view_uses_url_options_hash(&v.body) || request_context.contains(v.name.as_str()),
             },
         );
     }
@@ -2812,6 +2857,85 @@ pub(crate) fn view_uses_url_options_hash(body: &Expr) -> bool {
     let mut sets = Vec::new();
     crate::lower::routes_to_library::collect_url_option_key_sets(body, &mut sets);
     !sets.is_empty()
+}
+
+/// A URL a view builds from a Hash known only at run time (`link_to
+/// "Page 2", @moderation_params.merge(page: 2)`): not a literal Hash,
+/// which `emit_url_options_hash` resolves, but a value the analyzer
+/// typed as a Hash.
+pub(crate) fn dynamic_url_hash(url: &Expr) -> bool {
+    // Not only a Hash: `url_for` reads request parameters (`params.merge(page: 2)`) the same way.
+    !matches!(&*url.node, ExprNode::Hash { .. })
+        && match url.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+            Some(crate::ty::Ty::Hash { .. }) => true,
+            Some(crate::ty::Ty::Class { id, .. }) => id.0.as_str() == "ActionController::Parameters",
+            _ => false,
+        }
+}
+
+/// Does the view link to a [`dynamic_url_hash`] URL? Such a view reads
+/// the request's controller, action and path parameters.
+pub(crate) fn view_uses_dynamic_url_hash(body: &Expr) -> bool {
+    fn walk(e: &Expr) -> bool {
+        if let ExprNode::Send { recv: None, method, args, block, .. } = &*e.node {
+            let url = if block.is_some() && matches!(method.as_str(), "link_to" | "button_to") {
+                args.first()
+            } else {
+                match crate::lower::view::classify_view_helper(method.as_str(), args) {
+                    Some(crate::lower::view::ViewHelperKind::LinkTo { url, .. })
+                    | Some(crate::lower::view::ViewHelperKind::LinkToIf { url, .. })
+                    | Some(crate::lower::view::ViewHelperKind::ButtonTo { target: url, .. }) => Some(url),
+                    _ => None,
+                }
+            };
+            // A conditional URL resolves branch by branch (`emit_url_arg`).
+            fn any_branch(url: &Expr) -> bool {
+                match &*url.node {
+                    ExprNode::If { then_branch, else_branch, .. } => any_branch(then_branch) || any_branch(else_branch),
+                    _ => dynamic_url_hash(url),
+                }
+            }
+            if url.is_some_and(any_branch) {
+                return true;
+            }
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| found = found || walk(c));
+        found
+    }
+    walk(body)
+}
+
+/// The views that need the request's controller, action and path
+/// parameters for a [`dynamic_url_hash`] URL: those linking to one, and
+/// those rendering a partial that does, so the values reach the partial.
+pub(crate) fn request_context_views(views: &[View]) -> crate::det::HashSet<String> {
+    let mut out: crate::det::HashSet<String> = views
+        .iter()
+        .filter(|v| view_uses_dynamic_url_hash(&v.body))
+        .map(|v| v.name.as_str().to_string())
+        .collect();
+    let pools = crate::det::HashMap::default();
+    loop {
+        let needed: crate::det::HashSet<ViewKey> = views
+            .iter()
+            .filter(|v| out.contains(v.name.as_str()) && split_view_name(v.name.as_str()).1.starts_with('_'))
+            .filter_map(view_key_of)
+            .collect();
+        let more: Vec<String> = views
+            .iter()
+            .filter(|v| !out.contains(v.name.as_str()))
+            .filter(|v| {
+                let (dir, _) = split_view_name(v.name.as_str());
+                render_partial_keys(&v.body, dir, &pools).iter().any(|k| needed.contains(k))
+            })
+            .map(|v| v.name.as_str().to_string())
+            .collect();
+        if more.is_empty() {
+            return out;
+        }
+        out.extend(more);
+    }
 }
 
 pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {
@@ -2850,14 +2974,15 @@ pub(crate) type ViewKey = (String, String);
 /// drift.
 pub(super) fn partial_extras_map(
     app: &App,
-) -> std::collections::HashMap<(String, String), Vec<String>> {
+) -> crate::det::HashMap<(String, String), Vec<String>> {
     let known_models: Vec<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let closures = view_ivar_closures(&app.views, &app.controllers);
     let keys_map = render_locals_keys(&app.views, &app.controllers, &app.library_classes);
     let collection_locals = collection_element_locals(&app.views, app);
-    let mut out: std::collections::HashMap<(String, String), Vec<String>> =
-        std::collections::HashMap::new();
+    let request_context = request_context_views(&app.views);
+    let mut out: crate::det::HashMap<(String, String), Vec<String>> =
+        crate::det::HashMap::default();
     for view in &app.views {
         let (dir, base) = split_view_name(view.name.as_str());
         if dir.is_empty() || !base.starts_with('_') {
@@ -2871,7 +2996,7 @@ pub(super) fn partial_extras_map(
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
         let keys = keys_map.get(&key).map(Vec::as_slice);
-        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys);
+        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys, request_context.contains(view.name.as_str()));
         // locals-key params — mirrors the def site's append exactly.
         let closure: Vec<String> =
             closure_raw.iter().map(|s| ivar_local(&ivar_locals, s.as_str())).collect();
@@ -2898,7 +3023,7 @@ pub(super) fn partial_extras_map(
 
 /// The partials whose body calls `<form>.file_field` on any receiver
 /// (the builder arrives as a local of whatever name the caller chose).
-fn multipart_partials(views: &[View]) -> std::collections::HashSet<ViewKey> {
+fn multipart_partials(views: &[View]) -> crate::det::HashSet<ViewKey> {
     fn has_file_field(e: &Expr) -> bool {
         if matches!(&*e.node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "file_field") {
             return true;
@@ -2935,7 +3060,7 @@ pub(super) enum ViewKind {
 /// format-blind — `_note.html.erb` and `_note.turbo_stream.erb` share one
 /// ivar closure, which both definitions take and every caller passes — so
 /// the variant a render calls is told apart here (`ViewCtx::render_format`).
-fn view_formats(views: &[View]) -> std::collections::HashSet<(ViewKey, ViewKind, String)> {
+fn view_formats(views: &[View]) -> crate::det::HashSet<(ViewKey, ViewKind, String)> {
     views
         .iter()
         .filter(|v| crate::lower::view::lowers_through_view_path(v))
@@ -2976,7 +3101,7 @@ pub fn layout_wrap_expr(app: &crate::App, inner: Expr) -> Option<Expr> {
 /// `layout_wrap_expr` over closures the caller computed once for every render it wraps.
 pub(crate) fn layout_wrap_expr_with(
     app: &crate::App,
-    closures: &std::collections::HashMap<ViewKey, Vec<Symbol>>,
+    closures: &crate::det::HashMap<ViewKey, Vec<Symbol>>,
     inner: Expr,
 ) -> Option<Expr> {
     let key: ViewKey = ("Layouts".to_string(), "application".to_string());
@@ -3043,11 +3168,12 @@ pub(crate) fn layout_wrap_expr_with(
 pub(crate) fn view_ivar_closures(
     views: &[View],
     controllers: &[crate::dialect::Controller],
-) -> std::collections::HashMap<ViewKey, Vec<Symbol>> {
-    use std::collections::{BTreeSet, HashMap};
+) -> crate::det::HashMap<ViewKey, Vec<Symbol>> {
+    use std::collections::BTreeSet;
+    use crate::det::HashMap;
     let pools = dynamic_partial_pools(controllers);
-    let mut closure: HashMap<ViewKey, BTreeSet<Symbol>> = HashMap::new();
-    let mut edges: HashMap<ViewKey, Vec<ViewKey>> = HashMap::new();
+    let mut closure: HashMap<ViewKey, BTreeSet<Symbol>> = HashMap::default();
+    let mut edges: HashMap<ViewKey, Vec<ViewKey>> = HashMap::default();
     for v in views {
         if !crate::lower::view::lowers_through_view_path(v) {
             continue;
@@ -3111,7 +3237,7 @@ pub(crate) fn view_ivar_closures(
 fn collection_element_locals(
     views: &[View],
     app: &App,
-) -> std::collections::HashMap<ViewKey, String> {
+) -> crate::det::HashMap<ViewKey, String> {
     let (mut out, conflicted) = collection_element_locals_from_views(views);
     // The partials the FRAMEWORK renders, whose call site is Action
     // Text's `render_action_text_attachment` — `render(partial:
@@ -3139,12 +3265,12 @@ fn collection_element_locals(
 fn collection_element_locals_from_views(
     views: &[View],
 ) -> (
-    std::collections::HashMap<ViewKey, String>,
-    std::collections::HashSet<ViewKey>,
+    crate::det::HashMap<ViewKey, String>,
+    crate::det::HashSet<ViewKey>,
 ) {
-    use std::collections::{HashMap, HashSet};
-    let mut out: HashMap<ViewKey, String> = HashMap::new();
-    let mut conflicted: HashSet<ViewKey> = HashSet::new();
+    use crate::det::{HashMap, HashSet};
+    let mut out: HashMap<ViewKey, String> = HashMap::default();
+    let mut conflicted: HashSet<ViewKey> = HashSet::default();
     for view in views {
         let (dir, _) = split_view_name(view.name.as_str());
         collect_collection_element_locals(&view.body, dir, &mut out, &mut conflicted);
@@ -3158,7 +3284,7 @@ fn collection_element_locals_from_views(
 /// all use this so `flash_locals` hands the same name.
 fn effective_record_arg(
     view: &View,
-    collection_locals: &std::collections::HashMap<ViewKey, String>,
+    collection_locals: &crate::det::HashMap<ViewKey, String>,
     known_models: &[String],
 ) -> String {
     let (dir, base) = split_view_name(view.name.as_str());
@@ -3172,8 +3298,8 @@ fn effective_record_arg(
 fn collect_collection_element_locals(
     e: &Expr,
     dir: &str,
-    out: &mut std::collections::HashMap<ViewKey, String>,
-    conflicted: &mut std::collections::HashSet<ViewKey>,
+    out: &mut crate::det::HashMap<ViewKey, String>,
+    conflicted: &mut crate::det::HashSet<ViewKey>,
 ) {
     if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
         if let Some(crate::lower::view::RenderPartial::CollectionNamed {
@@ -3217,7 +3343,7 @@ fn collect_collection_element_locals(
 fn render_partial_keys(
     body: &Expr,
     dir: &str,
-    pools: &std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+    pools: &crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
 ) -> Vec<ViewKey> {
     let mut out = Vec::new();
     collect_render_keys(body, dir, pools, &mut out);
@@ -3227,7 +3353,7 @@ fn render_partial_keys(
 fn collect_render_keys(
     e: &Expr,
     dir: &str,
-    pools: &std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+    pools: &crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
     out: &mut Vec<ViewKey>,
 ) {
     if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
@@ -3344,10 +3470,11 @@ pub(crate) struct DynPoolEntry {
 /// (no such assignments → no dynamic-partial dispatch anywhere).
 pub(crate) fn dynamic_partial_pools(
     controllers: &[crate::dialect::Controller],
-) -> std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>> {
-    use std::collections::{BTreeMap, HashMap};
+) -> crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>> {
+    use std::collections::BTreeMap;
+    use crate::det::HashMap;
     let mut acc: HashMap<(String, Symbol), BTreeMap<String, Vec<(Symbol, Expr)>>> =
-        HashMap::new();
+        HashMap::default();
     for c in controllers {
         let dir = controller_view_dir(&c.name);
         for action in c.actions() {
@@ -3372,8 +3499,8 @@ pub(crate) fn dynamic_partial_pools(
 /// look up whether the target declares strict locals, which closure
 /// ivars to suppress, and which names it binds by keyword. Consumers
 /// skip index 0 (the positional record) when binding keywords.
-fn strict_locals_by_key(views: &[View]) -> std::collections::HashMap<ViewKey, Vec<Param>> {
-    let mut out = std::collections::HashMap::new();
+fn strict_locals_by_key(views: &[View]) -> crate::det::HashMap<ViewKey, Vec<Param>> {
+    let mut out = crate::det::HashMap::default();
     for v in views {
         let Some(sl) = v.strict_locals.as_ref() else { continue };
         let Some(key) = view_key_of(v) else { continue };
@@ -3385,7 +3512,7 @@ fn strict_locals_by_key(views: &[View]) -> std::collections::HashMap<ViewKey, Ve
 fn collect_ivar_str_assigns(
     e: &Expr,
     dir: &str,
-    acc: &mut std::collections::HashMap<
+    acc: &mut crate::det::HashMap<
         (String, Symbol),
         std::collections::BTreeMap<String, Vec<(Symbol, Expr)>>,
     >,
@@ -3491,7 +3618,7 @@ fn partial_options_from_assign_value(ivar: &Symbol, value: &Expr) -> Option<DynP
 fn dynamic_render_edges(
     body: &Expr,
     dir: &str,
-    pools: &std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+    pools: &crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
 ) -> (Vec<ViewKey>, Vec<Symbol>) {
     let mut keys = Vec::new();
     let mut locals_ivars = Vec::new();
@@ -3502,7 +3629,7 @@ fn dynamic_render_edges(
 fn collect_dynamic_edges(
     e: &Expr,
     dir: &str,
-    pools: &std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+    pools: &crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
     keys: &mut Vec<ViewKey>,
     locals_ivars: &mut Vec<Symbol>,
 ) {
@@ -3649,7 +3776,7 @@ fn mentions_relation(ty: &crate::ty::Ty) -> bool {
 /// whose type is anything else (a collection, a scalar, untyped) are
 /// left out — the caller falls back to its own convention.
 /// This view's ivars the analyzer typed `String` (`App::view_ivar_types`).
-fn view_str_ivars(app: &App, view_name: &Symbol) -> std::collections::HashSet<String> {
+fn view_str_ivars(app: &App, view_name: &Symbol) -> crate::det::HashSet<String> {
     app.view_ivar_types
         .get(view_name)
         .map(|ivars| {
@@ -3662,9 +3789,9 @@ fn view_str_ivars(app: &App, view_name: &Symbol) -> std::collections::HashSet<St
         .unwrap_or_default()
 }
 
-fn view_ivar_models(app: &App, view_name: &Symbol) -> std::collections::HashMap<String, String> {
+fn view_ivar_models(app: &App, view_name: &Symbol) -> crate::det::HashMap<String, String> {
     let Some(ivars) = app.view_ivar_types.get(view_name) else {
-        return std::collections::HashMap::new();
+        return crate::det::HashMap::default();
     };
     ivars
         .iter()
@@ -3786,7 +3913,7 @@ fn infer_view_arg_raw(stem: &str, dir: &str, is_partial: bool, _known_models: &[
 
 /// One view's ivar name → the local that stands for it in the lowered
 /// method (`class` → `class_`). See [`ivar_local_names`].
-pub(crate) type IvarLocals = std::collections::HashMap<String, String>;
+pub(crate) type IvarLocals = crate::det::HashMap<String, String>;
 
 /// Name a local for each of one view's ivars. An ivar keeps its own
 /// name unless it is a reserved word, which gets a trailing `_` as in
@@ -3804,9 +3931,9 @@ pub(crate) fn ivar_local_names<'a>(ivars: impl IntoIterator<Item = &'a str>) -> 
             names.push(n);
         }
     }
-    let mut taken: std::collections::HashSet<String> =
+    let mut taken: crate::det::HashSet<String> =
         names.iter().map(|n| n.to_string()).collect();
-    let mut out = IvarLocals::new();
+    let mut out = IvarLocals::default();
     for n in &names {
         let mut local = crate::naming::safe_local(n);
         if local != *n {
@@ -4384,63 +4511,63 @@ pub(super) struct ViewCtx {
     /// (`recv.present?`, `recv.empty?`, …) targets one of these,
     /// rewrite to the nil-safe form `!recv.nil? && !recv.empty?` so
     /// the body doesn't NoMethodError when callers omit the kwarg.
-    pub(super) nullable_locals: std::collections::HashSet<String>,
+    pub(super) nullable_locals: crate::det::HashSet<String>,
     /// Record-reference reader names — every `belongs_to`/`has_one`
     /// association name across the app's models. `rewrite_predicates`
     /// consults this (plus the `_id` suffix) to lower `present?`/`blank?`
     /// on a reference read to the nil test instead of the `empty?` form
     /// (`story.domain.present?` → `!story.domain.nil?`).
-    pub(super) reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
+    pub(super) reference_reads: std::rc::Rc<crate::det::HashSet<String>>,
     /// Single-record association reader name → target-model snake
     /// singular (`reference_target_names`). `emit_url_arg` resolves a
     /// `link_to text, story.user` URL argument polymorphically to
     /// `RouteHelpers.user_path(story.user)` through this.
     pub(super) reference_targets:
-        std::rc::Rc<std::collections::HashMap<String, String>>,
+        std::rc::Rc<crate::det::HashMap<String, String>>,
     /// Method names whose result is html-safe by construction —
     /// their body ends in `.html_safe` (`App::html_safe_methods`,
     /// recorded by `lower::html_safe`). A bare interpolation of one
     /// skips the auto-escape wrap; escaping it would ship literal
     /// `&lt;span&gt;` markup, which is what `hat.to_html_label` does.
-    pub(super) html_safe_methods: std::rc::Rc<std::collections::HashSet<String>>,
+    pub(super) html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
     /// Nilable-scalar reader names through a record: typed_store
     /// attributes with no default (nil when unset). Emptiness
     /// predicates on these get the nil-safe forms (see
     /// `rewrite_predicates`). Empty for apps without the DSL.
-    pub(super) nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
+    pub(super) nilable_scalar_reads: std::rc::Rc<crate::det::HashSet<String>>,
     /// Snake-singular names of the app's models (`comment`, `story`).
     /// `form_with url: <bare record>` consults this to resolve the
     /// form action polymorphically at COMPILE time (`persisted?` →
     /// member path, else collection path) instead of deferring to the
     /// runtime `url_for`, whose `is_a?`-dispatch shape is
     /// CRuby-overlay-only.
-    pub(super) model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
+    pub(super) model_singulars: std::rc::Rc<crate::det::HashSet<String>>,
     /// Snake-singular names of models that OVERRIDE `to_param`
     /// (lobsters' Story→short_id, Domain→domain). The form-action
     /// member arm passes `record.to_param` for these — Rails fills
     /// the `:id` segment from `to_param`, and the route helper's
     /// param is String-typed. Non-slug models pass `record.id`
     /// (Integer param) so strict targets keep a typed scalar.
-    pub(super) slug_models: std::rc::Rc<std::collections::HashSet<String>>,
+    pub(super) slug_models: std::rc::Rc<crate::det::HashSet<String>>,
     /// Per-model bool-reader names (`bool_reader_names`): Boolean
     /// columns + bool typed_store attrs. `f.check_box` grounds its
     /// checked state through these (typed ternary instead of the
     /// runtime `checked_box_attr` seam).
     pub(super) bool_readers:
-        std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+        std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
     /// Per-model NON-COLUMN attribute readers (`store_reader_names`):
     /// typed_store + `attribute`-DSL names. A form field's value read
     /// routes through the synthesized reader for these instead of the
     /// record's `[]` indexer, which knows only schema columns.
     pub(super) store_readers:
-        std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+        std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
     /// Generated RouteHelpers function names. The form-action
     /// persisted?-ternary emits only the arms whose helper EXISTS
     /// (lobsters' domains has a member route but no collection —
     /// `RouteHelpers.domains_path` would be an undefined method).
     /// Empty in single-view test harnesses → both arms (the
     /// pre-gating shape).
-    pub(super) route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
+    pub(super) route_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
     /// The app's translations for form labels and submit text.
     pub(super) i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
@@ -4458,12 +4585,12 @@ pub(super) struct ViewCtx {
     /// Empty in single-view test harnesses, where `member_path_call`
     /// keeps the argument — the same "no route table, assume the
     /// pre-gating shape" convention `route_helper_names` uses.
-    pub(super) route_helper_arity: std::rc::Rc<std::collections::HashMap<String, usize>>,
+    pub(super) route_helper_arity: std::rc::Rc<crate::det::HashMap<String, usize>>,
     /// Helper methods that wrap a builder-yielding form helper
     /// (`form_wrapper_helpers`). A call site passing a block is spliced
     /// to the wrapped call so the form-builder macro-inline can see
     /// both halves at once.
-    pub(super) form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    pub(super) form_wrappers: std::rc::Rc<crate::det::HashMap<String, FormWrapperHelper>>,
     /// Begin each `form_with` expansion with the
     /// `ActionView::Base.new.form_with` entry (Ruby family only — see
     /// `form_with::form_with_entry`).
@@ -4487,7 +4614,7 @@ pub(super) struct ViewCtx {
     /// view's scopes. `emit_render_partial` looks up a rendered partial's
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
-    pub(super) partial_ivars: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    pub(super) partial_ivars: std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Symbol>>>,
     /// The formats a render here looks a view up in, in order: this
     /// view's own, as Rails prepends the rendering template's format to
     /// the lookup, then html. `formats:` and the `turbo_stream` builder
@@ -4497,14 +4624,14 @@ pub(super) struct ViewCtx {
     /// render can tell which of `formats` its partial or template has a
     /// variant in.
     pub(super) view_formats:
-        std::rc::Rc<std::collections::HashSet<(ViewKey, ViewKind, String)>>,
+        std::rc::Rc<crate::det::HashSet<(ViewKey, ViewKind, String)>>,
     /// Partials whose body renders a `file_field` (`multipart_partials`).
     /// A `form_with` block that renders one of these is a multipart
     /// form exactly as if the field were in the block itself — Rails'
     /// builder carries the flag across the partial boundary — so
     /// `form_with::block_has_file_field` looks the rendered partial up
     /// here.
-    pub(super) multipart_partials: std::rc::Rc<std::collections::HashSet<ViewKey>>,
+    pub(super) multipart_partials: std::rc::Rc<crate::det::HashSet<ViewKey>>,
     /// Dynamic-partial pools, `(view-dir, ivar) -> [pool entries]`
     /// (`dynamic_partial_pools`): each entry is a partial-name literal a
     /// controller assigns plus its options-form `locals:`. `emit_render_
@@ -4514,20 +4641,20 @@ pub(super) struct ViewCtx {
     /// interface. Empty for apps without dynamic partials (the blog), so
     /// the dispatch never fires.
     pub(super) dyn_pools:
-        std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
+        std::rc::Rc<crate::det::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
     /// Per-partial extras list (`partial_extras_map`): the trailing
     /// nil-default params (notice/alert/defined?-marked locals) in def
     /// order. `emit_render_partial` binds an explicit `locals:` hash's
     /// values to these positions.
     pub(super) partial_extras:
-        std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
+        std::rc::Rc<crate::det::HashMap<(String, String), Vec<String>>>,
     /// Strict-locals partials → their KEYWORD locals (`strict_locals_by_key`).
     /// `emit_render_partial` consults it to (a) suppress convention
     /// closure-threading for these partials (they take only declared
     /// locals) and (b) emit a provided `locals:` value as a keyword arg
     /// bound by name.
     pub(super) strict_locals:
-        std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Param>>>,
+        std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Param>>>,
     /// THIS view's ivar/local name → model snake-singular, from
     /// `App::view_ivar_types` (`edit_user` → `user`). `form_with model:
     /// @edit_user` names its fields after the record's model exactly as
@@ -4544,12 +4671,12 @@ pub(super) struct ViewCtx {
     /// `fragment_template_path`) for the same reason.
     pub(super) view_name: String,
     pub(super) ivar_models:
-        std::rc::Rc<std::collections::HashMap<String, String>>,
+        std::rc::Rc<crate::det::HashMap<String, String>>,
     /// This view's ivars the analyzer typed `String` — markup a
     /// controller rendered ahead (`@message_html = render_to_string …`).
     /// `turbo_stream.append target, @message_html` sends it as given
     /// rather than rendering a partial named after it.
-    pub(super) str_ivars: std::rc::Rc<std::collections::HashSet<String>>,
+    pub(super) str_ivars: std::rc::Rc<crate::det::HashSet<String>>,
     /// THIS view's ivar → local rename (`view_ivar_locals`). A site
     /// that turns one of the view's ivars into a local (an ivar write
     /// in the template, the closure args of a partial render) reads it
@@ -4566,8 +4693,8 @@ pub(super) struct ViewCtx {
 /// app's models — readers that yield nil when the attribute is unset.
 /// Bool attributes stay out (their read sites are truthiness tests,
 /// and the synthesized `<name>?` predicate handles the Rails form).
-fn nilable_scalar_reader_names(app: &App) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
+fn nilable_scalar_reader_names(app: &App) -> crate::det::HashSet<String> {
+    let mut out = crate::det::HashSet::default();
     for m in &app.models {
         for (_col, attrs) in crate::lower::typed_store::typed_store_decls(&m.body) {
             for a in attrs {
@@ -4587,10 +4714,10 @@ fn nilable_scalar_reader_names(app: &App) -> std::collections::HashSet<String> {
 /// reader.
 fn bool_reader_names(
     app: &App,
-) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    let mut out = std::collections::HashMap::new();
+) -> crate::det::HashMap<String, crate::det::HashSet<String>> {
+    let mut out = crate::det::HashMap::default();
     for m in &app.models {
-        let mut set = std::collections::HashSet::new();
+        let mut set = crate::det::HashSet::default();
         if let Some(table) = app.schema.tables.get(&m.table.0) {
             for col in &table.columns {
                 if matches!(col.col_type, crate::schema::ColumnType::Boolean) {
@@ -4625,10 +4752,10 @@ fn bool_reader_names(
 /// synthesized READER instead.
 fn store_reader_names(
     app: &App,
-) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    let mut out = std::collections::HashMap::new();
+) -> crate::det::HashMap<String, crate::det::HashSet<String>> {
+    let mut out = crate::det::HashMap::default();
     for m in &app.models {
-        let mut set = std::collections::HashSet::new();
+        let mut set = crate::det::HashSet::default();
         for (_store, attrs) in crate::lower::typed_store::typed_store_decls(&m.body) {
             for a in attrs {
                 set.insert(a.name.as_str().to_string());
@@ -4649,9 +4776,9 @@ fn store_reader_names(
     out
 }
 
-fn reference_reader_names(app: &App) -> std::collections::HashSet<String> {
+fn reference_reader_names(app: &App) -> crate::det::HashSet<String> {
     use crate::dialect::Association;
-    let mut out = std::collections::HashSet::new();
+    let mut out = crate::det::HashSet::default();
     for m in &app.models {
         for a in m.associations() {
             match a {
@@ -4673,10 +4800,10 @@ fn reference_reader_names(app: &App) -> std::collections::HashSet<String> {
 /// custom implementation (lobsters' User#to_param is `username`).
 /// A name two models point at DIFFERENT targets is dropped as
 /// ambiguous rather than guessed.
-fn reference_target_names(app: &App) -> std::collections::HashMap<String, String> {
+fn reference_target_names(app: &App) -> crate::det::HashMap<String, String> {
     use crate::dialect::Association;
-    let mut out = std::collections::HashMap::new();
-    let mut ambiguous = std::collections::HashSet::new();
+    let mut out = crate::det::HashMap::default();
+    let mut ambiguous = crate::det::HashSet::default();
     for m in &app.models {
         for a in m.associations() {
             let (name, target) = match a {

@@ -1352,3 +1352,321 @@ fn superclass_limits_remain_at_ordinary_class_parity() {
         );
     }
 }
+
+fn ingest_files(files: &[(&str, &str)]) -> roundhouse::App {
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec()))
+        .collect();
+    roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest")
+}
+
+fn class_method_return(analyzer: &Analyzer, class: &str, method: &str) -> Ty {
+    match &analyzer.class_registry()[&ClassId(Symbol::from(class))].class_methods[&Symbol::from(method)] {
+        Ty::Fn { ret, .. } => ret.as_ref().clone(),
+        ty => ty.clone(),
+    }
+}
+
+#[test]
+fn file_level_factories_are_top_level_classes() {
+    const READER: &str = "class Probe\n  def self.value = ExampleError\nend\n";
+    for files in [
+        // Ahead of a class in the same file: not that class's constant.
+        vec![(
+            "app/models/probe.rb",
+            "TIMEOUT = 5\nExampleError = Class.new(StandardError)\nclass Probe\n  def self.value = ExampleError\n  def self.timeout = TIMEOUT\nend\n",
+        )],
+        // A file of its own under app/models: not a model.
+        vec![
+            ("app/models/example_error.rb", "ExampleError = Class.new(StandardError)\n"),
+            ("app/models/probe.rb", READER),
+        ],
+        // A support directory, read from a module's rescue and a class body.
+        vec![
+            ("app/errors/example_errors.rb", "BaseError = Class.new(StandardError)\nExampleError = Class.new(BaseError)\n"),
+            (
+                "app/services/limiter.rb",
+                "module Limiter\n  def self.check(n)\n    raise ExampleError, \"too many\" if n > 3\n    \"ok\"\n  rescue BaseError => e\n    e.message\n  end\nend\n",
+            ),
+            ("app/models/probe.rb", "class Probe\n  ERRORS = [BaseError, ExampleError].freeze\n  def self.value = ERRORS\nend\n"),
+        ],
+    ] {
+        let (app, analyzer) = analyzed(ingest_files(&files), true);
+        assert!(errors(&app).is_empty(), "{files:?}: {:?}", errors(&app));
+        let class = &analyzer.class_registry()[&ClassId(Symbol::from("ExampleError"))];
+        assert!(class.parent.is_some(), "{files:?}");
+        assert!(
+            !analyzer.class_registry().contains_key(&ClassId(Symbol::from("Probe::ExampleError"))),
+            "{files:?}"
+        );
+    }
+}
+
+#[test]
+fn a_factory_block_of_class_body_statements_gives_the_class_its_methods() {
+    const BLOCK: &str = "Class.new(StandardError) do\n  attr_reader :details\n  def code = 42\n  private\n  def hidden = 1\nend";
+    for (files, id) in [
+        (
+            vec![(
+                "app/models/probe.rb",
+                "class Probe\n  ExampleError = Class.new(StandardError) do\n    def code = 42\n  end\n  def self.value = ExampleError.new(\"x\").code\nend\n",
+            )],
+            "Probe::ExampleError",
+        ),
+        (
+            vec![
+                ("app/models/example_error.rb", "ExampleError = Class.new(StandardError) do\n  def code = 42\nend\n"),
+                ("app/models/probe.rb", "class Probe\n  def self.value = ExampleError.new(\"x\").code\nend\n"),
+            ],
+            "ExampleError",
+        ),
+    ] {
+        let (app, analyzer) = analyzed(ingest_files(&files), true);
+        assert!(errors(&app).is_empty(), "{files:?}: {:?}", errors(&app));
+        let class = &analyzer.class_registry()[&ClassId(Symbol::from(id))];
+        assert_eq!(class.parent, Some(ClassId(Symbol::from("StandardError"))));
+        assert!(class.instance_methods.contains_key(&Symbol::from("code")), "{id}");
+        assert_eq!(class_method_return(&analyzer, "Probe", "value"), Ty::Int, "{id}");
+    }
+    let files = [
+        ("app/models/example_error.rb", format!("ExampleError = {BLOCK}\n")),
+        ("app/models/probe.rb", "class Probe\n  def self.value = ExampleError.new(\"x\").code\nend\n".to_string()),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(path, text)| (*path, text.as_str())).collect();
+    let (app, analyzer) = analyzed(ingest_files(&files), true);
+    assert!(errors(&app).is_empty(), "{:?}", errors(&app));
+    let class = &app.library_classes.iter().find(|class| class.name.0.as_str() == "ExampleError").unwrap();
+    let visibility = |name: &str| class.methods.iter().find(|method| method.name.as_str() == name).map(|method| method.visibility);
+    assert_eq!(visibility("details"), Some(roundhouse::dialect::MethodVisibility::Public));
+    assert_eq!(visibility("hidden"), Some(roundhouse::dialect::MethodVisibility::Private));
+    assert_eq!(class_method_return(&analyzer, "Probe", "value"), Ty::Int);
+}
+
+#[test]
+fn other_file_level_factories_stay_unresolved_constants() {
+    // A parent the source does not name, or a block whose constant is the
+    // enclosing scope's, is not the class a `class` header would make.
+    for factory in [
+        "ExampleError = Class.new(Object.const_get(:StandardError))",
+        "ExampleError = Class.new(StandardError) do\n  CODE = 42\nend",
+    ] {
+        let files = [("app/models/probe.rb", format!("{factory}\nclass Probe\n  def self.value = ExampleError\nend\n"))];
+        let files: Vec<(&str, &str)> = files.iter().map(|(path, text)| (*path, text.as_str())).collect();
+        let (app, analyzer) = analyzed(ingest_files(&files), true);
+        assert!(
+            errors(&app).iter().any(|error| error.code() == "unsupported"),
+            "{factory}: {:?}",
+            errors(&app)
+        );
+        assert!(!analyzer.class_registry().contains_key(&ClassId(Symbol::from("ExampleError"))), "{factory}");
+    }
+}
+
+#[test]
+fn file_level_constants_hoist_onto_a_class_new_only_file() {
+    // A library file of only Class.new factories still needs sibling
+    // constants on Object; hoist them onto the first factory.
+    let files = [(
+        "app/models/limit_errors.rb",
+        "TIMEOUT = 5\nBaseError = Class.new(StandardError)\nLimitError = Class.new(BaseError) do\n  def self.code = TIMEOUT\nend\n",
+    )];
+    let (app, analyzer) = analyzed(ingest_files(&files), true);
+    assert!(errors(&app).is_empty(), "{:?}", errors(&app));
+    let base = app
+        .library_classes
+        .iter()
+        .find(|class| class.name.0.as_str() == "BaseError")
+        .expect("BaseError");
+    assert!(
+        base.constants.iter().any(|(name, _)| name.as_str() == "TIMEOUT"),
+        "TIMEOUT missing on BaseError: {:?}",
+        base.constants.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(class_method_return(&analyzer, "LimitError", "code"), Ty::Int);
+}
+
+#[test]
+fn file_level_constants_refuse_a_sibling_factory_reader() {
+    // Hoisting TIMEOUT onto A leaves B's bare read unreachable at runtime.
+    let source = "TIMEOUT = 5\nA = Class.new(StandardError)\nB = Class.new(StandardError) do\n  def self.t = TIMEOUT\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+    assert!(
+        !app.library_classes.iter().any(|class| class.name.0.as_str() == "B"),
+        "refused file must not keep the sibling factory: {:?}",
+        app.library_classes.iter().map(|c| c.name.0.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_an_unrelated_host_reader() {
+    let source = "TIMEOUT = 5\nclass Foo; end\nE = Class.new(StandardError) do\n  def self.t = TIMEOUT\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_a_value_naming_a_later_class() {
+    let source = "BaseError = Class.new(StandardError)\nLimitError = Class.new(BaseError)\nALL = [LimitError]\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("defined after host")),
+        "{gaps:?}"
+    );
+}
+
+
+#[test]
+fn file_level_constants_refuse_a_sibling_param_default_reader() {
+    // A default is evaluated in the callee's scope, not the host's.
+    let source = "TIMEOUT = 5\nA = Class.new(StandardError)\nB = Class.new(StandardError) do\n  def self.t(x = TIMEOUT) = x\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_a_sibling_rooted_const_reader() {
+    // `::TIMEOUT` is Object::TIMEOUT; after hoist onto A it is gone.
+    let source = "TIMEOUT = 5\nA = Class.new(StandardError)\nB = Class.new(StandardError) do\n  def self.t = ::TIMEOUT\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_a_host_rooted_const_reader() {
+    // Even the host cannot keep Object::TIMEOUT after the hoist.
+    let source = "TIMEOUT = 5\nA = Class.new(StandardError) do\n  def self.t = ::TIMEOUT\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_a_rooted_value() {
+    let source = "TIMEOUT = 5\nA = Class.new(StandardError)\nALL = [::TIMEOUT]\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("roots `::")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_a_qualified_later_class_value() {
+    let source = "class BaseError; end\nclass LimitError < BaseError; TOKEN = 1; end\nALL = [LimitError::TOKEN]\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("defined after host")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn file_level_constants_refuse_a_qualified_hoisted_reader() {
+    let source = "CONFIG = { PI: 3 }\nA = Class.new(StandardError) do\n  def self.t = CONFIG::PI\nend\nB = Class.new(StandardError) do\n  def self.t = CONFIG::PI\nend\n";
+    roundhouse::ingest::survey::activate();
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        [(PathBuf::from("app/models/errors.rb"), source.as_bytes().to_vec())]
+            .into_iter()
+            .collect();
+    let _app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|gap| gap.to_string().contains("cannot see it after hoisting")),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn a_file_level_factory_follows_its_in_file_parent_class() {
+    // `NotFound = Class.new(AppError)` after `class AppError` must not
+    // prepend the factory ahead of AppError: Ruby resolves the superclass
+    // while defining NotFound.
+    let files = [(
+        "app/models/errors.rb",
+        "class AppError < StandardError; end\nNotFound = Class.new(AppError)\n",
+    )];
+    let (app, _) = analyzed(ingest_files(&files), true);
+    assert!(errors(&app).is_empty(), "{:?}", errors(&app));
+    let names: Vec<&str> = app.library_classes.iter().map(|class| class.name.0.as_str()).collect();
+    let app_error = names.iter().position(|name| *name == "AppError").expect("AppError");
+    let not_found = names.iter().position(|name| *name == "NotFound").expect("NotFound");
+    assert!(app_error < not_found, "expected AppError before NotFound, got {names:?}");
+}
+
+#[test]
+fn a_nested_factory_is_the_sibling_of_its_ordinary_parent() {
+    let files = [(
+        "app/models/owner.rb",
+        "class Owner\n  class Parent; end\n  Child = Class.new(Parent)\nend\n",
+    )];
+    let (app, analyzer) = analyzed(ingest_files(&files), true);
+    assert!(errors(&app).is_empty(), "{:?}", errors(&app));
+    assert!(app.library_classes.iter().any(|class| class.name.0.as_str() == "Owner::Child"));
+    assert!(app.library_classes.iter().any(|class| class.name.0.as_str() == "Owner::Parent"));
+    let child = &analyzer.class_registry()[&ClassId(Symbol::from("Owner::Child"))];
+    assert_eq!(child.parent, Some(ClassId(Symbol::from("Owner::Parent"))));
+}

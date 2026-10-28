@@ -547,7 +547,6 @@ mod tests {
     use crate::ident::Symbol;
     use crate::span::Span;
     use crate::ty::Ty;
-    use std::collections::HashMap;
     use std::path::PathBuf;
 
     fn rust_emit(expr: &Expr) -> String {
@@ -633,7 +632,7 @@ mod tests {
     }
 
     fn analyze_method(source: &str, method_name: &str) -> Expr {
-        let mut app = crate::ingest::ingest_app_from_tree(HashMap::from([(
+        let mut app = crate::ingest::ingest_app_from_tree(crate::vfs::FileTree::from([(
             PathBuf::from("app/lib/probe.rb"),
             source.as_bytes().to_vec(),
         )]))

@@ -484,7 +484,26 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 1105 on 2026-10-26 (on 1101): the same Bounds element of a
     // condition Array, read untyped where the predicate builds its SQL
     // (+4 in active_record/relation.rb, 1101 -> 1105).
-    const CEILING: usize = 1105;
+    // MEASURED 1110 on 2026-10-27 (on 1105): `ActiveRecord::EagerFilter`
+    // carries an eager load's conditions and orders to the preload
+    // walker; its parameters and readers are vars on this RBS-less probe
+    // (+5 in active_record/relation.rb); the RBS-paired gate types them.
+    // MEASURED 1112 on 2026-10-27 (on 1110): the filter's `where.not`
+    // list, its parameter and reader (+2 in the same file), and the
+    // preloads nested under the association (+2 more, 1114).
+    // MEASURED 1121 on 2026-10-27 (on 1114): `clear_attribute_change` and
+    // `restore_attribute!` take the column name; it is a var on this
+    // RBS-less probe (+7 in active_record/connection.rb); the RBS-paired
+    // gate types it.
+    // MEASURED 1127 on 2026-10-27 (on 1121): hydration through the
+    // adapter's `each_row` (`_hydrate_all`, `_adapter_all`,
+    // `_adapter_find_by_id`, `Relation#load_records`). `ActiveRecord.adapter`
+    // is `Var | nil` on this RBS-less probe, so the block's `row` is a var
+    // (+4); the `select_rows(...).map` it replaces answered `Untyped`, and
+    // `map` bound `row` to that. `_adapter_find_by_id`'s `id` goes through
+    // the unmodeled `Db.escape_int` (+2). The RBS-paired gate types all six
+    // through `each_row`'s block contract in base.rbs.
+    const CEILING: usize = 1127;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

@@ -823,14 +823,17 @@ end
 # (no OptionParser — stdlib optparse isn't in the spinel subset).
 # `./app sidekiq [options]`: the worker role instead of the server. It
 # pulls jobs from Redis and runs them until TERM, and never returns (see
-# runtime/sidekiq_worker.rb). No socket is served, so no Cable
-# transport and no in-process drain thread; jobs a job enqueues still
-# push to Redis.
+# runtime/sidekiq_worker.rb). No socket is served, so no in-process
+# drain thread, and a Cable transport only to publish to Redis; jobs a
+# job enqueues still push to Redis.
 if ARGV.length > 0 && ARGV[0] == "sidekiq"
   SidekiqWorker.prepare_pool(ARGV)
   Main.configure_default_adapter!
   Db.checkpoint_in_background!
   ActiveJob.register_drain
+  # A job's broadcasts go to the web processes through Redis when
+  # config/cable.yml says `adapter: redis` (runtime/redis_cable.rb).
+  Broadcasts.set_transport(Cable::Transport.new) if RedisCable.enabled?
   SidekiqWorker.cli(ARGV)
 end
 port = (ENV["PORT"] || "3000").to_i

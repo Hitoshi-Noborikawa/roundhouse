@@ -219,6 +219,7 @@ pub mod view;
 pub mod view_buffer_passing;
 pub mod tag_block_passing;
 pub mod lazy_model_state;
+pub(crate) mod eager_load;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
@@ -248,7 +249,7 @@ pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
 pub use job_test_only::apply_job_test_only_lowering;
 pub use sti_scope::apply_sti_scope_lowering;
-pub(crate) use sti_scope::sti_bases;
+pub(crate) use sti_scope::{sti_bases, untyped_subclass_diagnostics};
 pub use sti_subclass_callbacks::apply_sti_subclass_callbacks;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
@@ -785,7 +786,7 @@ fn post_analyze_pass_order_is_sound() -> bool {
 /// computed.
 pub fn apply_post_analyze_lowerings(
     app: &mut crate::app::App,
-    registry: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    registry: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
 ) -> Vec<crate::diagnostic::Diagnostic> {
     // Templates ingested for the analyzer only (`View::analysis_only`)
     // leave here: the type checker and the IDE have seen them; no
@@ -1171,7 +1172,7 @@ pub(crate) fn for_each_model_body_named(
     app: &mut crate::app::App,
     f: &mut impl FnMut(&str, &mut crate::expr::Expr),
 ) {
-    let model_names: std::collections::HashSet<String> =
+    let model_names: crate::det::HashSet<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     for model in &mut app.models {
         let name = model.name.0.as_str().to_string();

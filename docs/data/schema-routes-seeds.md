@@ -275,6 +275,40 @@ and column context. The regression suites are `tests/generated_columns*.rs`;
 `generated_columns_spinel` executes the SQLite contract natively in the
 selected Spinel CI suite.
 
+## `config/database.yml` → `App::databases` and model ownership
+
+`config/database.yml` is resolved when Roundhouse builds the app, as
+Rails' `ActiveRecord::DatabaseConfigurations` reads it: every
+environment, each one's configurations (three-tier when every value of
+the environment is a mapping, otherwise the one configuration
+`primary`), the primary (named `primary`, else the first), replicas, and
+the adapter (`adapter:`, or the scheme of a literal `url:`, which wins;
+an environment given as a URL string is that URL's configuration).
+Only identity keys are read (`adapter`, `url`, `replica`,
+`database_tasks`, `migrations_paths`, `schema_search_path`), so no
+connection value or credential reaches the IR. ERB is not run: an
+output tag in a connection value does not matter, one in an identity key
+leaves that configuration out with a warning, and a control tag leaves
+them all out. `DATABASE_URL` is not read. The primary's SQLite
+`pragmas:` are read from the same file (`App::database_pragmas`).
+
+Which database a model runs on is read from source, never from the
+file: a literal `connects_to database: { writing:, reading: }` in an
+abstract class, inherited by its subclasses (`App::model_databases`).
+The emitted runtime opens only the primary, so a model whose writing
+database is another, a name the file does not configure, a computed or
+conditional `connects_to`, `shards:`, `establish_connection`, an
+app-defined `connection_pool`, and any role or shard switch are errors
+at their source (`App::database_refusals`). A switch is Active Record's
+when it is called on a class (`self`, a constant, or no receiver) and,
+for `connected_to`, `connected_to_many` and `connecting_to`, passes the
+`role:` or `shard:` Rails requires; a call on another object is the
+app's own method. A `connects_to` whose
+writing database is the primary checks clean and runs.
+
+The enum `database::DatabaseAdapter` names a configuration's adapter;
+it is not the analyzer's [`DatabaseAdapter` trait](adapter.md).
+
 ## `config/routes.rb` → `RouteTable` → `RouteHelpers.<x>_path`
 
 **Source IR:** `src/dialect.rs::RouteTable` — a list of `RouteSpec`
@@ -515,6 +549,9 @@ methods.
 | `src/ingest/` | `ingest_schema` + `ingest_migration` (`schema.rs`), `ingest_routes` (`routes.rs`), `ingest_importmap` (`app.rs`); seeds go through `ingest_ruby_program` (`expr.rs`) |
 | `src/dialect.rs` | `RouteTable`, `RouteSpec`, `Fixture`, `LibraryClass`, `LibraryFunction` |
 | `src/app.rs` | `App::seeds`, `App::fixtures`, `App::importmap`, `App::rbs_signatures` |
+| `src/database.rs` | Database identity: `Database`, `ModelDatabase`, `DatabaseRefusal` |
+| `src/ingest/database_yml.rs` | `config/database.yml` → configurations and pragmas, at build time |
+| `src/ingest/database_ownership.rs` | `connects_to` and connection overrides → `App::model_databases`, routing refusals |
 | `src/rbs.rs` | `sig/**/*.rbs` sidecars → `App::rbs_signatures` |
 | `src/emit/shared/schema_sql.rs` | Schema → CREATE TABLE DDL statements (sibling `seed_sql.rs` renders seed rows) |
 | `src/lower/routes.rs` | `RouteTable` → `Vec<FlatRoute>` |

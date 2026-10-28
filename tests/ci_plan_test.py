@@ -151,6 +151,8 @@ class Routing(unittest.TestCase):
             "runtime/ruby/active_job.rb",
             "tests/sidekiq_push_live.rs",
             "tests/sidekiq_push_live/reader.rb",
+            "runtime/spinel/sidekiq/redis_cable.rb",
+            "tests/redis_cable_live/driver.rb",
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])
@@ -625,6 +627,7 @@ class Routing(unittest.TestCase):
                 "spinel_stmt_cache_lru",
                 "stmt_stats",
                 "db_sqlite_concurrency",
+                "spinel_db_contract",
             ],
         )
         self.assertEqual(
@@ -636,6 +639,7 @@ class Routing(unittest.TestCase):
                 "spinel_stmt_cache_lru",
                 "stmt_stats",
                 "db_sqlite_concurrency",
+                "spinel_db_contract",
             ],
         )
         for path in [
@@ -868,7 +872,7 @@ class Routing(unittest.TestCase):
             "tests/support/db_concurrency_spinel.rb": ["db_sqlite_concurrency"],
             "runtime/spinel/db.rb": [
                 "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
-                "db_sqlite_concurrency",
+                "db_sqlite_concurrency", "spinel_db_contract",
             ],
             "runtime/spinel/sqlite_adapter.rb": [
                 "date_columns_spinel",
@@ -877,10 +881,11 @@ class Routing(unittest.TestCase):
                 "spinel_stmt_cache_lru",
                 "stmt_stats",
                 "db_sqlite_concurrency",
+                "spinel_db_contract",
             ],
             "runtime/spinel/active_support_time_parsing.rb": [
                 "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
-                "db_sqlite_concurrency", "spinel_pg_db",
+                "db_sqlite_concurrency", "spinel_pg_db", "spinel_db_contract",
             ],
             # The PostgreSQL shim owns only its own gate, not the SQLite
             # database suites its `db` name would otherwise select.
@@ -888,11 +893,25 @@ class Routing(unittest.TestCase):
             "runtime/spinel/db_pg.rbs": ["spinel_pg_db"],
             "runtime/spinel/pg_errors.rb": ["spinel_pg_db"],
             "runtime/spinel/pg_errors.rbs": ["spinel_pg_db"],
-            "tests/spinel_pg_db_cases.rb": ["spinel_pg_db"],
+            # The Db contract suite feeds the Spinel lanes that run its files.
+            "tests/db_contract/contract_cases.rb": ["spinel_pg_db", "spinel_db_contract"],
+            "tests/db_contract/sqlite_main.rb": ["spinel_db_contract"],
+            "tests/db_contract/postgres_cases.rb": ["spinel_pg_db"],
+            "tests/db_contract/db_pg_lane.rb": ["spinel_pg_db"],
+            "tests/support/db_contract.rs": ["spinel_pg_db", "spinel_db_contract"],
+            # Runtime files the contract lanes copy beside their shim.
+            "runtime/spinel/active_support_interval.rb": [
+                "framework_tests_spinel", "spinel_pg_db", "spinel_db_contract",
+            ],
+            "runtime/spinel/active_support_duration.rb": [
+                "framework_tests_spinel", "spinel_pg_db", "spinel_db_contract",
+            ],
+            "runtime/spinel/active_support_interval.rbs": ["framework_tests_spinel", "spinel_pg_db"],
+            "runtime/spinel/active_support_duration.rbs": ["framework_tests_spinel", "spinel_pg_db"],
             "runtime/ruby/db.rbs": [
                 "framework_tests_spinel",
                 "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
-                "db_sqlite_concurrency", "spinel_pg_db",
+                "db_sqlite_concurrency", "spinel_pg_db", "spinel_db_contract",
             ],
             "runtime/spinel/date.rb": ["date_columns_spinel"],
             "runtime/spinel/date.rbs": ["date_columns_spinel"],
@@ -917,6 +936,26 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], expected)
                 self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
                 self.assertNotIn("campfire-smoke", plan["jobs"])
+
+    def test_db_contract_lane_inputs_select_their_lanes(self):
+        # Every runtime file a Spinel contract lane copies (its shim, the
+        # files the shim requires, its RBS) selects that lane's suite, so
+        # a change to one of them cannot pass CI without the lane running.
+        lanes = Path(__file__).parents[1].joinpath("tests/support/db_contract.rs").read_text()
+        suites = {"Backend::Sqlite": "spinel_db_contract", "Backend::Postgres": "spinel_pg_db"}
+        consts = dict(re.findall(r"const (\w+): &\[&str\] = &\[(.*?)\];", lanes, re.S))
+        checked = 0
+        for row in re.findall(r"Lane \{(.*?)\n    \},", lanes, re.S):
+            if "Runtime::Spinel" not in row:
+                continue
+            suite = next(v for k, v in suites.items() if k in row)
+            for name in re.findall(r"\b([A-Z_]+)\b", row):
+                row += consts.get(name, "")
+            for path in re.findall(r'"(runtime/[^"]+)"', row):
+                with self.subTest(path=path, suite=suite):
+                    self.assertIn(suite, ci.select([path])["spinel_tests"])
+                    checked += 1
+        self.assertGreater(checked, 10)
 
     def test_routing_union_is_order_independent(self):
         paths = [
@@ -945,6 +984,7 @@ class Routing(unittest.TestCase):
                 "spinel_stmt_cache_lru",
                 "stmt_stats",
                 "db_sqlite_concurrency",
+                "spinel_db_contract",
             ],
         )
 

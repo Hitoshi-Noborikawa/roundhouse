@@ -7,7 +7,7 @@
 //! through [`rewritten_extras`] so the three sites cannot disagree.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use crate::det::HashSet;
 
 use crate::dialect::View;
 use crate::expr::{Expr, ExprNode, InterpPart, LValue};
@@ -23,10 +23,11 @@ pub(super) fn rewritten_extras(
     ivar_locals: &IvarLocals,
     record: &str,
     keys: Option<&[String]>,
+    request_context: bool,
 ) -> (Expr, Vec<String>) {
     let (body, flash) = flash_locals(view, ivar_locals, record, keys);
     let rewritten = rewrite_ivars_to_locals(&body, ivar_locals);
-    let extras = collect_extra_params(&rewritten, record, &flash);
+    let extras = collect_extra_params(&rewritten, record, &flash, request_context);
     (rewritten, extras)
 }
 
@@ -142,7 +143,7 @@ pub(super) fn flash_locals<'a>(
 /// whether to pass each flash slot. Cost is two unused locals per
 /// view that doesn't reference flash; emit-side it's negligible. They
 /// go by the names `flash` gives them (see `flash_locals`).
-fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2]) -> Vec<String> {
+fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2], request_context: bool) -> Vec<String> {
     let mut out: Vec<String> = flash.to_vec();
     // `action_name`/`controller_name` are controller context Rails exposes
     // to views. Unlike flash, they're collected only when the view
@@ -151,10 +152,13 @@ fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2]) -> Vec
     // at known positions). The controller passes them only to views whose
     // contract records the usage (see action_view_ivar_map) — so views
     // that don't use them gain no extra params on any target.
-    if super::view_uses_bare_name(body, "action_name") {
+    // A run-time url Hash resolves against the request's controller and
+    // action too, in the view or a partial it renders (`request_context_views`).
+    let dynamic_url = request_context;
+    if dynamic_url || super::view_uses_bare_name(body, "action_name") {
         out.push("action_name".to_string());
     }
-    if super::view_uses_bare_name(body, "controller_name") {
+    if dynamic_url || super::view_uses_bare_name(body, "controller_name") {
         out.push("controller_name".to_string());
     }
     // The request's path parameters, for a view whose `url_for` options
@@ -162,7 +166,7 @@ fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2]) -> Vec
     // a segment the hash leaves out: Rails recalls it from the current
     // request (see `lower_url_option_helpers`). Same rule as the two
     // above — collected only when used, at a fixed position.
-    if super::view_uses_url_options_hash(body) {
+    if dynamic_url || super::view_uses_url_options_hash(body) {
         out.push("path_parameters".to_string());
     }
     let mut bound: Vec<String> = Vec::new();

@@ -37,7 +37,8 @@
 //! class's calls reported, and its subclasses' with it. Other targets
 //! report every callback ([`refuse`]).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use crate::det::HashMap;
 
 use crate::app::App;
 use crate::dialect::{LibraryClass, MethodReceiver, MethodVisibility};
@@ -380,10 +381,10 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
     let mut counter = 0usize;
     // Actions given a chain, by class: a callback naming one calls its own
     // body, as Rails calls the method, not the chain again.
-    let mut wrapped: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut wrapped: HashMap<String, BTreeSet<String>> = HashMap::default();
     // Every name the generated chains took.
     let mut generated: BTreeSet<String> = BTreeSet::new();
-    let mut chains: HashMap<String, (Vec<Callback>, Vec<Handler>)> = HashMap::new();
+    let mut chains: HashMap<String, (Vec<Callback>, Vec<Handler>)> = HashMap::default();
     let mut refused: BTreeSet<String> = BTreeSet::new();
     let mut gaps: Vec<(Span, String, String)> = Vec::new();
     for i in order {

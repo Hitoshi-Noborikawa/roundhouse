@@ -13,7 +13,11 @@ pub mod catalog;
 /// Machine-readable `roundhouse check` inventory + ranked hotspot report.
 pub mod check_report;
 pub mod diagnostic;
+pub mod database;
 pub mod dialect;
+pub mod det;
+/// Shared parent/include ordering for library classes that share a file.
+pub mod library_class_order;
 pub mod effect;
 pub mod emit;
 pub mod erb;
@@ -57,6 +61,7 @@ pub mod lsp;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp;
 pub mod naming;
+pub mod par;
 pub mod profile;
 /// Target identity and the policies lowering reads (`param_binds_enabled`,
 /// `has_runtime_relation`). Compiled for wasm: `project` is host-only, but

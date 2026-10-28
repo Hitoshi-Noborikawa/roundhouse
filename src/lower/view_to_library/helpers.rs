@@ -823,6 +823,20 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     if let Some(resolved) = emit_url_options_hash(url, ctx) {
         return Some(resolved);
     }
+    // A Hash known only at run time resolves there, against this request
+    // (`routes_to_library::lower_dynamic_url_helper`).
+    if super::dynamic_url_hash(url) {
+        let local = |name: &str| var_ref(Symbol::from(name));
+        let recall = if ctx.locals.iter().any(|l| l == "path_parameters") {
+            local("path_parameters")
+        } else {
+            Expr::new(Span::synthetic(), ExprNode::Hash { entries: vec![], kwargs: false })
+        };
+        return Some(route_helpers_call(
+            "path_for_params",
+            vec![local("controller_name"), local("action_name"), rewrite_helpers_in_expr(url, ctx), recall],
+        ));
+    }
     // Association-reader record URL (`link_to text,
     // showing_user.invited_by_user`) — Rails resolves the record
     // polymorphically through its named route. The reader's target

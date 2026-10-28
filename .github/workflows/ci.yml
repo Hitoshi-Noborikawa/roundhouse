@@ -942,7 +942,8 @@ jobs:
     timeout-minutes: 30
 
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
-    # spinel_pg_db runs the PostgreSQL Db shim against this server.
+    # spinel_pg_db runs the PostgreSQL Db shim against this server
+    # (ROUNDHOUSE_PG_TEST_URL below).
     services:
       postgres:
         image: postgres:17
@@ -989,9 +990,12 @@ jobs:
       - name: Run selected native framework checks
         env:
           TESTS: ${{ join(matrix.tests, ' ') }}
-          # Inputs of spinel_pg_db only; it fails without them.
+          # Inputs of spinel_pg_db only; it fails without them. Tests that
+          # need PostgreSQL read the URL through tests/support/pg_test_url.rs,
+          # which skips without it unless the run requires it, as this one does.
           SPINEL_PG_DIR: ${{ github.workspace }}/spinel-pg
-          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          ROUNDHOUSE_PG_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          ROUNDHOUSE_PG_TEST_REQUIRED: "1"
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/framework-${{ matrix.shard }}.jsonl
         run: |
           test -n "$TESTS"
@@ -1058,11 +1062,12 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
-      - name: Install the redis, sidekiq and activejob gems
+      - name: Install the redis, sidekiq, activejob and actioncable gems
         run: |
           gem install --no-document redis -v '~> 5.4'
           gem install --no-document sidekiq -v 8.1.7
           gem install --no-document activejob -v 8.1.3
+          gem install --no-document actioncable -v 8.1.3
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -1081,6 +1086,7 @@ jobs:
         run: |
           cargo test --test sidekiq_push_live -- --ignored --nocapture --test-threads=1
           cargo test --test sidekiq_worker_live -- --ignored --nocapture --test-threads=1
+          cargo test --test redis_cable_live -- --ignored --nocapture --test-threads=1
       - *advisory-result
 
   # Campfire conformance runs ONCE Campfire's own suite against a

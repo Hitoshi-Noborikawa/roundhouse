@@ -119,6 +119,7 @@ puts "lobsters-zero contract passed"
 fn lobsters_zero_constructs_run_natively() {
     // Not a compile of its own: the data-path constructs (`emit_and_run/data_paths.rs`) ride this one.
     let run = super::data_paths_contract::apply_models(emit_and_run::real_blog())
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", super::eager_load_filter_contract::METHODS)
         .edit(
             "db/schema.rb",
             "  create_table \"comments\"",
@@ -134,8 +135,13 @@ fn lobsters_zero_constructs_run_natively() {
         )
         .write("app/models/routes.rb", ROUTES)
         .write("app/models/link_builder.rb", LINK_BUILDER)
-        .run_spinel_with_db(&format!("{ASSERTIONS}{}", super::data_paths_contract::ASSERTIONS));
+        .run_spinel_with_db(&format!(
+            "{ASSERTIONS}{}{}",
+            super::data_paths_contract::ASSERTIONS,
+            super::eager_load_filter_contract::ASSERTIONS
+        ));
     run.assert_passes();
     assert!(run.stdout.contains("lobsters-zero contract passed"));
     assert!(run.stdout.contains("data paths contract passed"), "{}", run.stdout);
+    assert!(run.stdout.contains("eager load passed"), "{}", run.stdout);
 }

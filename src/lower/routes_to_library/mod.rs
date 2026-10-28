@@ -240,7 +240,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // single helper (`articles` for both index/create — same URL).
     // First-occurrence wins; the as_name + path are identical so the
     // function body is the same.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: crate::det::HashSet<String> = crate::det::HashSet::default();
     let mut funcs: Vec<LibraryFunction> = Vec::new();
     // Helper name -> (every segment name it can take, how many
     // positionals the GENERATED helper requires). The query survey
@@ -255,7 +255,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // Taking the last one's segments instead made `period` look like a
     // query param and emitted `mod_notes_path(period = nil, period:
     // nil)` — a duplicate parameter name.
-    let mut helper_shape: std::collections::HashMap<String, (Vec<String>, usize)> =
+    let mut helper_shape: crate::det::HashMap<String, (Vec<String>, usize)> =
         Default::default();
     for r in flat.iter().filter(|r| r.named) {
         // Both spellings: `_url` is the same helper with the host in
@@ -284,7 +284,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // generated without them (`unknown keyword: :bot_key`). Registering
     // the variant under its own name collects them against the variant,
     // where they belong.
-    let declared: std::collections::HashSet<String> =
+    let declared: crate::det::HashSet<String> =
         flat.iter().filter(|r| r.named).map(|r| format!("{}_path", r.as_name)).collect();
     let variants = format_variant_demand(app, &declared);
     for (name, (as_name, _)) in &variants {
@@ -344,6 +344,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // target's call site: every emitter that wants route helpers wants
     // these too, and a per-target wiring is nine places to forget one.
     funcs.extend(lower_url_option_helpers(app));
+    funcs.extend(lower_dynamic_url_helper(app, &module_path, &flat));
     // `direct :name do … end` helpers — not routes, so they never reach
     // `flat`; they ride here because they live in the same module and
     // their `route_for` bodies need the flattened table to resolve.
@@ -441,6 +442,119 @@ pub fn lower_url_option_helpers(app: &App) -> Vec<LibraryFunction> {
         .collect()
 }
 
+/// `RouteHelpers.path_for_params(controller, action, params, recall)`: a
+/// URL built from a Hash only known at run time (lobsters' moderation log
+/// pages through `link_to "Page 2", @moderation_params.merge(page: 2)`),
+/// as Rails' route generation answers it. The request's controller and
+/// action stand for the ones the Hash leaves out.
+///
+/// Rails' Journey: a candidate is a GET route of that controller#action
+/// whose every segment the Hash or the request's path parameters supply;
+/// the one whose segments the Hash names most wins, the first written on
+/// a tie; the rest of the Hash is the query string, less the parts of
+/// the route as written (an optional segment it could not place is
+/// dropped, not moved to the query). Generated only for an app whose
+/// views build such a URL.
+fn lower_dynamic_url_helper(app: &App, module_path: &[Symbol], flat: &[FlatRoute]) -> Option<LibraryFunction> {
+    if !app.views.iter().any(|v| crate::lower::view_to_library::view_uses_dynamic_url_hash(&v.body)) {
+        return None;
+    }
+    // Every controller's, not only the linking views' own: a shared partial renders under any controller, and the Hash can name one.
+    let controllers: std::collections::BTreeSet<String> = flat
+        .iter()
+        .filter(|r| r.method == HttpMethod::Get)
+        .map(|r| controller_symbol(r.controller.0.as_str()))
+        .collect();
+    let mut arms = String::new();
+    for controller in &controllers {
+        let mut actions: Vec<&Symbol> = Vec::new();
+        for r in flat.iter().filter(|r| r.method == HttpMethod::Get && controller_symbol(r.controller.0.as_str()) == *controller) {
+            if !actions.contains(&&r.action) {
+                actions.push(&r.action);
+            }
+        }
+        for action in actions {
+            let _ = std::fmt::Write::write_fmt(&mut arms, format_args!("  if key == \"{controller}#{action}\"\n"));
+            for r in flat.iter().filter(|r| r.method == HttpMethod::Get && controller_symbol(r.controller.0.as_str()) == *controller && &r.action == action) {
+                // This variant's own segments (an expanded optional group carries its siblings' names too).
+                let names: Vec<String> = r
+                    .path
+                    .split('/')
+                    .filter_map(|seg| seg.strip_prefix(':').or_else(|| seg.strip_prefix('*')))
+                    .map(str::to_string)
+                    .collect();
+                let present: Vec<String> = names.iter().map(|p| format!("(given.key?(\"{p}\") || recall.key?(\"{p}\"))")).collect();
+                let cond = if present.is_empty() { "true".to_string() } else { present.join(" && ") };
+                let score: Vec<String> = names.iter().map(|p| format!("(given.key?(\"{p}\") ? 1 : 0)")).collect();
+                let score = if score.is_empty() { "0".to_string() } else { score.join(" + ") };
+                let path = r
+                    .path
+                    .split('/')
+                    .map(|seg| match seg.strip_prefix(':').or_else(|| seg.strip_prefix('*')) {
+                        Some(p) => format!("#{{given.key?(\"{p}\") ? given.fetch(\"{p}\", \"\").to_s : recall.fetch(\"{p}\", \"\")}}"),
+                        None => seg.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let written: Vec<String> = r
+                    .source_path
+                    .split(|c: char| c == '/' || c == '(' || c == ')' || c == '.')
+                    .filter_map(|seg| seg.strip_prefix(':').or_else(|| seg.strip_prefix('*')))
+                    .map(|p| format!("\"{p}\""))
+                    .collect();
+                let _ = std::fmt::Write::write_fmt(
+                    &mut arms,
+                    format_args!(
+                        "    if {cond}\n      score = {score}\n      if score > best\n        best = score\n        path = \"{path}\"\n        parts = [{}]\n      end\n    end\n",
+                        written.join(", ")
+                    ),
+                );
+            }
+            arms.push_str("  end\n");
+        }
+    }
+    let source = format!(
+        "def self.path_for_params(controller, action, params, recall)\n\
+         \x20 given = {{}}\n\
+         \x20 params.each {{ |k, v| given[k.to_s] = v }}\n\
+         \x20 c = given.key?(\"controller\") ? given.fetch(\"controller\", \"\").to_s : controller\n\
+         \x20 a = given.key?(\"action\") ? given.fetch(\"action\", \"\").to_s : action\n\
+         \x20 key = c.gsub(\"::\", \"_\").gsub(\"/\", \"_\") + \"#\" + a\n\
+         \x20 best = -1\n\
+         \x20 path = \"\"\n\
+         \x20 parts = []\n\
+         {arms}\
+         \x20 raise \"no route matches \" + key if best < 0\n\
+         \x20 rest = {{}}\n\
+         \x20 given.each {{ |k, v| rest[k] = v unless k == \"controller\" || k == \"action\" || parts.include?(k) }}\n\
+         \x20 query = ActiveSupport.to_query(rest)\n\
+         \x20 query.empty? ? path : path + \"?\" + query\n\
+         end\n"
+    );
+    let method = crate::runtime_src::parse_methods(&source).ok()?.into_iter().next()?;
+    let params_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) };
+    let recall_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
+    Some(LibraryFunction {
+        module_path: module_path.to_vec(),
+        name: Symbol::from("path_for_params"),
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        params: method.params.clone(),
+        body: method.body,
+        signature: Some(fn_sig(
+            vec![
+                (Symbol::from("controller"), Ty::Str),
+                (Symbol::from("action"), Ty::Str),
+                (Symbol::from("params"), params_ty),
+                (Symbol::from("recall"), recall_ty),
+            ],
+            Ty::Str,
+        )),
+        effects: EffectSet::default(),
+        is_async: false,
+    })
+}
+
 /// Every url-options hash in a view: a Hash literal in the URL argument
 /// of `link_to`, `link_to_if` or `button_to`, whose keys are all Symbols
 /// and include both `controller` and `action`. Yields the remaining
@@ -524,7 +638,7 @@ fn build_url_options_function(
     extras: &[String],
     flat: &[FlatRoute],
 ) -> LibraryFunction {
-    let no_slugs = std::collections::HashSet::new();
+    let no_slugs = crate::det::HashSet::default();
     let key_expr = Expr::new(
         Span::synthetic(),
         ExprNode::StringInterp {
@@ -589,7 +703,7 @@ fn build_url_options_function(
             })
             .collect();
         supers.sort_by_key(|r| std::cmp::Reverse(r.path_params.len()));
-        let mut seen_paths: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut seen_paths: crate::det::HashSet<&str> = crate::det::HashSet::default();
         for r in supers {
             if !seen_paths.insert(r.path.as_str()) {
                 continue;
@@ -640,7 +754,7 @@ fn build_url_options_function(
                 Expr::new(Span::synthetic(), ExprNode::Seq { exprs: binds }),
             ));
         }
-        let family: std::collections::HashSet<&String> =
+        let family: crate::det::HashSet<&String> =
             routes.iter().flat_map(|r| r.path_params.iter()).collect();
         let drop = routes
             .iter()
@@ -783,7 +897,7 @@ fn build_helper_function(
     // Segments a call site fills with a String — see
     // `string_segment_demand`. Overrides the name-based `id`-is-Integer
     // default for exactly those.
-    string_segments: Option<&std::collections::HashSet<String>>,
+    string_segments: Option<&crate::det::HashSet<String>>,
     // `Some("json")` builds the MONOMORPHIZED variant a call site's
     // `format: :json` asks for — see `format_variant_demand`. The
     // extension is a literal here, so it costs the base helper nothing.
@@ -810,7 +924,7 @@ fn build_helper_function(
         }
         slug_id
     };
-    let slug_params: std::collections::HashSet<String> = route
+    let slug_params: crate::det::HashSet<String> = route
         .path_params
         .iter()
         .filter(|p| param_is_slug(p.as_str()))
@@ -1161,7 +1275,7 @@ fn build_helper_function(
     // spinel#3977 was about. `optional_names` is the set the `def`
     // actually defaulted, defaults-from-`scope` and trailing
     // nil-optionals alike.
-    let optional_names: std::collections::HashSet<Symbol> = params
+    let optional_names: crate::det::HashSet<Symbol> = params
         .iter()
         .filter(|p| p.default.is_some())
         .map(|p| p.name.clone())
@@ -1299,12 +1413,12 @@ pub(crate) struct QueryKey {
 /// demoted, and a helper nobody calls keeps the name-based default.
 fn string_segment_demand(
     app: &App,
-    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    type Demand = std::collections::HashMap<String, std::collections::HashSet<String>>;
+    helpers: &crate::det::HashMap<String, (Vec<String>, usize)>,
+) -> crate::det::HashMap<String, crate::det::HashSet<String>> {
+    type Demand = crate::det::HashMap<String, crate::det::HashSet<String>>;
     let mut out: Demand = Default::default();
     // A record whose model fills a segment with a String (its own `to_param`, a uuid key) is a String at that position too
-    let string_keyed: std::collections::HashSet<String> = app
+    let string_keyed: crate::det::HashSet<String> = app
         .models
         .iter()
         .map(|m| m.name.0.as_str().to_string())
@@ -1313,8 +1427,8 @@ fn string_segment_demand(
     let mut collect = |e: &Expr| {
         fn walk(
             e: &Expr,
-            helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-            string_keyed: &std::collections::HashSet<String>,
+            helpers: &crate::det::HashMap<String, (Vec<String>, usize)>,
+            string_keyed: &crate::det::HashSet<String>,
             out: &mut Demand,
         ) {
             if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
@@ -1379,8 +1493,8 @@ fn string_segment_demand(
 /// and never a segment.
 fn route_for_string_segments(
     e: &Expr,
-    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-    out: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+    helpers: &crate::det::HashMap<String, (Vec<String>, usize)>,
+    out: &mut crate::det::HashMap<String, crate::det::HashSet<String>>,
 ) {
     if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
         if method.as_str() == "route_for" && !args.is_empty() {
@@ -1408,11 +1522,11 @@ fn route_for_string_segments(
 
 fn query_param_demand(
     app: &App,
-    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-) -> std::collections::HashMap<String, Vec<QueryKey>> {
-    type Demand = std::collections::HashMap<String, std::collections::BTreeMap<String, bool>>;
-    type Records = std::collections::HashMap<(String, String), bool>;
-    let models: std::collections::HashMap<String, bool> = app
+    helpers: &crate::det::HashMap<String, (Vec<String>, usize)>,
+) -> crate::det::HashMap<String, Vec<QueryKey>> {
+    type Demand = crate::det::HashMap<String, std::collections::BTreeMap<String, bool>>;
+    type Records = crate::det::HashMap<(String, String), bool>;
+    let models: crate::det::HashMap<String, bool> = app
         .models
         .iter()
         .map(|m| {
@@ -1429,9 +1543,9 @@ fn query_param_demand(
     let mut collect = |e: &Expr| {
         fn walk(
             e: &Expr,
-            helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+            helpers: &crate::det::HashMap<String, (Vec<String>, usize)>,
             out: &mut Demand,
-            models: &std::collections::HashMap<String, bool>,
+            models: &crate::det::HashMap<String, bool>,
             records: &mut Records,
         ) {
             if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
@@ -1517,7 +1631,7 @@ fn query_param_demand(
 /// convention the call-site pass also reads (`@user`, `@showing_user`:
 /// the name, or its `_<model>` suffix, is a model's). Answers whether
 /// that model overrides `to_param`.
-fn record_model_slug(v: &Expr, models: &std::collections::HashMap<String, bool>) -> Option<bool> {
+fn record_model_slug(v: &Expr, models: &crate::det::HashMap<String, bool>) -> Option<bool> {
     if let Some(crate::ty::Ty::Class { id, .. }) = v.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
         if let Some(slug) = models.get(id.0.as_str()) {
             return Some(*slug);
@@ -1550,7 +1664,7 @@ fn record_model_slug(v: &Expr, models: &std::collections::HashMap<String, bool>)
 /// costs nothing to the callers that never mention a format.
 fn format_variant_demand(
     app: &App,
-    declared: &std::collections::HashSet<String>,
+    declared: &crate::det::HashSet<String>,
 ) -> std::collections::BTreeMap<String, (String, String)> {
     let mut out: std::collections::BTreeMap<String, (String, String)> = Default::default();
     // `<as_name>` for every named route, longest first: `story_path` and
@@ -1566,7 +1680,7 @@ fn format_variant_demand(
         fn walk(
             e: &Expr,
             names: &[String],
-            declared: &std::collections::HashSet<String>,
+            declared: &crate::det::HashSet<String>,
             out: &mut std::collections::BTreeMap<String, (String, String)>,
         ) {
             if let ExprNode::Send { recv: None, method, .. } = &*e.node {
@@ -1850,7 +1964,7 @@ fn param_ty(name: &str, slug_id: bool) -> Ty {
 fn build_path_expr(
     path: &str,
     path_params: &[String],
-    slug_params: &std::collections::HashSet<String>,
+    slug_params: &crate::det::HashSet<String>,
 ) -> Expr {
     if path_params.is_empty() {
         return lit_str(path.to_string());
@@ -1906,9 +2020,9 @@ fn build_optional_path_expr(
     path: &str,
     seg_params: &[String],
     required: usize,
-    slug_params: &std::collections::HashSet<String>,
+    slug_params: &crate::det::HashSet<String>,
 ) -> Expr {
-    let optional: std::collections::HashSet<&str> =
+    let optional: crate::det::HashSet<&str> =
         seg_params[required..].iter().map(|s| s.as_str()).collect();
     let mut base_parts: Vec<InterpPart> = Vec::new();
     // (param-name, its conditionally-appended segment parts)
@@ -2080,7 +2194,7 @@ fn app_merges_into_url_options(app: &App) -> bool {
 
 fn expr_splats_into_a_route_helper(
     e: &Expr,
-    shapes: &std::collections::HashMap<String, Vec<bool>>,
+    shapes: &crate::det::HashMap<String, Vec<bool>>,
 ) -> bool {
     if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
         if crate::lower::controller_to_library::rewrites::route_helper_query_splat_index(

@@ -29,6 +29,11 @@ use crate::naming;
 pub struct FlatRoute {
     pub method: HttpMethod,
     pub path: String,
+    /// The path as written, before its optional groups were expanded
+    /// (`/top(/:length(/page/:page))` for each of its three variants).
+    /// Rails leaves a written route's own parts out of a generated
+    /// query, whichever variant it builds.
+    pub source_path: String,
     pub controller: ClassId,
     pub action: Symbol,
     pub as_name: String,
@@ -217,8 +222,8 @@ pub fn standard_resource_actions() -> &'static [(&'static str, HttpMethod, &'sta
 /// generate no helper and are skipped. When two routes share an
 /// `as_name` (a resources index and create), the first wins — they
 /// describe the same path template.
-pub fn helper_id_segments(app: &App) -> std::collections::HashMap<String, Vec<bool>> {
-    let mut out: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
+pub fn helper_id_segments(app: &App) -> crate::det::HashMap<String, Vec<bool>> {
+    let mut out: crate::det::HashMap<String, Vec<bool>> = crate::det::HashMap::default();
     for r in flatten_routes_for_helpers(app) {
         if !r.named || r.as_name.is_empty() {
             continue;
@@ -565,6 +570,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     with_format_requirement(constraints_map, compile_seg_patterns(&constraints));
                 out.push(FlatRoute {
                     method: method.clone(),
+                    source_path: full_path.clone(),
                     path: vpath,
                     controller: qualify_controller(&ctx.module_prefix, controller),
                     action: action.clone(),
@@ -618,6 +624,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 .unwrap_or_else(|| format!("{}root", ctx.name_prefix));
             out.push(FlatRoute {
                 method: HttpMethod::Get,
+                source_path: path.clone(),
                 path,
                 controller: ClassId(Symbol::from(controller_class)),
                 action: Symbol::from(action_name),
@@ -802,6 +809,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     with_format_requirement(resource_constraints, compile_seg_patterns(&other_constraints));
                 out.push(FlatRoute {
                     method: method.clone(),
+                    source_path: full_path.clone(),
                     path: full_path.clone(),
                     controller: controller_class.clone(),
                     action: Symbol::from(action_name),
@@ -831,6 +839,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 if action_name == "update" {
                     out.push(FlatRoute {
                         method: HttpMethod::Put,
+                        source_path: full_path.clone(),
                         path: full_path,
                         controller: controller_class.clone(),
                         action: Symbol::from(action_name),
