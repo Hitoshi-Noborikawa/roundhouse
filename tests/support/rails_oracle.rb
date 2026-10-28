@@ -1,0 +1,87 @@
+# The Rails a test's native control loads, chosen in one place instead of
+# a `gem "activerecord", "8.1.4"` line in every probe.
+#
+# By default it is the installed release gems at DEFAULT_VERSION, the
+# release the rest of the suite pins.
+#
+#   RH_RAILS_ORACLE=8.1.4    the installed release gems of that version
+#   RH_RAILS_ORACLE=<path>   a Rails checkout (a directory holding
+#                            activesupport/, activerecord/, ...). Its
+#                            components come from the checkout; the gems
+#                            they depend on come from the current gem path.
+#
+# `RailsOracle.activate("activerecord", sqlite3: ">= 2.9")` must run before
+# any Rails file is required. The named Rails components come from the
+# oracle; any other gem takes a RubyGems requirement, so a control states
+# the oldest release it needs rather than one exact build.
+module RailsOracle
+  DEFAULT_VERSION = "8.1.4"
+  COMPONENTS = %w[activesupport activemodel activerecord activejob actionpack actionview railties].freeze
+
+  def self.source
+    value = ENV["RH_RAILS_ORACLE"].to_s
+    value.empty? ? DEFAULT_VERSION : value
+  end
+
+  # A release version (`8.1.4`) rather than a checkout.
+  def self.release?
+    source.match?(/\A\d+(\.[0-9A-Za-z]+)+\z/)
+  end
+
+  # What the oracle is, for messages.
+  def self.label
+    release? ? "Rails #{source} (installed gems)" : "Rails #{version} (#{source})"
+  end
+
+  def self.version
+    release? ? source : File.read(File.join(source, "RAILS_VERSION")).strip
+  rescue SystemCallError
+    "unknown"
+  end
+
+  # Whether `activate` would succeed for these components, without
+  # activating anything, so a test can skip with a reason instead of failing.
+  def self.available?(*gems)
+    if release?
+      gems.all? { |name| Gem::Specification.find_all_by_name(name, source).any? }
+    else
+      gems.all? { |name| File.exist?(File.join(source, name, "#{name}.gemspec")) }
+    end
+  end
+
+  # Activates the named Rails components from the oracle and each other
+  # gem at its requirement (`sqlite3: ">= 2.9"`).
+  def self.activate(*gems, **requirements)
+    if release?
+      gems.each { |name| gem name, source }
+    else
+      abort "RH_RAILS_ORACLE: no Rails checkout at #{source}" unless File.directory?(File.join(source, "activesupport"))
+      versions = register_checkout
+      gems.each do |name|
+        # Exactly the checkout's version: RubyGems prefers an installed
+        # release over a checkout's prerelease (`8.2.0.alpha`) otherwise.
+        version = versions.fetch(name) { abort "#{name} is not in the Rails checkout at #{source}" }
+        gem name, "= #{version}"
+        loaded = Gem.loaded_specs.fetch(name).full_gem_path
+        abort "#{name} activated from #{loaded}, not #{source}" unless loaded.start_with?(File.expand_path(source))
+      end
+    end
+    requirements.each { |name, requirement| gem name.to_s, *Array(requirement) }
+  end
+
+  # Registers each component's gemspec from the checkout, as Bundler does
+  # for a git source, so `gem "activesupport"` (and any gem depending on
+  # it) activates the checkout. Answers each registered component's version.
+  def self.register_checkout
+    COMPONENTS.each_with_object({}) do |name, versions|
+      dir = File.expand_path(File.join(source, name))
+      path = File.join(dir, "#{name}.gemspec")
+      next unless File.exist?(path)
+      spec = Dir.chdir(dir) { Gem::Specification.load(path) } or abort "cannot load #{path}"
+      spec.loaded_from = path
+      spec.full_gem_path = dir
+      Gem::Specification.add_spec(spec)
+      versions[name] = spec.version.to_s
+    end
+  end
+end

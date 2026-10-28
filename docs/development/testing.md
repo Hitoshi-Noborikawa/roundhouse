@@ -42,6 +42,17 @@ The generated trees are ignored by Git; a fresh clone has neither. Accessors in
 Missing Ruby, gems, or SDKs can cause a harness to skip or fail; read the
 executed test output rather than assuming exit zero means coverage.
 
+## Native controls
+
+A test that claims emitted behavior matches Rails runs the same program under
+CRuby with real Rails and compares. [`rails_oracle.rb`](../../tests/support/rails_oracle.rb)
+picks that Rails in one place: by default the installed release the suite
+pins, `RH_RAILS_ORACLE=<version>` for another release, or
+`RH_RAILS_ORACLE=<path>` for a Rails checkout. Call
+`RailsOracle.activate("activerecord", sqlite3: ">= 2.9")` before requiring
+Rails; other gems take a requirement, not one exact build. When
+`RailsOracle.available?` is false, skip with a reason rather than fail.
+
 ## Complete local verification
 
 1. Install [cargo-nextest](https://nexte.st/docs/running/) once:
