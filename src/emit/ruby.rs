@@ -25,6 +25,7 @@ pub(crate) mod expr;
 mod library;
 pub(crate) use library::install_lookup_indexes;
 mod rbs;
+pub mod reopen;
 pub mod shake;
 mod shared;
 pub mod source_markers;

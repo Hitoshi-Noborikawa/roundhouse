@@ -107,6 +107,7 @@ SPINEL_TESTS = [
     "jbuilder_extract_attributes_spinel",
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
+    "app_reopens_runtime_class",
     "filter_block_params_spinel",
     "sidekiq_push",
     "sidekiq_worker",

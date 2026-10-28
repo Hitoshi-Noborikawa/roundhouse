@@ -2861,6 +2861,11 @@ fn target_files_inner(
             }
         }
         let mut files = files;
+        // The app's reopens of runtime classes first, on the same
+        // finished set: an override retires the runtime's def, and the
+        // shake then reads the tree that ships (see emit::ruby::reopen).
+        let models = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+        emit::ruby::reopen::apply_runtime_reopens(&mut files, &models);
         crate::timings::phase(format_args!("emit {}: tree shake", target.as_str()), || {
             emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
         });
