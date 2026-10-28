@@ -49,9 +49,33 @@ module RailsOracle
     components = if release?
       gems.all? { |name| Gem::Specification.find_all_by_name(name, source).any? }
     else
-      gems.all? { |name| File.exist?(File.join(source, name, "#{name}.gemspec")) }
+      checkout_resolves?(gems)
     end
     components && requirements.all? { |name, requirement| Gem::Dependency.new(name.to_s, *Array(requirement)).matching_specs.any? }
+  end
+
+  # Whether these checkout components are there, and each gem they depend
+  # on from outside the checkout is installed.
+  def self.checkout_resolves?(names, seen = {})
+    names.all? do |name|
+      next true if seen[name]
+      seen[name] = true
+      spec = checkout_spec(name) or next false
+      spec.runtime_dependencies.all? do |dependency|
+        checkout_spec(dependency.name) ? checkout_resolves?([dependency.name], seen) : dependency.matching_specs.any?
+      end
+    end
+  end
+
+  # A component's gemspec from the checkout, or nil when it has none.
+  def self.checkout_spec(name)
+    dir = File.expand_path(File.join(source, name))
+    path = File.join(dir, "#{name}.gemspec")
+    return unless File.exist?(path)
+    spec = Dir.chdir(dir) { Gem::Specification.load(path) } or abort "cannot load #{path}"
+    spec.loaded_from = path
+    spec.full_gem_path = dir
+    spec
   end
 
   # The environment a child Ruby needs to load the same oracle. Upstream
@@ -85,12 +109,7 @@ module RailsOracle
   # it) activates the checkout. Answers each registered component's version.
   def self.register_checkout
     COMPONENTS.each_with_object({}) do |name, versions|
-      dir = File.expand_path(File.join(source, name))
-      path = File.join(dir, "#{name}.gemspec")
-      next unless File.exist?(path)
-      spec = Dir.chdir(dir) { Gem::Specification.load(path) } or abort "cannot load #{path}"
-      spec.loaded_from = path
-      spec.full_gem_path = dir
+      spec = checkout_spec(name) or next
       # RubyGems treats an installed release of the same version as this
       # spec and keeps it, so a stable-branch checkout at 8.1.4 would lose
       # to an installed 8.1.4. The checkout replaces it.

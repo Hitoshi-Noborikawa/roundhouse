@@ -13,16 +13,19 @@ use std::process::Command;
 const ORACLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
 
 /// Whether the Rails oracle's activesupport is there; a run without it
-/// says so and passes, as `docs/development/testing.md` asks.
+/// says so and passes, as `docs/development/testing.md` asks. A probe that
+/// cannot run (a broken oracle) fails rather than skips.
 fn oracle_available() -> bool {
     let probe = Command::new("ruby")
-        .args(["-e", &format!("require {ORACLE:?}\nexit(RailsOracle.available?(\"activesupport\") ? 0 : 1)")])
-        .status()
+        .args(["-e", &format!("require {ORACLE:?}\nputs RailsOracle.available?(\"activesupport\")")])
+        .output()
         .expect("ruby");
-    if !probe.success() {
+    let answer = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    assert!(probe.status.success() && (answer == "true" || answer == "false"), "oracle probe failed: {answer}\n{}", String::from_utf8_lossy(&probe.stderr));
+    if answer == "false" {
         eprintln!("skipping: the Rails oracle's activesupport is not available");
     }
-    probe.success()
+    answer == "true"
 }
 
 /// App code, written once and run both natively and emitted. `ENV_OF`

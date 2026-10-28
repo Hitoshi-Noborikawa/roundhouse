@@ -24,13 +24,14 @@ fn stdout_of(output: &Output) -> String {
 }
 
 /// Whether the default release's activesupport is installed; a run without
-/// it says so and passes, as the suite's other native controls do.
+/// it says so and passes, as the suite's other native controls do. A probe
+/// that cannot run (a broken oracle) fails rather than skips.
 fn release_installed() -> bool {
-    let probe = oracle_ruby(None, r#"exit(RailsOracle.available?("activesupport") ? 0 : 1)"#);
-    if !probe.status.success() {
+    let installed = stdout_of(&oracle_ruby(None, r#"puts RailsOracle.available?("activesupport")"#)) == "true";
+    if !installed {
         eprintln!("skipping: the default release of activesupport is not installed");
     }
-    probe.status.success()
+    installed
 }
 
 /// A throwaway Rails checkout holding `activesupport` at `version`, whose
@@ -154,6 +155,17 @@ puts names.map { |name| Gem.loaded_specs.fetch(name).version }.uniq"#,
     );
     remove(&root);
     assert_eq!(stdout_of(&output), "true\n8.0.0.alpha");
+}
+
+#[test]
+fn a_checkout_whose_dependency_is_not_installed_is_unavailable() {
+    let root = checkout("missing-dependency", "8.0.0", &[]);
+    let gemspec = root.join("activesupport/activesupport.gemspec");
+    let text = std::fs::read_to_string(&gemspec).unwrap();
+    std::fs::write(&gemspec, text.replace("end\n", "  s.add_dependency \"rh-oracle-no-such-gem\", \">= 1\"\nend\n")).unwrap();
+    let output = oracle_ruby(Some(root.to_str().unwrap()), r#"puts RailsOracle.available?("activesupport")"#);
+    remove(&root);
+    assert_eq!(stdout_of(&output), "false");
 }
 
 #[test]
