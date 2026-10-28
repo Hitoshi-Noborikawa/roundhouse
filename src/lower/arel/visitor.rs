@@ -20,6 +20,7 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::Ty;
+use crate::emit::shared::schema_sql::Dialect;
 
 use super::ir::{
     ArelOp, ColumnSpec, Delete, Insert, Predicate, PreloadDirective, Select, Update,
@@ -979,6 +980,13 @@ fn visit_delete(del: &Delete, schema: &Schema) -> Expr {
     // postgres / other backends would skip this branch in their own
     // visitor.
     let has_primary_key = table.columns.iter().any(|c| c.primary_key);
+    // PostgreSQL resets a table's identity sequences in the TRUNCATE
+    // itself; CASCADE, because a referencing table's rows would refuse
+    // it, and a full truncate empties every model's table anyway.
+    if del.conditions.is_none() && Dialect::current() == Dialect::Postgres {
+        let table = Dialect::Postgres.ident(del.table.0.as_str());
+        return db_call(&db, "exec", vec![lit_str(format!("TRUNCATE TABLE {table} RESTART IDENTITY CASCADE"))]);
+    }
     if del.conditions.is_none() && has_primary_key {
         let reset = db_call(
             &db,
@@ -1138,7 +1146,7 @@ fn push_value_segment(segments: &mut Vec<Expr>, val: &Value, param: bool, binds:
     match val {
         Value::LiteralInt(n) => segments.push(lit_str(n.to_string())),
         Value::LiteralStr(s) => segments.push(lit_str(format!("'{}'", s.replace('\'', "''")))),
-        Value::LiteralBool(b) => segments.push(lit_str(if *b { "1".into() } else { "0".into() })),
+        Value::LiteralBool(b) => segments.push(lit_str(Dialect::current().boolean(*b).to_string())),
         Value::LiteralNull => segments.push(lit_str("NULL".into())),
         // One optional bind still occupies exactly one placeholder.
         Value::Runtime { expr, ty } if param && *ty != ValueType::FloatOpt => {
@@ -1171,7 +1179,7 @@ fn escape_value(db: &ClassId, val: &Value) -> Expr {
         }
         Value::LiteralInt(n) => lit_str(n.to_string()),
         Value::LiteralStr(s) => lit_str(format!("'{}'", s.replace('\'', "''"))),
-        Value::LiteralBool(b) => lit_str(if *b { "1".into() } else { "0".into() }),
+        Value::LiteralBool(b) => lit_str(Dialect::current().boolean(*b).to_string()),
         Value::LiteralNull => lit_str("NULL".into()),
     }
 }

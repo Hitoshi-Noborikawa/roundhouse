@@ -32,7 +32,56 @@ pub enum Dialect {
     Postgres,
 }
 
+thread_local! {
+    static CURRENT: std::cell::Cell<Dialect> = const { std::cell::Cell::new(Dialect::Sqlite) };
+}
+
 impl Dialect {
+    /// The dialect the emit in progress writes SQL in: SQLite unless a
+    /// target that runs the app's own database chose another for the
+    /// duration of its emit ([`Dialect::scope`]).
+    pub fn current() -> Dialect {
+        CURRENT.with(|current| current.get())
+    }
+
+    /// Run `f` with SQL lowered and rendered in this dialect, restoring
+    /// the previous one after, also when `f` unwinds.
+    pub fn scope<R>(self, f: impl FnOnce() -> R) -> R {
+        struct Restore(Dialect);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CURRENT.with(|current| current.set(self.0));
+            }
+        }
+        let _restore = Restore(CURRENT.with(|current| current.replace(self)));
+        f()
+    }
+
+    /// The dialect the Ruby target's emit runs an app's database in: the
+    /// adapter of the primary `config/database.yml` configures for the
+    /// environment the emitted tests run in (`test`, else the first
+    /// environment with a primary). PostgreSQL when that is postgresql,
+    /// SQLite otherwise, as before the file was read.
+    pub fn for_app(app: &crate::App) -> Dialect {
+        let primary = app.databases.iter().filter(|d| d.primary);
+        let chosen = primary.clone().find(|d| d.env == "test").or_else(|| primary.clone().next());
+        match chosen.map(|d| &d.adapter) {
+            Some(crate::database::DatabaseAdapter::Postgresql) => Dialect::Postgres,
+            _ => Dialect::Sqlite,
+        }
+    }
+
+    /// A literal boolean: SQLite stores 1/0; PostgreSQL's boolean takes
+    /// no integer.
+    pub fn boolean(self, value: bool) -> &'static str {
+        match (self, value) {
+            (Dialect::Sqlite, true) => "1",
+            (Dialect::Sqlite, false) => "0",
+            (Dialect::Postgres, true) => "TRUE",
+            (Dialect::Postgres, false) => "FALSE",
+        }
+    }
+
     /// One physical identifier, preserving its spelling.
     ///
     /// SQLite keeps ordinary names bare (`naming::sql_ident`). Postgres
@@ -168,12 +217,16 @@ impl Dialect {
 /// existing callers; an invalid generated-column schema reports an
 /// Unsupported diagnostic and returns no partial DDL.
 pub fn render_schema_statements(schema: &Schema) -> Vec<String> {
-    match render_schema_statements_for(schema, Dialect::Sqlite) {
+    let dialect = Dialect::current();
+    match render_schema_statements_for(schema, dialect) {
         Ok(statements) => statements,
         Err(error) => {
             let _ = crate::emit::diagnostics::report_unsupported(
                 crate::span::Span::synthetic(),
-                "sqlite",
+                match dialect {
+                    Dialect::Sqlite => "sqlite",
+                    Dialect::Postgres => "postgresql",
+                },
                 "generated schema",
                 error,
             );

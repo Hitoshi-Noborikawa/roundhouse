@@ -2807,7 +2807,14 @@ fn target_files_inner(
         // table used to live inside `spin_shape` and so reached only
         // the spinel tree, which cost campfire two test files on a
         // Ruby 3.4 runner (`Pathname()`).
-        BuildTarget::Ruby => ruby_runtime_files(app, fixture, param_binds).map(with_bundled_requires),
+        // In the dialect of the app's own database (`Dialect::for_app`):
+        // the Ruby target runs PostgreSQL on the pg gem
+        // (`apply_postgresql_tree`), every other target SQLite.
+        BuildTarget::Ruby => {
+            let dialect = crate::emit::shared::schema_sql::Dialect::for_app(app);
+            dialect.scope(|| ruby_runtime_files(app, fixture, param_binds && dialect == crate::emit::shared::schema_sql::Dialect::Sqlite))
+                .map(with_bundled_requires)
+        }
         BuildTarget::Jruby => jruby_runtime_files(app, fixture, param_binds).map(with_bundled_requires),
         BuildTarget::Roda => Ok(sort_files(emit::roda::emit(app))),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
@@ -4415,7 +4422,88 @@ fn ruby_family_runtime_files(
     // content replaces the spinel-tree file that `apply_pay_demand`
     // already annotated in `spinel_files`.
     apply_pay_demand(&mut files, app)?;
+    if flavor == RubyFlavor::CRuby && crate::emit::shared::schema_sql::Dialect::current() == crate::emit::shared::schema_sql::Dialect::Postgres {
+        apply_postgresql_tree(&mut files, app)?;
+    }
     Ok(files)
+}
+
+/// The Ruby tree of an app whose primary database is PostgreSQL
+/// (`Dialect::for_app`); the SQL in it was lowered for PostgreSQL by the
+/// same emit. Its Db is runtime/spinel/db_pg.rb over the pg gem, its
+/// driver differences pg_driver_cruby.rb, and its database the server
+/// `DATABASE_URL` names (with libpq's `PG*` variables as fallbacks), at
+/// boot and in the emitted tests. Each test file runs in a schema of its
+/// own, created when it starts and dropped when it exits.
+fn apply_postgresql_tree(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
+    if !app.sql_functions.is_empty() {
+        // An error diagnostic as well as the refusal, as
+        // `extension_gem_refusals` reports one, so `check` names it.
+        let names = app.sql_functions.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ");
+        let message = format!(
+            "the primary database is postgresql, and the app registers SQLite functions ({names}), which PostgreSQL \
+             has no equivalent of; not substituted"
+        );
+        let diagnostic = crate::diagnostic::Diagnostic::unsupported(
+            crate::span::Span::synthetic(),
+            Some(crate::ident::Symbol::from("ruby")),
+            "sqlite_functions",
+            message,
+        );
+        let refusal = diagnostic.message.clone();
+        emit::diagnostics::push(diagnostic);
+        return Err(refusal);
+    }
+    let take = |files: &mut Vec<(String, String)>, path: &str| -> Result<String, String> {
+        let at = files.iter().position(|(p, _)| p == path).ok_or_else(|| format!("PostgreSQL tree: {path} not found"))?;
+        Ok(files.remove(at).1)
+    };
+    let db_pg = take(files, "runtime/db_pg.rb")?;
+    let driver = take(files, "runtime/pg_driver_cruby.rb")?;
+    files.retain(|(p, _)| !matches!(p.as_str(), "runtime/db.rb" | "runtime/pg_driver.rb" | "Gemfile.lock"));
+    files.push(("runtime/db.rb".to_string(), db_pg));
+    files.push(("runtime/pg_driver.rb".to_string(), driver));
+
+    // The gem, and a fresh lock: the committed one is SQLite's.
+    let gemfile = files.iter_mut().find(|(p, _)| p == "Gemfile").ok_or("PostgreSQL tree: Gemfile not found")?;
+    if !gemfile.1.contains("gem \"sqlite3\"") {
+        return Err("PostgreSQL tree: expected `gem \"sqlite3\"` in the scaffold Gemfile".to_string());
+    }
+    gemfile.1 = gemfile.1.replace("gem \"sqlite3\"", "gem \"pg\"");
+
+    const SERVER_SQLITE: &str = "    db_path = ENV[\"BLOG_DB\"]\n    path = (!db_path.nil? && !db_path.empty?) ? db_path : \"storage/development.sqlite3\"\n";
+    const SERVER_POSTGRESQL: &str = "    # PostgreSQL: the server DATABASE_URL names, else libpq's PG*\n    # variables (apply_postgresql_tree).\n    path = ENV.fetch(\"DATABASE_URL\", \"\")\n";
+    let main = files.iter_mut().find(|(p, _)| p == "main.rb").ok_or("PostgreSQL tree: main.rb not found")?;
+    if !main.1.contains(SERVER_SQLITE) {
+        return Err("PostgreSQL tree: main.rb's database path no longer matches".to_string());
+    }
+    main.1 = main.1.replace(SERVER_SQLITE, SERVER_POSTGRESQL);
+
+    const TEST_SQLITE: &str = "Db.configure(_test_db_path)\n";
+    const TEST_POSTGRESQL: &str = "# PostgreSQL (apply_postgresql_tree): the server DATABASE_URL names,\n\
+# else libpq's PG* variables, in a schema of this test process's own,\n\
+# created here and dropped when its tests are done: after Minitest's\n\
+# run for a file that autoruns it (whose at_exit would otherwise come\n\
+# after this one), else at exit. search_path rides PGOPTIONS, so\n\
+# every connection of the pool resolves the tables to it. The pid comes\n\
+# first, so cutting a long file name to PostgreSQL's 63 bytes keeps it.\n\
+_test_schema = (\"rh_test_\" + Process.pid.to_s + \"_\" + File.basename($0, \".rb\").gsub(/[^a-z0-9_]/, \"_\"))[0, 63]\n\
+ENV[\"PGOPTIONS\"] = \"-c search_path=\" + _test_schema\n\
+Db.configure(ENV.fetch(\"DATABASE_URL\", \"\"))\n\
+Db.exec(\"DROP SCHEMA IF EXISTS \" + _test_schema + \" CASCADE\")\n\
+Db.exec(\"CREATE SCHEMA \" + _test_schema)\n\
+_drop_test_schema = -> { Db.exec(\"DROP SCHEMA IF EXISTS \" + _test_schema + \" CASCADE\") }\n\
+if defined?(Minitest) && Minitest.respond_to?(:after_run)\n  \
+Minitest.after_run(&_drop_test_schema)\n\
+else\n  \
+at_exit(&_drop_test_schema)\n\
+end\n";
+    let helper = files.iter_mut().find(|(p, _)| p == "test/test_helper.rb").ok_or("PostgreSQL tree: test/test_helper.rb not found")?;
+    if !helper.1.contains(TEST_SQLITE) {
+        return Err("PostgreSQL tree: test_helper.rb's database setup no longer matches".to_string());
+    }
+    helper.1 = helper.1.replace(TEST_SQLITE, TEST_POSTGRESQL);
+    Ok(())
 }
 
 /// The JRuby tree's Gemfile: the committed scaffold Gemfile is MRI-only
