@@ -20006,3 +20006,6 @@ end
         .run_test("test/models/article_json_escape_test.rb")
         .assert_passes();
 }
+
+#[path = "emit_and_run/fresh_builtin_extend.rs"]
+mod fresh_builtin_extend;
