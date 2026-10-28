@@ -1596,6 +1596,10 @@ end
                     // lowering synthesizes. Registered before the
                     // app/helpers pass below, so a same-named helper-
                     // module function wins (its insert overwrites).
+                    // Judged on the controller as written: the lowering
+                    // clones from it once its concerns are spliced in,
+                    // and `reconcile_controller_helper_methods` drops
+                    // what that controller no longer clones.
                     for name in crate::lower::controller_to_library::controller_helper_method_names(
                         &controller,
                     ) {
@@ -2591,11 +2595,46 @@ end
     super::app_extension_calls::mark(&mut app);
     report_unmodelled_records(&app);
     super::unreachable_views::mark(&mut app);
+    // After every pass that changes a controller's methods, the concern
+    // splice and the class-body macros above all: the lowering clones
+    // from the controller they leave.
+    reconcile_controller_helper_methods(&mut app);
     super::uncalled_helper_copies::mark(&mut app);
     let (rake_tasks_source, rake_task_gaps) = super::rake_tasks::ingest(vfs, dir);
     app.rake_tasks_source = rake_tasks_source;
     app.rake_task_gaps = rake_task_gaps;
     Ok(app)
+}
+
+/// The `helper_method_index` entries a controller owns, judged again on
+/// the controller ingest is done with. Each was registered from the
+/// controller as written, right after `ingest_controller`; the
+/// class-side clone the view call relies on is decided in the lowering,
+/// on the controller its concerns were spliced into. A concern can make
+/// a pure helper impure there: its `class_attribute :salutation` gives
+/// the controller a class-side `salutation`, a clone of a `greeting`
+/// that calls the private instance `salutation` would reach the
+/// attribute instead, and the lowering keeps `greeting` on the
+/// instance. Left registered, the view called a
+/// `GreetingsController.greeting` nobody defined. Dropped, it reaches
+/// the request's controller through `ActionController::Current
+/// .controller`, as Rails runs a helper method.
+///
+/// Only dropped, never added: a helper the splice made pure (its callee
+/// is a concern's method) keeps the dynamic path, which is still what
+/// Rails runs, and the clone the lowering gives it goes unused. An entry
+/// a helper module owns is left as it is.
+fn reconcile_controller_helper_methods(app: &mut App) {
+    let owners: HashSet<&crate::ident::ClassId> = app.helper_method_index.values().collect();
+    let mut still_pure: HashMap<crate::ident::ClassId, Vec<Symbol>> = HashMap::default();
+    for controller in app.controllers.iter().filter(|c| owners.contains(&c.name)) {
+        still_pure
+            .entry(controller.name.clone())
+            .or_default()
+            .extend(crate::lower::controller_to_library::controller_helper_method_names(controller));
+    }
+    app.helper_method_index
+        .retain(|name, owner| still_pure.get(owner).is_none_or(|names| names.contains(name)));
 }
 
 /// Standard libraries a Ruby program loads by name, the ones an app's

@@ -207,3 +207,94 @@ end
         assert_eq!(tail.ty, Some(Ty::Str), "{receiver:?} accessor return type");
     }
 }
+
+/// Ingest judges a helper on the controller as written, before its
+/// concerns are spliced in; the lowering judges it on the controller
+/// they produce. Here the concern's `class_attribute :salutation` gives
+/// the controller a class-side `salutation`, so a clone of `greeting`
+/// would reach that one rather than the private instance method the
+/// original calls, and the lowering keeps `greeting` on the instance.
+/// The index has to agree, or the view calls a
+/// `GreetingsController.greeting` nobody defined.
+#[test]
+fn a_helper_a_concern_makes_impure_leaves_the_index_with_its_clone() {
+    let tree = [
+        (
+            "app/controllers/concerns/salutations.rb",
+            r#"module Salutations
+  extend ActiveSupport::Concern
+
+  included do
+    class_attribute :salutation, default: "hello"
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/greetings_controller.rb",
+            r##"class GreetingsController < ApplicationController
+  include Salutations
+
+  helper_method :greeting
+
+  def show
+  end
+
+  def greeting(name)
+    "#{salutation}, #{name}"
+  end
+
+  private
+
+  def salutation
+    "hi"
+  end
+end
+"##,
+        ),
+        ("app/views/greetings/show.html.erb", "<p><%= greeting(\"ada\") %></p>\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"greeting\", to: \"greetings#show\"\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, source)| (std::path::PathBuf::from(path), source.as_bytes().to_vec()))
+    .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest tree");
+
+    assert!(
+        !app.helper_method_index.contains_key(&Symbol::from("greeting")),
+        "{:?}",
+        app.helper_method_index
+    );
+
+    let lcs = roundhouse::lower::lower_controllers_with_arel_and_views(
+        &app.controllers,
+        Vec::new(),
+        Some(&app.schema),
+        &app.views,
+    );
+    let ctrl = lcs
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "GreetingsController")
+        .expect("controller lowered");
+    assert!(
+        !ctrl
+            .methods
+            .iter()
+            .any(|m| m.name.as_str() == "greeting" && m.receiver == MethodReceiver::Class)
+    );
+
+    let files = roundhouse::emit::ruby::emit_lowered_views(&app);
+    let view = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("greetings/show.rb"))
+        .expect("greetings/show emitted");
+    assert!(
+        view.content.contains("ActionController::Current.controller.greeting(\"ada\")"),
+        "{}",
+        view.content
+    );
+    assert!(!view.content.contains("GreetingsController.greeting"), "{}", view.content);
+}

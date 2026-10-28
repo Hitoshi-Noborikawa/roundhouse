@@ -1593,7 +1593,11 @@ fn synthesize_controller_string_method(
 /// Names a controller marks with `helper_method :x` whose method body
 /// is pure over its arguments - the set the view-call rewrite and the
 /// class-side clone above serve. Shared with ingest, which registers
-/// these in `app.helper_method_index`.
+/// these in `app.helper_method_index` from the controller as written
+/// and asks again once its concerns are spliced in, the controller the
+/// clone above is made from: a name only the first answer holds is
+/// dropped (`reconcile_controller_helper_methods`), or the view would
+/// call a clone nobody made.
 ///
 /// Pure means it touches no instance state - see
 /// `class_side_safe_methods`. In Rails a helper method runs on the
@@ -1669,16 +1673,19 @@ fn helper_method_marked_names(controller: &Controller) -> Vec<Symbol> {
 ///   method of this controller that is safe itself. Request state
 ///   (`session`, `params`, `cookies`, ...), framework instance methods
 ///   (`redirect_to`, `t`, `url_for`, ...) and methods inherited from a
-///   parent controller or a concern are not visible here and count as
-///   instance state: such a helper stays on the instance, where the
-///   view reaches it through `ActionController::Current.controller` as
-///   Rails runs it. A pure helper misjudged that way only takes the
-///   dynamic path; an impure one cloned onto the class leaks or raises.
+///   parent controller (or a concern, until the splice copies them in)
+///   are not visible here and count as instance state: such a helper
+///   stays on the instance, where the view reaches it through
+///   `ActionController::Current.controller` as Rails runs it. A pure
+///   helper misjudged that way only takes the dynamic path; an impure
+///   one cloned onto the class leaks or raises.
 ///
 /// Calls make this a fixpoint: `current_account` that calls
 /// `current_slug` that reads `params[:slug]` is impure, and so is a
-/// method that calls `current_account`. Ingest sees one controller file
-/// at a time, so only this controller's own methods are resolved.
+/// method that calls `current_account`. Only this controller's own
+/// methods are resolved: ingest asks first on one controller file at a
+/// time, and again, like the lowering, on the controller its concerns
+/// were spliced into.
 fn class_side_safe_methods(controller: &Controller) -> crate::det::HashMap<Symbol, Vec<Symbol>> {
     use crate::expr::LValue;
 
