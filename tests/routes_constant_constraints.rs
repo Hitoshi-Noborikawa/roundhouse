@@ -128,6 +128,7 @@ class ApplicationController < ActionController::Base; end
 module Feeds; end
 {COLLECTIONS}
 {WIDGETS}
+{prelude}
 routes = ActionDispatch::Routing::RouteSet.new
 routes.draw do
 {draw}
@@ -141,6 +142,8 @@ define_method(:req) do |path|
 end
 {asserts}puts "Rails agrees"
 "##,
+        // What the route file defines before its `draw` (`TAG_RE`).
+        prelude = ROUTES.lines().take_while(|l| !l.starts_with("Rails.application")).collect::<Vec<_>>().join("\n"),
         draw = ROUTES.lines().filter(|l| l.starts_with("  ")).collect::<Vec<_>>().join("\n"),
         asserts = assertions(),
     );
