@@ -6768,9 +6768,10 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "Arel::Nodes::Ascending",
     "Arel::Nodes::Descending",
     "Arel::Nodes::Predicate",
-    // `runtime/ruby/active_record/connection_not_established.rb` and
-    // `encryption_errors.rb`. A rescue of ConnectionNotEstablished
-    // catches the two children. Strict targets do not load the files.
+    // `runtime/ruby/active_record/connection_not_established.rb`,
+    // `encryption_errors.rb` and `stale_object_error.rb`. A rescue of
+    // ConnectionNotEstablished catches the two children. Strict targets
+    // do not load the files.
     "ActiveRecord::ConnectionFailed",
     "ActiveRecord::ConnectionTimeoutError",
     "ActiveRecord::Encryption::Errors::Decryption",
