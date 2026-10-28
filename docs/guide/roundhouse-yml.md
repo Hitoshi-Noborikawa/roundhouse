@@ -242,7 +242,16 @@ and `jruby` trees. Each file's top level, its statements and its
 file at boot, before the app's own files, and that file's requires load
 the rest. A literal-list loop of `require_relative` and a
 `Dir[File.join(__dir__, "x/**/*.rb")]` glob become one require per file.
-A `require` of a Rails framework feature is left to the runtime. A
+An `autoload :Name, "path"` (or `ActiveSupport::Autoload`'s path-less
+`autoload :Name`) loads that file's program when the constant is first
+read. Once the boot loads a gem, its classes and modules load only where
+its own requires and autoloads reach them, as natively: a file nothing
+requires defines nothing. The boot loads a gem through `Bundler.require`,
+a literal `require` in `config/boot.rb`, `config/application.rb` or
+`config/environment.rb`, or an app file's `require` of it.
+A `require` of a Rails framework feature is left to the runtime, as are
+`ActiveSupport.on_load` (see `on_load` reopens) and `I18n.load_path`
+(the gem's locale files are compiled in). A
 statement that cannot be carried is an error (`file_statement_unsupported`),
 as is a `require_relative` of a file the tree does not carry
 (`file_require_not_carried`). The `spinel` tree compiles the gem's

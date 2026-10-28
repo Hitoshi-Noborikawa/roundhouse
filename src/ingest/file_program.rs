@@ -13,6 +13,8 @@
 //! - `require` / `require_relative` of a literal names the file it loads;
 //! - a constant write before any statement rides with the file's
 //!   classes, as it does today;
+//! - `ActiveSupport.on_load` is `on_load_reopen`'s, and `I18n.load_path`
+//!   the compiled translations';
 //! - any other statement is carried as the expression it is, or, when
 //!   the expression ingest refuses it, named as not carried.
 //!
@@ -61,9 +63,12 @@ pub(super) fn file_program(
                 let Some(p) = class_name_path(&c) else { continue };
                 found.push((c.location().start_offset(), scope.into_iter().chain(p).collect::<Vec<_>>().join("::")));
             }
+            let mut modules: HashSet<String> = HashSet::default();
             for (scope, m) in find_all_module_declarations_with_scope(&stmt) {
                 let Some(p) = module_name_path(&m) else { continue };
-                found.push((m.location().start_offset(), scope.into_iter().chain(p).collect::<Vec<_>>().join("::")));
+                let name = scope.into_iter().chain(p).collect::<Vec<_>>().join("::");
+                modules.insert(name.clone());
+                found.push((m.location().start_offset(), name));
             }
             found.sort_by_key(|(start, _)| *start);
             let mut names: Vec<ClassId> = Vec::new();
@@ -72,15 +77,40 @@ pub(super) fn file_program(
                     names.push(ClassId(Symbol::from(name)));
                 }
             }
+            let mut opened: Vec<Vec<(String, bool)>> = Vec::new();
+            for chain in nestings(&stmt) {
+                let name = chain.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join("::");
+                let module = chain.last().is_some_and(|(_, is_class)| !is_class);
+                if module && !carried.contains(&name) && modules.contains(&name) && !opened.contains(&chain) {
+                    opened.push(chain);
+                }
+            }
+            if !opened.is_empty() {
+                items.push(ProgramItem::Opened(opened));
+            }
             if !names.is_empty() {
                 items.push(ProgramItem::Declared(names));
             }
-            // What the bodies require as they load, after them.
-            body_requires(&stmt, &span_of, &mut items);
+            // What the bodies require and autoload as they load, after them.
+            body_requires(&stmt, &[], &span_of, &mut items);
             continue;
         }
         // A constant rides with the file's classes (`carry_file_constants`).
         if stmt.as_constant_write_node().is_some() || stmt.as_constant_path_write_node().is_some() {
+            continue;
+        }
+        if let Some((name, feature)) = literal_autoload(&stmt) {
+            items.push(ProgramItem::Autoload { span: span_of(&stmt), owner: "Object".to_string(), name, feature });
+            continue;
+        }
+        // `ActiveSupport.on_load(:x) { … }` is `on_load_reopen`'s, which
+        // carries the reopen it can and reports the rest.
+        if is_on_load(&stmt) {
+            continue;
+        }
+        // `I18n.load_path += Dir[…]`: the gem's locale files are compiled
+        // into the tree's translations (`i18n::gems::gem_locale_files`).
+        if writes_i18n_load_path(&stmt) {
             continue;
         }
         if let Some(globbed) = glob_requires(&stmt, file, list_dir) {
@@ -259,9 +289,16 @@ fn dir_relative_pattern(node: &ruby_prism::Node<'_>) -> Option<String> {
 /// the files it loads see the body's constants defined.
 fn body_requires(
     decl: &ruby_prism::Node<'_>,
+    scope: &[String],
     span_of: &dyn Fn(&ruby_prism::Node<'_>) -> Span,
     out: &mut Vec<ProgramItem>,
 ) {
+    let path = decl
+        .as_class_node()
+        .and_then(|c| class_name_path(&c))
+        .or_else(|| decl.as_module_node().and_then(|m| module_name_path(&m)));
+    let Some(path) = path else { return };
+    let owner: Vec<String> = scope.iter().cloned().chain(path).collect();
     let body = decl
         .as_class_node()
         .and_then(|c| c.body())
@@ -271,6 +308,23 @@ fn body_requires(
         Some(s) => s.body().iter().collect(),
         None => vec![body],
     };
+    // `extend ActiveSupport::Autoload`: an `autoload :Name` with no path
+    // loads `<owner>/<name>`, underscored, as Rails derives it.
+    let as_autoload = statements.iter().any(|stmt| {
+        stmt.as_call_node().is_some_and(|call| {
+            call.receiver().is_none()
+                && constant_id_str(&call.name()) == "extend"
+                && call.arguments().is_some_and(|a| {
+                    a.arguments().iter().any(|arg| {
+                        arg.as_constant_path_node().is_some_and(|p| {
+                            p.name().is_some_and(|n| constant_id_str(&n) == "Autoload")
+                                && p.parent().and_then(|q| q.as_constant_read_node()).is_some_and(|q| constant_id_str(&q.name()) == "ActiveSupport")
+                        })
+                    })
+                })
+        })
+    });
+    let derived = |name: &str| crate::naming::underscore(&format!("{}::{name}", owner.join("::")));
     // The body's literal lists, by constant name.
     let mut lists: Vec<(String, Vec<String>)> = Vec::new();
     for stmt in &statements {
@@ -282,8 +336,38 @@ fn body_requires(
     }
     for stmt in &statements {
         if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
-            body_requires(stmt, span_of, out);
+            body_requires(stmt, &owner, span_of, out);
             continue;
+        }
+        if let Some((name, feature)) = literal_autoload(stmt) {
+            out.push(ProgramItem::Autoload { span: span_of(stmt), owner: owner.join("::"), name, feature });
+            continue;
+        }
+        if as_autoload {
+            // `autoload :Name`, alone or in `eager_autoload do … end`.
+            let mut autoloads: Vec<&ruby_prism::Node<'_>> = vec![stmt];
+            let eager: Vec<ruby_prism::Node<'_>> = stmt
+                .as_call_node()
+                .filter(|c| c.receiver().is_none() && constant_id_str(&c.name()) == "eager_autoload")
+                .and_then(|c| c.block())
+                .and_then(|b| b.as_block_node())
+                .and_then(|b| b.body())
+                .and_then(|b| b.as_statements_node())
+                .map(|b| b.body().iter().collect())
+                .unwrap_or_default();
+            if !eager.is_empty() {
+                autoloads = eager.iter().collect();
+            }
+            let mut matched = false;
+            for node in autoloads {
+                if let Some(name) = derived_autoload(node) {
+                    out.push(ProgramItem::Autoload { span: span_of(node), owner: owner.join("::"), feature: derived(&name), name });
+                    matched = true;
+                }
+            }
+            if matched {
+                continue;
+            }
         }
         let Some(call) = stmt.as_call_node() else { continue };
         if let Some((feature, relative)) = literal_require(&call) {
@@ -330,6 +414,85 @@ fn body_requires(
             out.push(ProgramItem::Require { span: span_of(stmt), feature, relative: name == "require_relative" });
         }
     }
+}
+
+/// Each `class`/`module` a declaration statement holds, as the nesting
+/// written down to it: `(segment, is_class)` per level, a compact
+/// `A::B` name one level.
+fn nestings(stmt: &ruby_prism::Node<'_>) -> Vec<Vec<(String, bool)>> {
+    fn walk(node: &ruby_prism::Node<'_>, outer: &[(String, bool)], out: &mut Vec<Vec<(String, bool)>>) {
+        let (path, is_class, body) = if let Some(c) = node.as_class_node() {
+            (class_name_path(&c), true, c.body())
+        } else if let Some(m) = node.as_module_node() {
+            (module_name_path(&m), false, m.body())
+        } else {
+            return;
+        };
+        let Some(path) = path else { return };
+        let mut chain = outer.to_vec();
+        chain.push((path.join("::"), is_class));
+        out.push(chain.clone());
+        if let Some(statements) = body.as_ref().and_then(|b| b.as_statements_node()) {
+            for inner in statements.body().iter() {
+                walk(&inner, &chain, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(stmt, &[], &mut out);
+    out
+}
+
+/// `ActiveSupport.on_load(…) { … }`.
+fn is_on_load(stmt: &ruby_prism::Node<'_>) -> bool {
+    stmt.as_call_node().is_some_and(|call| {
+        constant_id_str(&call.name()) == "on_load"
+            && call.receiver().is_some_and(|r| {
+                r.as_constant_read_node().is_some_and(|c| constant_id_str(&c.name()) == "ActiveSupport")
+                    || r.as_constant_path_node().is_some_and(|p| {
+                        p.parent().is_none() && p.name().is_some_and(|n| constant_id_str(&n) == "ActiveSupport")
+                    })
+            })
+    })
+}
+
+/// `I18n.load_path += …`, `I18n.load_path << …` and other calls on it.
+fn writes_i18n_load_path(stmt: &ruby_prism::Node<'_>) -> bool {
+    let on_i18n = |r: Option<ruby_prism::Node<'_>>| {
+        r.is_some_and(|r| r.as_constant_read_node().is_some_and(|c| constant_id_str(&c.name()) == "I18n"))
+    };
+    let load_path = |n: &ruby_prism::Node<'_>| {
+        n.as_call_node().is_some_and(|c| constant_id_str(&c.name()) == "load_path" && on_i18n(c.receiver()))
+    };
+    if let Some(write) = stmt.as_call_operator_write_node() {
+        return constant_id_str(&write.read_name()) == "load_path" && on_i18n(write.receiver());
+    }
+    stmt.as_call_node().is_some_and(|call| call.receiver().is_some_and(|r| load_path(&r)))
+}
+
+/// `autoload :Name, "feature"` (receiverless, of literals), as
+/// `(name, feature)`.
+fn literal_autoload(stmt: &ruby_prism::Node<'_>) -> Option<(String, String)> {
+    let call = stmt.as_call_node()?;
+    if call.receiver().is_some() || call.block().is_some() || constant_id_str(&call.name()) != "autoload" {
+        return None;
+    }
+    let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let [name, feature] = args.as_slice() else { return None };
+    let name = String::from_utf8_lossy(name.as_symbol_node()?.unescaped()).into_owned();
+    let feature = String::from_utf8_lossy(feature.as_string_node()?.unescaped()).into_owned();
+    Some((name, feature))
+}
+
+/// `autoload :Name` with no path (`ActiveSupport::Autoload`'s), as `Name`.
+fn derived_autoload(stmt: &ruby_prism::Node<'_>) -> Option<String> {
+    let call = stmt.as_call_node()?;
+    if call.receiver().is_some() || call.block().is_some() || constant_id_str(&call.name()) != "autoload" {
+        return None;
+    }
+    let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let [name] = args.as_slice() else { return None };
+    Some(String::from_utf8_lossy(name.as_symbol_node()?.unescaped()).into_owned())
 }
 
 /// `require "x"` / `require_relative "x"` of a string literal, as
@@ -431,4 +594,33 @@ fn declares_inside(stmt: &ruby_prism::Node<'_>) -> bool {
     let mut finds = Finds::default();
     finds.visit(stmt);
     finds.0
+}
+
+/// The literal `require "x"` features a file runs as it loads: at its
+/// top level and in its class and module bodies (not in a method). For
+/// an app file, whose requires of a gem's files load that gem at boot.
+pub(super) fn literal_requires(source: &[u8], file: &str) -> Vec<String> {
+    fn walk(statements: &[ruby_prism::Node<'_>], out: &mut Vec<String>) {
+        for stmt in statements {
+            if let Some((feature, false)) = stmt.as_call_node().and_then(|c| literal_require(&c)) {
+                out.push(feature);
+                continue;
+            }
+            let body = stmt
+                .as_class_node()
+                .and_then(|c| c.body())
+                .or_else(|| stmt.as_module_node().and_then(|m| m.body()));
+            if let Some(statements) = body.as_ref().and_then(|b| b.as_statements_node()) {
+                let inner: Vec<ruby_prism::Node<'_>> = statements.body().iter().collect();
+                walk(&inner, out);
+            }
+        }
+    }
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let Some(program) = root.as_program_node() else { return Vec::new() };
+    let statements: Vec<ruby_prism::Node<'_>> = program.statements().body().iter().collect();
+    let mut out = Vec::new();
+    walk(&statements, &mut out);
+    out
 }

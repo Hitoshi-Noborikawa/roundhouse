@@ -19,7 +19,6 @@ fn lines(bytes: &[u8]) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_namespace_only_unloaded_gem_files_open_stays_undefined() {
     unloaded_namespace(false);
 }
@@ -28,7 +27,6 @@ fn a_namespace_only_unloaded_gem_files_open_stays_undefined() {
 /// never a plain gem's `lib/`, so eager loading loads the cops no more
 /// than lazy boot does.
 #[test]
-#[ignore = "fork spec: autoload"]
 fn eager_loading_leaves_a_plain_gems_unrequired_files_unloaded() {
     unloaded_namespace(true);
 }

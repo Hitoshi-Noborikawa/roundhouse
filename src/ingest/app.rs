@@ -853,6 +853,19 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                 Ok(mut classes) => {
                     // A gem's file runs more than its declarations when it
                     // loads (`file_program`).
+                    if !gem_libs.iter().any(|lib| entry.starts_with(lib)) {
+                        // An app file loads at boot; the gem files it
+                        // requires load with it.
+                        for feature in super::file_program::literal_requires(&source, &path_str) {
+                            let file = if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") };
+                            let found = gem_libs.iter().map(|lib| lib.join(&file)).find(|path| vfs.exists(path));
+                            if let Some(found) = found.map(|f| f.display().to_string()) {
+                                if !app.boot_gem_entries.contains(&found) {
+                                    app.boot_gem_entries.push(found);
+                                }
+                            }
+                        }
+                    }
                     if gem_libs.iter().any(|lib| entry.starts_with(lib)) {
                         if let Ok(empty) = super::library_class::ingest_empty_modules(&source, &path_str) {
                             let empty: Vec<_> = empty.into_iter().filter(|m| !classes.iter().any(|c| c.name == m.name)).collect();
@@ -7848,46 +7861,87 @@ fn boot_required_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The gem-source files `Bundler.require` loads at boot
-/// (`App::boot_gem_entries`): when config/application.rb calls it, each
-/// PATH or source gem the Gemfile names, in lock order, by what its
-/// `require:` says or else by its name (`act-kit`, then `act/kit`).
-/// A `require: false` gem loads nothing.
+/// The gem-source files the boot loads (`App::boot_gem_entries`), in
+/// load order: config/boot.rb, config/application.rb and
+/// config/environment.rb, statement by statement at their top level. A
+/// literal `require "x"` is the gem file `lib/x.rb` of a PATH or source
+/// gem that has it; `Bundler.require` is each such gem the lockfile
+/// names, in lock order, by what its Gemfile `require:` says or else by
+/// its name (`act-kit`, then `act/kit`). A `require: false` gem loads
+/// nothing.
 fn boot_gem_entries<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     lock: Option<&crate::gems::Lockfile>,
     path_gems: &[PathBuf],
 ) -> Vec<String> {
-    let Some(lock) = lock else { return Vec::new() };
-    let bundler = vfs
-        .read_to_string(&dir.join("config/application.rb"))
-        .is_ok_and(|text| text.contains("Bundler.require"));
-    if !bundler {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for name in &lock.dependencies {
-        if !lock.in_repo.contains(name) && !lock.source.contains(name) {
-            continue;
+    let libs: Vec<PathBuf> = path_gems.iter().map(|gem| gem.join("lib")).collect();
+    let feature_file = |feature: &str| -> Option<PathBuf> {
+        let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
+        libs.iter().map(|lib| lib.join(&file)).find(|path| vfs.exists(path))
+    };
+    let bundled = || -> Vec<PathBuf> {
+        let Some(lock) = lock else { return Vec::new() };
+        let mut out = Vec::new();
+        // A dependency compiled from source has its directory among the
+        // path gems: a PATH gem's, or a source gem's mount.
+        for name in &lock.dependencies {
+            let version = lock.version_of(name).unwrap_or_default();
+            let Some(gem) = path_gems.iter().find(|gem| {
+                gem.file_name().and_then(|n| n.to_str()).is_some_and(|base| {
+                    base == name.as_str()
+                        || base == format!("{name}-{version}")
+                        || base.strip_prefix(name.as_str()).is_some_and(|rest| rest.starts_with('-'))
+                })
+            }) else {
+                continue;
+            };
+            let lib = gem.join("lib");
+            let features: Vec<String> = match lock.gemfile_requires.get(name) {
+                Some(features) => features.clone(),
+                None => [name.clone(), name.replace('-', "/")]
+                    .into_iter()
+                    .filter(|f| vfs.exists(&lib.join(format!("{f}.rb"))))
+                    .take(1)
+                    .collect(),
+            };
+            for feature in features {
+                let file = lib.join(if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") });
+                if vfs.exists(&file) {
+                    out.push(file);
+                }
+            }
         }
-        let version = lock.version_of(name).unwrap_or_default();
-        let Some(gem) = path_gems.iter().find(|gem| {
-            gem.file_name().and_then(|n| n.to_str()).is_some_and(|base| {
-                base == name.as_str() || base == format!("{name}-{version}") || base.strip_prefix(name.as_str()).is_some_and(|rest| rest.starts_with('-'))
-            })
-        }) else {
-            continue;
-        };
-        let lib = gem.join("lib");
-        let features: Vec<String> = match lock.gemfile_requires.get(name) {
-            Some(features) => features.clone(),
-            None => [name.clone(), name.replace('-', "/")].into_iter().filter(|f| vfs.exists(&lib.join(format!("{f}.rb")))).take(1).collect(),
-        };
-        for feature in features {
-            let file = lib.join(if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") });
-            if vfs.exists(&file) {
-                out.push(file.display().to_string());
+        out
+    };
+    let mut out: Vec<String> = Vec::new();
+    for name in ["boot.rb", "application.rb", "environment.rb"] {
+        let Ok(source) = vfs.read(&dir.join("config").join(name)) else { continue };
+        let parsed = super::prism::parse_silent(&source);
+        let Some(program) = parsed.node().as_program_node() else { continue };
+        for statement in program.statements().body().iter() {
+            let Some(call) = statement.as_call_node() else { continue };
+            let method = super::util::constant_id_str(&call.name());
+            let on_bundler = call
+                .receiver()
+                .and_then(|r| r.as_constant_read_node())
+                .is_some_and(|r| super::util::constant_id_str(&r.name()) == "Bundler");
+            let found: Vec<PathBuf> = if on_bundler && method == "require" {
+                bundled()
+            } else if call.receiver().is_none() && method == "require" {
+                let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                match args.as_slice() {
+                    [one] => super::util::string_value(one).and_then(|f| feature_file(&f)).into_iter().collect(),
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            for file in found {
+                let file = file.display().to_string();
+                if !out.contains(&file) {
+                    out.push(file);
+                }
             }
         }
     }

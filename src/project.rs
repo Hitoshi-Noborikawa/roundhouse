@@ -2516,6 +2516,14 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
         None => !under_dropped(c.name.0.as_str()),
     });
     trimmed.models.retain(|m| !mounted(m.parent_span.file));
+    // Its files' programs too: the real gem runs its own top level.
+    let mounted_path = |path: &str| {
+        app.auto_source_gems.iter().any(|gem| {
+            lock.and_then(|l| l.version_of(gem)).is_some_and(|v| crate::ingest::source_gems::file_of(path, gem, v))
+        })
+    };
+    trimmed.file_programs.retain(|p| !mounted_path(&p.source));
+    trimmed.boot_gem_entries.retain(|e| !mounted_path(e));
     if let Some(lock) = trimmed.gem_lock.as_mut() {
         lock.source.retain(|gem| !app.auto_source_gems.contains(gem));
     }
@@ -4498,6 +4506,22 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         let (line, _) = source.line_col(span.start);
         format!("{}:{line}", relative(&source.path))
     };
+    // The programs an `autoload` names: each, as it starts loading,
+    // drops the pending autoloads of what it is about to define, as Ruby
+    // does for the file it is loading (`RoundhouseAutoload.entering`).
+    // Each autoloaded constant (`Owner::Name`, `Name` at the top level)
+    // and the program it loads.
+    let mut autoloaded: Vec<(String, String)> = Vec::new();
+    for program in &app.file_programs {
+        for item in &program.items {
+            let crate::app::ProgramItem::Autoload { owner, name, feature, .. } = item else { continue };
+            let Some(target) = resolve(&normalize_source(&program.source), feature, false).filter(|t| programs.contains_key(t)) else {
+                continue;
+            };
+            let constant = if owner == "Object" { name.clone() } else { format!("{owner}::{name}") };
+            autoloaded.push((constant, target));
+        }
+    }
     // Which programs each program's requires load, for reachability.
     let mut edges: crate::det::HashMap<String, Vec<String>> = Default::default();
     for program in &app.file_programs {
@@ -4512,6 +4536,10 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
             relative(&program.source)
         )
         .unwrap();
+        let names: Vec<&str> = autoloaded.iter().filter(|(_, target)| *target == from).map(|(c, _)| c.as_str()).collect();
+        // A program an autoload names runs inside `entering`, which keeps
+        // Ruby's autoload when the file raises.
+        let header = std::mem::take(&mut out);
         let mut loaded: crate::det::HashSet<String> = Default::default();
         for item in &program.items {
             match item {
@@ -4564,12 +4592,48 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                         }
                     }
                 }
+                crate::app::ProgramItem::Opened(chains) => {
+                    for chain in chains {
+                        let open: Vec<String> =
+                            chain.iter().map(|(segment, is_class)| format!("{} {segment}", if *is_class { "class" } else { "module" })).collect();
+                        writeln!(out, "{}; {}", open.join("; "), vec!["end"; chain.len()].join("; ")).unwrap();
+                    }
+                }
+                // Lazily, as Ruby does: the constant's first read loads
+                // the program of the file it names.
+                crate::app::ProgramItem::Autoload { span, owner, name, feature } => match resolve(&from, feature, false) {
+                    Some(target) if programs.contains_key(&target) => {
+                        edges.entry(from.clone()).or_default().push(target.clone());
+                        writeln!(out, "{owner}.autoload(:{name}, RoundhouseAutoload.path({:?}))", anchor_of(&target)).unwrap();
+                    }
+                    _ if is_framework_feature(feature) => {
+                        writeln!(out, "# {}: `autoload :{name}, {feature:?}` is a Rails feature this tree's runtime ports answer", site(*span)).unwrap();
+                    }
+                    _ => {
+                        writeln!(out, "{owner}.autoload(:{name}, {feature:?})").unwrap();
+                    }
+                },
                 crate::app::ProgramItem::NotCarried { span, message } => {
                     let text = format!("roundhouse: error[file_statement_unsupported]: {}: {message}", site(*span));
                     report_program_error(*span, "file_statement_unsupported", &text);
                     writeln!(out, "$stderr.puts {text:?}").unwrap();
                 }
             }
+        }
+        let body = std::mem::take(&mut out);
+        out = header;
+        if names.is_empty() {
+            out.push_str(&body);
+        } else {
+            writeln!(out, "RoundhouseAutoload.entering({:?}, {names:?}) do", anchor_of(&program.source)).unwrap();
+            for line in body.lines() {
+                if line.is_empty() {
+                    out.push('\n');
+                } else {
+                    writeln!(out, "  {line}").unwrap();
+                }
+            }
+            out.push_str("end\n");
         }
         files.push((format!("app/{}.rb", anchor_of(&program.source)), out));
     }
@@ -4602,6 +4666,32 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         "  ].freeze\n\n\
          \x20 def self.path(anchor)\n\
          \x20   File.join(ROOT, anchor)\n\
+         \x20 end\n\n\
+         \x20 # A program an autoload names, starting to load by any route (a\n\
+         \x20 # plain require too): the constants whose autoloads point at it\n\
+         \x20 # lose them, so defining or reopening them does not run it again,\n\
+         \x20 # as Ruby treats the file it is loading.\n\
+         \x20 # The program's body is the block. When it raises, each autoload\n\
+         \x20 # it dropped comes back, as Ruby keeps a constant's autoload when\n\
+         \x20 # its file raises: the next read loads the file again.\n\
+         \x20 def self.entering(anchor, names)\n\
+         \x20   removed = []\n\
+         \x20   names.each do |cpath|\n\
+         \x20     *outer, name = cpath.split(\"::\")\n\
+         \x20     scope = outer.inject(Object) { |s, n| s&.const_defined?(n, false) ? s.const_get(n, false) : nil }\n\
+         \x20     # An autoload whose file is loading: listed, but not defined\n\
+         \x20     # (`autoload?` answers nil while its feature loads).\n\
+         \x20     next unless scope.is_a?(Module) && scope.constants(false).include?(name.to_sym) && !scope.const_defined?(name, false)\n\
+         \x20     scope.send(:remove_const, name)\n\
+         \x20     removed << [scope, name]\n\
+         \x20   end\n\
+         \x20   yield\n\
+         \x20 rescue Exception\n\
+         \x20   removed.each do |scope, name|\n\
+         \x20     scope.send(:remove_const, name) if scope.const_defined?(name, false)\n\
+         \x20     scope.autoload(name, path(anchor))\n\
+         \x20   end\n\
+         \x20   raise\n\
          \x20 end\n\n\
          \x20 # A gem file's require of another. One still loading is Ruby's\n\
          \x20 # circular require: a no-op answering false (and a warning, which\n\
@@ -4643,7 +4733,104 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
             writeln!(boot, "RoundhouseAutoload.require_gem_file({:?})", anchor_of(&entry)).unwrap();
         }
     }
+    // A declaration file's load-time require of a constant under an
+    // autoloaded namespace loads that namespace's program, as reading the
+    // constant does natively (`Track::None` from `Options` runs track.rb,
+    // which loads base, none and status in its order), not the constant's
+    // own declarations, whose `module Track` line would run the autoload
+    // from inside a file it loads.
+    if !autoloaded.is_empty() {
+        let mut anchors: crate::det::HashMap<String, Vec<&str>> = Default::default();
+        for lc in &app.library_classes {
+            anchors.entry(crate::emit::ruby::library_file_anchor(lc.name.0.as_str(), app)).or_default().push(lc.name.0.as_str());
+        }
+        let through = |anchor: &str| -> Option<String> {
+            let names = anchors.get(anchor)?;
+            names
+                .iter()
+                .filter_map(|name| {
+                    autoloaded
+                        .iter()
+                        .filter(|(constant, _)| *name == constant || name.starts_with(&format!("{constant}::")))
+                        .max_by_key(|(constant, _)| constant.len())
+                })
+                .max_by_key(|(constant, _)| constant.len())
+                .map(|(_, target)| anchor_of(target))
+        };
+        for (path, content) in files.iter_mut() {
+            let Some(rel) = path.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")) else { continue };
+            if !rel.starts_with("models/") || rel.starts_with("models/roundhouse_files/") {
+                continue;
+            }
+            let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            let mut changed = false;
+            let lines: Vec<String> = content
+                .lines()
+                .map(|line| {
+                    let target = line
+                        .strip_prefix("require_relative \"")
+                        .and_then(|l| l.strip_suffix('"'))
+                        .map(|r| normalize_source(&format!("{dir}/{r}")));
+                    match target.as_deref().and_then(through) {
+                        Some(program) => {
+                            changed = true;
+                            format!("RoundhouseAutoload.require_gem_file({program:?})")
+                        }
+                        None => line.to_string(),
+                    }
+                })
+                .collect();
+            if changed {
+                *content = lines.join("\n") + "\n";
+            }
+        }
+    }
+    // A file of the gem's declarations alone loads where the gem's own
+    // requires and autoloads reach it, as natively, not with the app's
+    // files: a gem file nothing requires defines nothing.
+    let gem_names: crate::det::HashSet<&str> = app
+        .file_programs
+        .iter()
+        .flat_map(|p| p.items.iter())
+        .filter_map(|item| match item {
+            crate::app::ProgramItem::Declared(names) => Some(names.iter().map(|n| n.0.as_str())),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    // Only for a gem whose programs the boot reaches: one nothing loads
+    // at boot keeps its declarations among the app's files, as before.
+    let booted_libs: Vec<String> = reached
+        .iter()
+        .filter_map(|source| source.rfind("/lib/").map(|at| source[..at + 5].to_string()))
+        .collect();
+    let gem_names: crate::det::HashSet<&str> = app
+        .file_programs
+        .iter()
+        .filter(|p| booted_libs.iter().any(|lib| normalize_source(&p.source).starts_with(lib.as_str())))
+        .flat_map(|p| p.items.iter())
+        .filter_map(|item| match item {
+            crate::app::ProgramItem::Declared(names) => Some(names.iter().map(|n| n.0.as_str())),
+            _ => None,
+        })
+        .flatten()
+        .filter(|name| gem_names.contains(name))
+        .collect();
+    let mut by_anchor: crate::det::HashMap<String, bool> = Default::default();
+    for lc in &app.library_classes {
+        let gem = gem_names.contains(lc.name.0.as_str());
+        let entry = by_anchor.entry(crate::emit::ruby::library_file_anchor(lc.name.0.as_str(), app)).or_insert(true);
+        *entry &= gem;
+    }
     if let Some((_, models)) = files.iter_mut().find(|(p, _)| p == "app/models.rb") {
+        let kept: Vec<&str> = models
+            .lines()
+            .filter(|line| {
+                let anchor = line.strip_prefix("require_relative \"").and_then(|l| l.strip_suffix('"'));
+                !anchor.is_some_and(|a| by_anchor.get(a).copied().unwrap_or(false))
+            })
+            .collect();
+        *models = kept.join("\n") + "\n";
         // Bundler.require runs in config/application.rb, before any app
         // file loads: the gems' entry programs come first.
         let heading = if boot.is_empty() { "" } else { "# Bundler.require: the gems' entry files.\n" };

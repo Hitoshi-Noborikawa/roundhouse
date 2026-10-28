@@ -94,9 +94,11 @@ pub struct App {
     /// Bundler requires its gem.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_programs: Vec<FileProgram>,
-    /// The gem-source files `Bundler.require` loads at boot, in Gemfile
-    /// order: each PATH or source gem's entry file
-    /// (`lib/<name>.rb`, or what the Gemfile's `require:` names).
+    /// The gem-source files the boot loads, in load order: a literal
+    /// `require` in config/boot.rb, application.rb or environment.rb,
+    /// and `Bundler.require`'s entry file of each PATH or source gem
+    /// (`lib/<name>.rb`, or what the Gemfile's `require:` names); then
+    /// the gem files an app support file requires, as it loads at boot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boot_gem_entries: Vec<String>,
     pub controllers: Vec<Controller>,
@@ -1323,6 +1325,16 @@ pub enum ProgramItem {
     /// `require "feature"` / `require_relative "path"`, resolved against
     /// the tree when emitted.
     Require { span: crate::span::Span, feature: String, relative: bool },
+    /// Modules the file opens that this file's emitted declarations do
+    /// not (a namespace that holds only autoloads, or nested modules),
+    /// each as its nesting is written: `(segment, is_class)` from the
+    /// outermost (`module Ak; class Client; module Schema`). Opened here,
+    /// so the constant exists as the source's lines make it.
+    Opened(Vec<Vec<(String, bool)>>),
+    /// `autoload :Name, "feature"` in `owner`'s body (`Object` at the
+    /// top level): Ruby loads the file the first time `owner::Name` is
+    /// read.
+    Autoload { span: crate::span::Span, owner: String, name: String, feature: String },
     /// A statement the ingest cannot carry, reported as
     /// `file_statement_unsupported` and named when the file loads.
     NotCarried { span: crate::span::Span, message: String },
