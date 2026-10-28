@@ -21,14 +21,21 @@ module ActiveRecord
     # users/show rendered its own-profile "Send a Message" subnav for
     # everyone. `eql?`/`hash` follow AR core so Hash/Set membership
     # agrees with `==`.
+    #
+    # AR core guards on `!id.nil?`, but an unsaved record's `id` is 0 here
+    # (roundhouse#1478), so that guard let any two new records of a class
+    # be equal and hash alike: `[a, b].uniq` kept one. The guard is "this
+    # record was saved" instead. That's `persisted?`, or `destroyed?`: a
+    # destroyed record keeps its id, and Rails keeps it equal to a load of
+    # its row.
     def ==(other)
       super ||
-        (other.instance_of?(self.class) && !id.nil? && other.id == id)
+        (other.instance_of?(self.class) && (persisted? || destroyed?) && other.id == id)
     end
     alias eql? ==
 
     def hash
-      id.nil? ? super : [self.class, id].hash
+      persisted? || destroyed? ? [self.class, id].hash : super
     end
   end
 end
