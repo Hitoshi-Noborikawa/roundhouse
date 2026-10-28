@@ -18293,6 +18293,43 @@ raise "inserted rows: #{rows.inspect}" unless rows == [[7]]
         .assert_passes();
 }
 
+#[test]
+fn a_primary_key_added_by_a_later_migration_persists_updates() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write(
+            "db/migrate/20260101000000_create_widgets.rb",
+            "class CreateWidgets < ActiveRecord::Migration[8.1]\n  def change\n    create_table :widgets, id: false do |t|\n      t.integer :value\n    end\n  end\nend\n",
+        )
+        .write(
+            "db/migrate/20260102000000_add_widget_id.rb",
+            "class AddWidgetId < ActiveRecord::Migration[8.1]\n  def change\n    add_column :widgets, :id, :integer, primary_key: true\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"# Attach to the existing table produced by Rails 8.1.4's migrations.
+Db.exec("DROP TABLE widgets")
+Db.exec('CREATE TABLE "widgets" ("value" integer, "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL)')
+widget = Widget.new(value: 7)
+raise "insert failed" unless widget.save && widget.persisted?
+widget.value = 8
+raise "update failed" unless widget.save
+rows = Widget.connection.select_rows("SELECT value, id FROM widgets")
+raise "update was lost: #{rows.inspect}" unless rows == [[8, 1]]
+raise "primary key" unless Widget.primary_key == "id" && widget.id == 1
+"#,
+        )
+        .assert_passes();
+}
+
 /// A runtime façade's scalar constants (`Markly::SMART = 0` in
 /// runtime/ruby/gem_facades.rb) used to carry no type: the constant table
 /// typed Hash/Array/`.new` values only, so after the Rubydex integration an

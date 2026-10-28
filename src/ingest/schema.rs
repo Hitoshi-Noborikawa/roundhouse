@@ -239,9 +239,10 @@ fn apply_migration_verb(
     // `remove_column(:idx, :"col_#{n}")` in an `each` loop
     // kept the dropped columns.
     let named = match verb {
-        "drop_table" | "add_timestamps" => 1,
+        "drop_table" | "add_timestamps" | "remove_primary_key" => 1,
         "rename_table" | "remove_column" | "change_column_null" | "change_column_default"
-        | "add_reference" | "add_belongs_to" | "remove_reference" | "remove_belongs_to" => 2,
+        | "add_reference" | "add_belongs_to" | "remove_reference" | "remove_belongs_to"
+        | "add_primary_key" => 2,
         "add_column" | "change_column" | "rename_column" => 3,
         _ => 0,
     };
@@ -371,6 +372,19 @@ fn apply_migration_verb(
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
                     table.columns.retain(|x| x.name != col.name);
                     table.columns.push(col);
+                }
+            }
+        }
+        "add_primary_key" | "remove_primary_key" => {
+            if let Some(t) = arg_name(0) {
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                    for col in &mut table.columns {
+                        if verb == "remove_primary_key" {
+                            col.primary_key = false;
+                        } else if arg_name(1).as_deref() == Some(col.name.as_str()) {
+                            col.primary_key = true;
+                        }
+                    }
                 }
             }
         }
@@ -1272,6 +1286,7 @@ fn reference_column(name: &str) -> Column {
 #[derive(Default)]
 struct ColumnOpts {
     nullable: Option<bool>,
+    primary_key: bool,
     default: Option<String>,
     json_default: Option<String>,
     limit: Option<u32>,
@@ -1349,6 +1364,7 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
             let value = &assoc.value();
             match key.as_str() {
                 "null" => opts.nullable = bool_value(value),
+                "primary_key" => opts.primary_key = bool_value(value).unwrap_or(false),
                 "default" => {
                     opts.default = default_value(value);
                     opts.json_default = json_default_value(value);
@@ -1572,7 +1588,7 @@ fn column_with_type(
         // `t.column :island, :smallint` passes through; structure.sql's
         // `smallint` reads alike.
         "integer" | "smallint" => ColumnType::Integer,
-        "bigint" => ColumnType::BigInt,
+        "bigint" | "primary_key" => ColumnType::BigInt,
         "float" => ColumnType::Float,
         "decimal" | "numeric" => ColumnType::Decimal { precision: None, scale: None },
         "string" | "inet" | "cidr" | "macaddr" | "enum" => ColumnType::String { limit: opts.limit },
@@ -1626,10 +1642,11 @@ fn column_with_type(
         None
     };
 
+    let primary_key = opts.primary_key || type_name == "primary_key";
     Ok(Column {
         name: Symbol::from(col_name),
         col_type,
-        nullable: opts.nullable.unwrap_or(true),
+        nullable: opts.nullable.unwrap_or(!primary_key),
         // An array column's `default: []` is kept as `[]`; a target that
         // stores the Array reads it (`Column::stored_default`).
         default: if opts.array && opts.empty_array_default {
@@ -1639,7 +1656,7 @@ fn column_with_type(
         } else {
             opts.default.clone()
         },
-        primary_key: false,
+        primary_key,
         generated: None,
         generated_text_compatible,
         generated_int4_compatible,
@@ -1727,7 +1744,12 @@ fn column_from_call(
         let opts = parse_column_opts(args.iter().skip(2));
         return column_with_type(&type_name, col_name, &opts, table, file).map(Some);
     }
-    let opts = parse_column_opts(args.iter().skip(1));
+    let mut opts = parse_column_opts(args.iter().skip(1));
+    if col_type_name == "primary_key" {
+        opts.primary_key = true;
+        let type_name = args.get(1).and_then(name_value).unwrap_or_else(|| "primary_key".into());
+        return column_with_type(&type_name, col_name, &opts, table, file).map(Some);
+    }
     column_with_type(&col_type_name, col_name, &opts, table, file).map(Some)
 }
 
