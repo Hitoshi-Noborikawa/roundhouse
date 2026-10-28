@@ -127,7 +127,7 @@ pub const LANES: &[Lane] = &[
         ],
         include_env: Some(("SPINEL_PG_DIR", "a spinel-pg checkout")),
         lane_file: Some("tests/db_contract/db_pg_lane.rb"),
-        lane_checks: 104,
+        lane_checks: 118,
     },
     Lane {
         name: "db_pg_cruby",
@@ -144,7 +144,7 @@ pub const LANES: &[Lane] = &[
         rbs: &[],
         include_env: None,
         lane_file: Some("tests/db_contract/db_pg_lane.rb"),
-        lane_checks: 104,
+        lane_checks: 118,
     },
 ];
 

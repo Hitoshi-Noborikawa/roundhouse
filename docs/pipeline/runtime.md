@@ -109,8 +109,10 @@ in `src/project.rs`. Shape notes worth knowing:
   - The pool is sharded per thread, as `runtime/spinel/db.rb`'s is.
     `Db.prepare` runs through a named statement cached per connection
     (at most 128, closed on the server when evicted); finalizing a read
-    releases its handle and keeps the statement. There is no request
-    query cache yet.
+    releases its handle and keeps the statement. The request query
+    cache follows `db.rb`'s rules (see "The query cache replays results
+    of at most 16 rows" below); SQL with a `$` placeholder never takes
+    part, since its rows depend on binds the key does not carry.
   - The SQLite-only boot hooks (read snapshot, checkpointer) do
     nothing there, and `seed_from_file` raises.
 
@@ -1300,7 +1302,8 @@ to that).
 
 Rails' per-request query cache keeps every SELECT's result and replays
 an identical SELECT from it. The three ruby-family Db shims keep the
-same discipline with one bound: a result that grows past
+same discipline with one bound (so does `db_pg.rb`, the PostgreSQL
+shim): a result that grows past
 `QC_CAPTURE_ROWS` (16) is not kept, and an identical SELECT later in the
 same request runs again rather than replaying. The lookups a page
 repeats — campfire's `Account.first` 22 times on a room page, a

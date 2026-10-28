@@ -241,20 +241,22 @@ def own_18(s, schema)
   check("read_snapshot_begin no-op", Db.read_snapshot_begin)
   check("read_snapshot_end no-op", Db.read_snapshot_end)
   check("checkpoint no-op", Db.checkpoint_in_background!.nil?)
-  check("query_cache_begin no-op", Db.query_cache_begin.nil?)
-  check("query_cache_end no-op", Db.query_cache_end.nil?)
   check_raises("seed_from_file refused", "pg_restore") { Db.seed_from_file("widgets.sqlite3") }
   check("sql_trace off", !Db.sql_trace?)
   nil
 end
 
 # Named statements this session holds on the server. Read through the
-# unnamed statement, which pg_prepared_statements does not list.
+# unnamed statement, which pg_prepared_statements does not list, and
+# around the request query cache, which would replay the first count.
 def server_named
+  cached = Db.query_cache_enabled?
+  Db.query_cache_end if cached
   h = Db.prepare_uncached("SELECT count(*) FROM pg_prepared_statements WHERE name LIKE 'rh_s%'")
   Db.step?(h)
   n = Db.column_int(h, 0)
   Db.finalize(h)
+  Db.query_cache_begin if cached
   n
 end
 
@@ -413,6 +415,61 @@ def own_23(s, schema)
   nil
 end
 
+# Rows of a one-column read, joined, and how many round trips it took.
+def qc_read(sql)
+  got = ""
+  log = Db.capture_sql do
+    h = Db.prepare(sql)
+    while Db.step?(h)
+      got = got + Db.column_text(h, 0) + ","
+    end
+    Db.finalize(h)
+  end
+  got + log.length.to_s
+end
+
+def own_19(s, schema)
+  # ── The request query cache ──
+  Db.exec("CREATE TABLE " + s + "cached (id bigserial PRIMARY KEY, name text)")
+  Db.exec("INSERT INTO " + s + "cached (name) VALUES ('one'), ('two')")
+  read = "SELECT name FROM " + s + "cached ORDER BY id"
+  check("off outside a lease", !Db.query_cache_enabled?)
+  check("query_cache_begin answers nil", Db.query_cache_begin.nil?)
+  check("on after query_cache_begin", Db.query_cache_enabled?)
+  check("a first read is a round trip", qc_read(read) == "one,two,1")
+  check("an identical read replays, no round trip", qc_read(read) == "one,two,0")
+  h = Db.prepare_uncached(read)
+  check("an uncached prepare replays too", Db.step?(h) && Db.column_text(h, 0) == "one")
+  Db.finalize(h)
+  Db.exec("INSERT INTO " + s + "cached (name) VALUES ('three')")
+  check("a write empties it", qc_read(read) == "one,two,three,1")
+  check("and the next read is kept again", qc_read(read) == "one,two,three,0")
+  # Bound values are not in the key, so a `$` read always runs.
+  bound = "SELECT name FROM " + s + "cached WHERE id = $1"
+  n = 0
+  while n < 2
+    log = Db.capture_sql do
+      h = Db.prepare(bound)
+      Db.bind_int(h, 1, n + 1)
+      Db.step?(h)
+      Db.finalize(h)
+    end
+    check_int("a bound read runs", 1, log.length)
+    n += 1
+  end
+  check("query_cache_end answers nil", Db.query_cache_end.nil?)
+  check("off after query_cache_end", !Db.query_cache_enabled?)
+  check("and every read is a round trip again", qc_read(read) == "one,two,three,1")
+  # A lease brackets the cache, as Rails wraps every request in it.
+  Db.with_connection do
+    check("on inside a lease", Db.query_cache_enabled?)
+    qc_read(read)
+    check("a lease replays", qc_read(read) == "one,two,three,0")
+  end
+  check("off after the lease", !Db.query_cache_enabled?)
+  nil
+end
+
 def lane_cases(url, schema)
   own = schema + "_own"
   s = own + "."
@@ -426,6 +483,7 @@ def lane_cases(url, schema)
   own_13(s, own)
   own_16(s, own)
   own_18(s, own)
+  own_19(s, own)
   own_20(s, own)
   own_21(s, own)
   own_22(s, own)
