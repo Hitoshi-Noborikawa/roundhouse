@@ -6,6 +6,9 @@
 //!   constant-driven bundled requires cannot see it. A terminal channel
 //!   resizes its pty with it.
 //! - `Rails::VERSION`, as the app's locked Rails answers it.
+//! - The load order of a reopen against the constants computed from it:
+//!   `config/importmap.rb` loads before any file that hoists a constant
+//!   out of `Importmap`.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
@@ -138,5 +141,69 @@ fn boot_requires_only_the_library_files_ingest_loads() {
         let boot = std::fs::read_to_string(emitted.join("boot.rb")).expect("read boot.rb");
         assert!(boot.lines().any(|line| line == "require \"open3\""), "{target:?}:\n{boot}");
         assert!(!boot.lines().any(|line| line == "require \"io/console\""), "{target:?}:\n{boot}");
+    }
+}
+
+/// Every file in `boot.rb`'s static `require_relative` graph, in the
+/// order its body finishes loading: post-order, a file entered once, as
+/// Ruby (and spinel's static resolver) load it.
+fn load_order(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn visit(file: &std::path::Path, seen: &mut std::collections::HashSet<std::path::PathBuf>, out: &mut Vec<std::path::PathBuf>) {
+        if !seen.insert(file.to_path_buf()) {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(file) else { return };
+        for line in text.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("require_relative \"") else { continue };
+            let Some(rel) = rest.split('"').next() else { continue };
+            let target = file.parent().unwrap().join(format!("{rel}.rb"));
+            let target = std::fs::canonicalize(&target).unwrap_or(target);
+            visit(&target, seen, out);
+        }
+        out.push(file.to_path_buf());
+    }
+    let mut out = Vec::new();
+    let boot = std::fs::canonicalize(root.join("boot.rb")).expect("boot.rb");
+    visit(&boot, &mut std::collections::HashSet::new(), &mut out);
+    out
+}
+
+/// A view hoists `javascript_importmap_tags(Importmap.pins, Importmap.entry)`
+/// into a load-time constant, so `config/importmap.rb` (the app's reopen of
+/// the runtime fallback, whose `pins` is `[]`) has to have loaded first.
+/// On the spinel tree `config/routes` requires the controllers, which reach
+/// the layout; required ahead of `config/importmap`, the constant held the
+/// fallback's Turbo-only importmap once spinel bound a call to the method
+/// in effect where it runs, as CRuby does (rubys/roundhouse#1477).
+#[test]
+fn the_importmap_reopen_loads_before_a_constant_computed_from_it() {
+    for target in [BuildTarget::Spinel, BuildTarget::Ruby] {
+        let (emitted, errors) = emit_and_run::real_blog().emit(target);
+        assert!(errors.is_empty(), "{target:?} errors: {errors:?}");
+        let root = std::fs::canonicalize(&*emitted).expect("emitted root");
+        let order = load_order(&root);
+        let position = |rel: &str| order.iter().position(|p| p == &root.join(rel));
+        let reopen = position("config/importmap.rb")
+            .unwrap_or_else(|| panic!("{target:?}: config/importmap.rb is not in boot.rb's require graph"));
+        let mut readers = 0;
+        for (index, file) in order.iter().enumerate() {
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            let hoists = text.lines().any(|line| {
+                let line = line.trim_start();
+                line.split_once(" = ").is_some_and(|(name, value)| {
+                    name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                        && value.contains("Importmap.")
+                })
+            });
+            if hoists {
+                readers += 1;
+                assert!(
+                    reopen < index,
+                    "{target:?}: {} computes a constant from Importmap before config/importmap.rb loads",
+                    file.strip_prefix(&root).unwrap_or(file).display()
+                );
+            }
+        }
+        assert!(readers > 0, "{target:?}: the blog layout no longer hoists its importmap tags; this test checks nothing");
     }
 }
