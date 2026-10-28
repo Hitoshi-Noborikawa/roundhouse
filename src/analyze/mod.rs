@@ -8576,6 +8576,12 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
     let mut tys: Vec<Ty> = Vec::new();
     let mut saw_return = false;
     collect_return_types(body, &mut tys, &mut saw_return);
+    // Not the known arms alone: parslet's `Atoms::Base#apply` returns an
+    // unknown `result` beside `context.err_at(...)`, and harvesting only
+    // the latter typed every parse result as a `Parslet::Cause`.
+    if returns_an_unknown(body) {
+        return Some(crate::analyze::body::unknown());
+    }
     // Tail (implicit return). Drop `Bottom` so an all-diverging tail
     // doesn't poison the union; keep everything else.
     if let Some(t) = &body.ty {
@@ -8607,6 +8613,29 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
         return body.ty.clone();
     }
     Some(crate::analyze::body::union_many(tys))
+}
+
+fn returns_an_unknown(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Return { value } => matches!(value.ty, Some(Ty::Var { .. })) || returns_an_unknown(value),
+        ExprNode::Lambda { .. } => false,
+        ExprNode::Send { recv, args, block, method, .. } => {
+            recv.as_ref().is_some_and(returns_an_unknown)
+                || args.iter().any(returns_an_unknown)
+                || (!matches!(method.as_str(), "lambda" | "define_method")
+                    && block.as_ref().is_some_and(|b| matches!(&*b.node, ExprNode::Lambda { body, .. } if returns_an_unknown(body))))
+        }
+        ExprNode::Apply { fun, args, block } => {
+            returns_an_unknown(fun)
+                || args.iter().any(returns_an_unknown)
+                || block.as_ref().is_some_and(|b| matches!(&*b.node, ExprNode::Lambda { body, .. } if returns_an_unknown(body)))
+        }
+        _ => {
+            let mut found = false;
+            expr.node.for_each_child(&mut |c| found |= returns_an_unknown(c));
+            found
+        }
+    }
 }
 
 /// Collect the value type of every `return X` reachable from `expr`

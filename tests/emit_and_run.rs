@@ -20012,3 +20012,6 @@ mod fresh_builtin_extend;
 
 #[path = "emit_and_run/module_function_includer.rs"]
 mod module_function_includer;
+
+#[path = "emit_and_run/unknown_return.rs"]
+mod unknown_return;
