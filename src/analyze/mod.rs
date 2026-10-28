@@ -2973,6 +2973,8 @@ impl Analyzer {
         // `application` per Rails convention. `LayoutDecl::None`
         // (an explicit `layout false`) suppresses the contribution.
         let mut layout_ivars_by_view: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::default();
+        // Per layout: the rendering actions that feed it, and how many of them assign each ivar.
+        let mut layout_presence: HashMap<Symbol, (usize, HashMap<Symbol, usize>)> = HashMap::default();
 
         // Each controller's controller-wide ivar environment, kept so
         // the CONCERN MODULES it includes can be typed against it
@@ -3542,6 +3544,13 @@ impl Analyzer {
                         .entry(layout_name.clone())
                         .or_default()
                         .insert(ctrl_name.clone());
+                    if view_name_for_action(&ctrl_name, action).is_some() {
+                        let (rendering, assigning) = layout_presence.entry(layout_name.clone()).or_default();
+                        *rendering += 1;
+                        for k in ivars.keys() {
+                            *assigning.entry(k.clone()).or_default() += 1;
+                        }
+                    }
                     let layout_map = layout_ivars_by_view
                         .entry(layout_name.clone())
                         .or_default();
@@ -4220,6 +4229,16 @@ impl Analyzer {
             }
         }
         drop(_typing_library);
+
+        // Not the assigning actions' types alone: only UsersController sets lobsters' `@title_class`, and every other page rendered its nil as a `Symbol` (`class="x"`).
+        for (layout, (rendering, assigning)) in &layout_presence {
+            let Some(map) = layout_ivars_by_view.get_mut(layout) else { continue };
+            for (k, ty) in map.iter_mut() {
+                if assigning.get(k).copied().unwrap_or(0) < *rendering && !ty.is_unknown() {
+                    *ty = crate::analyze::body::union_of(ty.clone(), Ty::Nil);
+                }
+            }
+        }
 
         // Hand the channel to the views half. Every production pass
         // refreshes it, so the pass that stamps templates reads the
