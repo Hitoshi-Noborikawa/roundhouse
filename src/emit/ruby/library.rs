@@ -8088,6 +8088,13 @@ fn emit_library_class_decl_inner(
         if !load_time && !load_time_bodies && anchor.starts_with("app/models/") {
             return None;
         }
+        // A view never requires the aggregator that loads it: views load
+        // only through app/views.rb, so the require would come while that
+        // file is still loading, a circular require that loads nothing
+        // and warns under $VERBOSE.
+        if anchor == "app/views" && self_anchor.starts_with("app/views/") {
+            return None;
+        }
         (anchor != self_anchor).then(|| relpath(&out_dir, &anchor))
     };
     let resolve_all = |e: &Expr, load_time: bool| -> BTreeSet<String> {
