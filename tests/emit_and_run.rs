@@ -20015,3 +20015,6 @@ mod module_function_includer;
 
 #[path = "emit_and_run/unknown_return.rs"]
 mod unknown_return;
+
+#[path = "emit_and_run/hash_ivar_symbol_keys.rs"]
+mod hash_ivar_symbol_keys;

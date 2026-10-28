@@ -8861,16 +8861,23 @@ pub(crate) fn extract_ivar_assignments_in(
     // write that comes before the `{}` seed (or before the class
     // instance that owns `[]=`) gives the same slot as one after it
     // (#617).
-    let mut index_writes: std::collections::BTreeMap<Symbol, Ty> = std::collections::BTreeMap::new();
-    for (name, value) in walk.index_writes {
+    let mut index_writes: std::collections::BTreeMap<Symbol, (Option<Ty>, Ty)> = std::collections::BTreeMap::new();
+    for (name, key, value) in walk.index_writes {
+        let key = key.filter(|k| !matches!(k, Ty::Var { .. } | Ty::Untyped | Ty::Bottom));
         let joined = match index_writes.remove(&name) {
-            Some(prev) => crate::analyze::body::union_of(prev, value),
-            None => value,
+            Some((prev_key, prev)) => (
+                match (prev_key, key) {
+                    (Some(a), Some(b)) => Some(crate::analyze::body::union_of(a, b)),
+                    _ => None,
+                },
+                crate::analyze::body::union_of(prev, value),
+            ),
+            None => (key, value),
         };
         index_writes.insert(name, joined);
     }
-    for (name, value) in index_writes {
-        widen_hash_ivar_value(out, &name, value);
+    for (name, (key, value)) in index_writes {
+        widen_hash_ivar_value(out, &name, key, value);
         walk.touched.insert(name);
     }
     // The size bound applies once to each slot the walk wrote, after
@@ -8889,8 +8896,8 @@ pub(crate) fn extract_ivar_assignments_in(
 struct IvarWalk {
     /// Ivars the walk assigned, bounded once at the end.
     touched: BTreeSet<Symbol>,
-    /// `@ivar[k] = v` value types, joined into their slots at the end.
-    index_writes: Vec<(Symbol, Ty)>,
+    /// `@ivar[k] = v` key and value types, joined into their slots at the end.
+    index_writes: Vec<(Symbol, Option<Ty>, Ty)>,
 }
 
 fn walk_ivar_assignments(
@@ -8960,7 +8967,7 @@ fn walk_ivar_assignments(
         | ExprNode::OpAssign { target: LValue::Index { recv, index }, value, .. } => {
             if let ExprNode::Ivar { name } = &*recv.node {
                 if let Some(v_ty) = &value.ty {
-                    walk.index_writes.push((name.clone(), v_ty.clone()));
+                    walk.index_writes.push((name.clone(), index.ty.clone(), v_ty.clone()));
                 }
             }
             walk_ivar_assignments(recv, out, env, walk);
@@ -8978,7 +8985,7 @@ fn walk_ivar_assignments(
         {
             if let ExprNode::Ivar { name } = &*recv.node {
                 if let Some(v_ty) = &args[1].ty {
-                    walk.index_writes.push((name.clone(), v_ty.clone()));
+                    walk.index_writes.push((name.clone(), args[0].ty.clone(), v_ty.clone()));
                 }
             }
             walk_ivar_assignments(recv, out, env, walk);
@@ -9097,11 +9104,11 @@ fn walk_ivar_assignments(
 /// Foo.new`), is left alone: that class's own `[]=` runs, and the
 /// widening exists to grow empty-Hash-literal types, not to retype
 /// class instances.
-fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, incoming: Ty) {
+fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, written_key: Option<Ty>, incoming: Ty) {
+    // Not `Str` whatever the key: `@tags = {}; @tags[:lines] = n` typed `Hash[String, _]` and the emit rewrote `:lines` to `"lines"`.
+    let fallback = || std::sync::Arc::new(written_key.clone().unwrap_or(Ty::Str));
     let Some(existing) = out.get(name) else {
-        // No prior entry — seed a fresh Hash[Str, incoming]. Matches
-        // the Crystal collector's "fresh entry" branch.
-        out.insert(name.clone(), Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(incoming) });
+        out.insert(name.clone(), Ty::Hash { key: fallback(), value: std::sync::Arc::new(incoming) });
         return;
     };
     let arms: &[Ty] = match existing {
@@ -9109,9 +9116,12 @@ fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, incoming:
         other => std::slice::from_ref(other),
     };
     let key = match arms.iter().find(|v| matches!(v, Ty::Hash { .. })) {
-        Some(Ty::Hash { key, .. }) if !matches!(**key, Ty::Var { .. }) => key.clone(),
-        Some(_) => std::sync::Arc::new(Ty::Str),
-        None if arms.iter().all(|v| matches!(v, Ty::Nil | Ty::Var { .. })) => std::sync::Arc::new(Ty::Str),
+        Some(Ty::Hash { key, .. }) if !matches!(**key, Ty::Var { .. }) => match &written_key {
+            Some(w) => std::sync::Arc::new(crate::analyze::body::union_of((**key).clone(), w.clone())),
+            None => key.clone(),
+        },
+        Some(_) => fallback(),
+        None if arms.iter().all(|v| matches!(v, Ty::Nil | Ty::Var { .. })) => fallback(),
         None => return,
     };
     let write = Ty::Hash { key, value: std::sync::Arc::new(incoming) };
