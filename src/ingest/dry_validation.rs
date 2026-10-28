@@ -499,6 +499,12 @@ fn read_contract(
         let ExprNode::Send { recv, method, args, block, .. } = &*call.node else {
             return Err("a non-declaration expression in the class body".into());
         };
+        // A call on a constant (`Dry::Validation.load_extensions(:monads)`)
+        // is configuration the class body runs, not a declaration; the
+        // walk captures it for the replay, and it is no part of this.
+        if recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. })) {
+            continue;
+        }
         if recv.is_some() {
             return Err(format!("`{}` with a receiver in the class body", method.as_str()));
         }
