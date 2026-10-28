@@ -52,6 +52,9 @@ fn checkout(name: &str, version: &str, others: &[&str]) -> PathBuf {
         .unwrap();
     }
     std::fs::create_dir_all(root.join("activesupport/lib/active_support")).unwrap();
+    // `require` records the file's real path, so `__FILE__` is compared
+    // against the checkout's real path: macOS's temp dir sits under the
+    // `/var` -> `/private/var` symlink.
     std::fs::write(root.join("activesupport/lib/active_support/oracle_probe.rb"), "ORACLE_PROBE = __FILE__\n").unwrap();
     root
 }
@@ -117,7 +120,7 @@ fn a_checkout_supplies_the_components_even_beside_a_newer_release() {
 RailsOracle.activate("activesupport")
 require "active_support/oracle_probe"
 puts Gem.loaded_specs.fetch("activesupport").version
-puts ORACLE_PROBE.start_with?(File.expand_path(RailsOracle.source))
+puts ORACLE_PROBE.start_with?(File.realpath(RailsOracle.source))
 puts RailsOracle.label.start_with?("Rails 8.0.0.alpha (")
 puts RailsOracle.env.empty?"#,
     );
@@ -137,7 +140,7 @@ fn a_checkout_at_an_installed_release_s_version_still_supplies_the_components() 
         Some(root.to_str().unwrap()),
         r#"RailsOracle.activate("activesupport")
 require "active_support/oracle_probe"
-puts ORACLE_PROBE.start_with?(File.expand_path(RailsOracle.source))"#,
+puts ORACLE_PROBE.start_with?(File.realpath(RailsOracle.source))"#,
     );
     remove(&root);
     assert_eq!(stdout_of(&output), "true");
