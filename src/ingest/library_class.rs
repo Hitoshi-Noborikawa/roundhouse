@@ -3082,6 +3082,15 @@ fn walk_decl_body_with_visibility<'pr>(
                 if let Ok(e) = ingest_expr(&stmt, file) {
                     out.unknown_calls.push(e);
                 }
+            } else if call.receiver().is_some_and(|r| r.as_constant_read_node().is_some() || r.as_constant_path_node().is_some()) {
+                // A call on a constant (`Format.register_lazy(:json, …)`
+                // in `module ActKit`): Ruby runs it as the body loads.
+                // Captured like the others; `app_extension_calls` marks
+                // the ones the app's own class answers, and the rest are
+                // reported as dropped rather than lost without a word.
+                if let Ok(e) = ingest_expr(&stmt, file) {
+                    out.unknown_calls.push(e);
+                }
             }
         }
         // Nested class/module declarations also fall through here; they

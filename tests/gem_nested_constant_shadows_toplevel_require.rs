@@ -28,7 +28,6 @@ fn lines(bytes: &[u8]) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_gem_nested_format_does_not_resolve_to_the_apps_toplevel_format() {
     let root = std::env::temp_dir().join(format!("roundhouse-gem-nested-shadow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
