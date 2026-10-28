@@ -21,14 +21,27 @@ module ActiveRecord
     # users/show rendered its own-profile "Send a Message" subnav for
     # everyone. `eql?`/`hash` follow AR core so Hash/Set membership
     # agrees with `==`.
+    #
+    # AR core guards on `!id.nil?`, but an unsaved record's `id` is 0 here
+    # (roundhouse#1478), so that guard let any two new records of a class
+    # be equal and hash alike: `[a, b].uniq` kept one. A record has a key
+    # when it was saved (`persisted?`, or `destroyed?`: a destroyed record
+    # keeps its id) or was given an id that isn't the unsaved one: 0, or
+    # `""` for a string primary key such as a uuid. Both sides need one,
+    # so `==` stays symmetric, as Rails' is for a new record built with an
+    # id (`Article.new(id: 1) == Article.find(1)`).
     def ==(other)
       super ||
-        (other.instance_of?(self.class) && !id.nil? && other.id == id)
+        (other.instance_of?(self.class) && _equality_key? && other._equality_key? && other.id == id)
     end
     alias eql? ==
 
     def hash
-      id.nil? ? super : [self.class, id].hash
+      _equality_key? ? [self.class, id].hash : super
+    end
+
+    def _equality_key?
+      persisted? || destroyed? || !(id.nil? || id == 0 || id == "")
     end
   end
 end
