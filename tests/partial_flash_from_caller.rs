@@ -163,7 +163,7 @@ fn an_explicit_notice_local_wins_over_the_flash() {
 /// its name is how `flash_locals` spells a renamed flash: a render that
 /// omits it leaves it nil, beside the partial's flash.
 #[test]
-fn an_omitted_notice__local_stays_nil() {
+fn an_omitted_notice_underscore_local_stays_nil() {
     shown_after_create(
         "  <%= render \"flash_opt\" %>\n",
         &["<p id=\"opt\">Article was successfully created.|</p>"],
@@ -304,7 +304,7 @@ fn a_partial_an_action_renders_reads_the_flash() {
 
 /// And its `local_assigns[:notice_]` stays nil there too.
 #[test]
-fn an_action_s_partial_leaves_an_omitted_notice__local_nil() {
+fn an_action_s_partial_leaves_an_omitted_notice_underscore_local_nil() {
     rendered_by_an_action("flash_opt", OPT_ERB, "<p id=\"opt\">Rendered now|</p>")
         .run_test(CONTROLLER_TEST)
         .assert_passes();
