@@ -10089,6 +10089,53 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
     }
 }
 
+/// Take out of `runtime/gem_facades.rb` (and its `.rbs`) each top-level
+/// `module X` / `class X` block whose namespace a program file defines
+/// itself: a gem compiled from source (`ingest::auto_source_gems`) is the
+/// real class, and the façade's raising one would be a second definition
+/// of it (spinel refuses two signatures for one method).
+fn drop_facades_the_program_defines(files: &mut [(String, String)]) {
+    let top_name = |line: &str| -> Option<String> {
+        let rest = line.strip_prefix("module ").or_else(|| line.strip_prefix("class "))?;
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        (!name.is_empty()).then_some(name)
+    };
+    let defined: std::collections::BTreeSet<String> = files
+        .iter()
+        .filter(|(p, _)| !p.starts_with("runtime/") && p.ends_with(".rb"))
+        .flat_map(|(_, c)| c.lines().filter_map(top_name).collect::<Vec<_>>())
+        .collect();
+    for (path, content) in files.iter_mut() {
+        if path != "runtime/gem_facades.rb" && path != "runtime/gem_facades.rbs" {
+            continue;
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        let mut keep = vec![true; lines.len()];
+        let mut i = 0;
+        while i < lines.len() {
+            if top_name(lines[i]).is_some_and(|n| defined.contains(&n)) {
+                let mut start = i;
+                // The block's own comment header goes with it.
+                while start > 0 && lines[start - 1].starts_with('#') {
+                    start -= 1;
+                }
+                let end = (i + 1..lines.len()).find(|&j| lines[j] == "end").unwrap_or(lines.len() - 1);
+                keep[start..=end].iter_mut().for_each(|k| *k = false);
+                i = end + 1;
+            } else {
+                i += 1;
+            }
+        }
+        if keep.iter().any(|k| !k) {
+            let mut out: String = lines.iter().zip(&keep).filter(|(_, k)| **k).map(|(l, _)| format!("{l}\n")).collect();
+            if !content.ends_with('\n') {
+                out.pop();
+            }
+            *content = out;
+        }
+    }
+}
+
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
@@ -10612,6 +10659,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         files.retain(|(p, _)| p != "runtime/nokogiri_facade.rbs" && p != "runtime/nokogiri_spinel.rbs");
         apply_spinel_css_select(&mut files);
     }
+
+    // A gem compiled from source (svg-graph's `SVG`) defines what its raising façade stands in for.
+    drop_facades_the_program_defines(&mut files);
 
     // redis: the same swap, for a tree on queue_adapter :sidekiq with a
     // payload job (`needs_redis`, recorded as the registry's `sidekiq?`).

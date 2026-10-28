@@ -378,26 +378,70 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
         lc.unknown_calls = calls.into_iter().enumerate().filter(|(i, _)| !consumed.contains(i)).map(|(_, e)| e).collect();
     }
     // So does an ancestor's (`class Phrases < RuleBase; rule(:word) { … }`), once every call anywhere expanded.
-    // Not counted: the name inside the macro's own body (`define_method(:precedence)` in `def self.precedence`).
-    let own_mentions = |name: &Symbol| -> usize {
+    // Counted on the IR, not the text: a comment that says "precedence" is no call, and neither is an
+    // instance method's own receiverless `precedence`. What is left is a call by name the expansion did
+    // not consume — `Base.precedence(…)`, a class method's `precedence(…)`, or `:precedence` handed to `send`.
+    // A receiver counts when it is a class that has the macro (it or an ancestor defines it), not `Rails.root`.
+    let owners = |name: &Symbol| -> HashSet<String> {
+        let defining: Vec<&ClassId> = app
+            .library_classes
+            .iter()
+            .filter(|lc| lc.methods.iter().any(|m| m.receiver == MethodReceiver::Class && &m.name == name))
+            .map(|lc| &lc.name)
+            .collect();
         app.library_classes
             .iter()
+            .filter(|lc| ancestors(app, &parents, &lc.name).iter().chain(std::iter::once(&lc.name)).any(|a| defining.contains(&a)))
+            .map(|lc| lc.name.0.as_str().to_string())
+            .collect()
+    };
+    fn class_side_mentions(e: &Expr, name: &Symbol, class_body: bool, owners: &HashSet<String>) -> usize {
+        let here = match &*e.node {
+            ExprNode::Send { recv, method, .. } if method == name => match recv {
+                Some(r) => match &*r.node {
+                    ExprNode::Const { path } => {
+                        let full = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+                        owners.iter().any(|o| o == &full || o.ends_with(&format!("::{full}"))) as usize
+                    }
+                    ExprNode::SelfRef => class_body as usize,
+                    _ => 0,
+                },
+                None => class_body as usize,
+            },
+            // `send(:root)`, `method(:root)`: a call by a name held as a Symbol.
+            ExprNode::Send { method, args, .. }
+                if matches!(method.as_str(), "send" | "public_send" | "__send__" | "method" | "public_method" | "respond_to?")
+                    && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { value } }) if value == name) =>
+            {
+                1
+            }
+            _ => 0,
+        };
+        let mut inner = 0;
+        e.node.for_each_child(&mut |c| inner += class_side_mentions(c, name, class_body, owners));
+        here + inner
+    }
+    let remaining = |name: &Symbol| -> usize {
+        let owners = owners(name);
+        let mut everywhere = 0;
+        crate::lower::for_each_emit_body_ref(app, &mut |e| everywhere += class_side_mentions(e, name, false, &owners));
+        let (macro_bodies, class_bodies): (Vec<&MethodDef>, Vec<&MethodDef>) = app
+            .library_classes
+            .iter()
             .flat_map(|lc| lc.methods.iter())
-            .filter(|m| m.receiver == MethodReceiver::Class && &m.name == name)
-            .filter_map(|m| source_text(m.body.span, sources))
-            .map(|text| {
-                let mut words = HashMap::default();
-                count_words(std::str::from_utf8(text).unwrap_or(""), &mut words);
-                words.get(name.as_str()).copied().unwrap_or(0)
-            })
-            .sum()
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .partition(|m| &m.name == name);
+        let own: usize = macro_bodies.iter().map(|m| class_side_mentions(&m.body, name, false, &owners)).sum();
+        let class_side: usize = class_bodies
+            .iter()
+            .map(|m| class_side_mentions(&m.body, name, true, &owners) - class_side_mentions(&m.body, name, false, &owners))
+            .sum();
+        everywhere.saturating_sub(own) + class_side
     };
     let spent: HashSet<Symbol> = expanded_total
-        .iter()
-        .filter(|(name, calls)| {
-            !failed_total.contains(*name) && mention_counts.count(name.as_str()).saturating_sub(own_mentions(name)) == **calls
-        })
-        .map(|(name, _)| name.clone())
+        .keys()
+        .filter(|name| !failed_total.contains(*name) && remaining(name) == 0)
+        .cloned()
         .collect();
     if !spent.is_empty() {
         for lc in app.library_classes.iter_mut().filter(|lc| !lc.is_module) {
