@@ -306,6 +306,14 @@ for `connected_to`, `connected_to_many` and `connecting_to`, passes the
 app's own method. A `connects_to` whose
 writing database is the primary checks clean and runs.
 
+The primary the test environment names decides the SQL dialect of the
+Ruby target's emit (`schema_sql::Dialect::for_app`). For postgresql, the
+schema DDL, the lowered queries (boolean literals, truncation) and the
+tree are PostgreSQL's: `runtime/spinel/db_pg.rb` over the pg gem as
+the emitted tree's Db, `gem "pg"`, and the database `DATABASE_URL` names, at
+boot and in the emitted tests (`project::apply_postgresql_tree`). Every
+other target, and every other adapter, keeps SQLite.
+
 The enum `database::DatabaseAdapter` names a configuration's adapter;
 it is not the analyzer's [`DatabaseAdapter` trait](adapter.md).
 

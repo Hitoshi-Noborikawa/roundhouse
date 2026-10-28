@@ -138,13 +138,24 @@ impl Overlay {
         self.run_test_with(&["--enable-frozen-string-literal"], test_path)
     }
 
+    /// `run_test` with more environment for the process, such as the
+    /// `DATABASE_URL` of an app whose database is PostgreSQL.
+    pub fn run_test_env(self, test_path: &str, env: &[(&str, &str)]) -> Run {
+        self.run_test_with_env(&[], test_path, env)
+    }
+
     fn run_test_with(self, flags: &[&str], test_path: &str) -> Run {
+        self.run_test_with_env(flags, test_path, &[])
+    }
+
+    fn run_test_with_env(self, flags: &[&str], test_path: &str, env: &[(&str, &str)]) -> Run {
         let (emitted, errors) = self.emit_tree(BuildTarget::Ruby);
         let output = ruby()
             .args(flags)
             .args(["-Itest", "-I."])
             .arg(test_path)
             .current_dir(&emitted)
+            .envs(env.iter().copied())
             .output()
             .expect("spawn ruby");
         let command: Vec<&str> =
