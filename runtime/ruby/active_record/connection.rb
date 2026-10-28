@@ -390,6 +390,10 @@ module ActiveRecord
 
   # Not in relation.rb: the strict targets' `Db` never raises RecordNotUnique.
   class Relation
+    def lock(_locking = true)
+      unloaded_spawn
+    end
+
     def create_or_find_by(conditions)
       created = build(conditions)
       begin
@@ -1208,6 +1212,10 @@ module ActiveRecord
     # `ActiveRecord::Relation.new(Model)` directly.
     def self.all
       ActiveRecord::Relation.new(self)
+    end
+
+    def self.lock(locking = true)
+      all.lock(locking)
     end
 
     # A Relation over the model with no default scope applied, which is

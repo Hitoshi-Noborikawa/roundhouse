@@ -7161,6 +7161,17 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("`{}` with a name computed when it runs, which the {target} emit cannot define ahead of time", method.as_str()),
             );
         }
+        if !matches!(target, "jruby" | "spinel" | "futamura")
+            && let crate::expr::ExprNode::Send { method, .. } = &*expr.node
+            && method.as_str() == "lock"
+            && let Some(crate::ty::Ty::Relation { of }) = &expr.ty
+            && !crate::analyze::source_class_method(app, of, "lock")
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span, target, "locking relation",
+                format!("the SQLite locking relation is supplied by the Ruby-family runtime; the {target} runtime ships none"),
+            );
+        }
         // `runtime/ruby/active_record/connection.rb` carries `upsert_all`; no strict runtime transpiles it.
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Send { recv: Some(_), method, .. } = &*expr.node
