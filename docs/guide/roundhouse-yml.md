@@ -74,6 +74,15 @@ test class that includes the module gets it in its own emitted file,
 with the module's assertions lowered like the test's own, and runs the
 module's `test_*` methods as its tests, as Minitest does.
 
+A helper written as an `ActiveSupport::Concern` (here or in
+`test/test_helpers/`) has its `included do` block read as the
+including class's own statements, where the `include` stands: its
+`setup` and `teardown` callbacks (blocks or `:method_name`s), tests,
+methods and includes. One that `test/test_helper.rb` includes into
+`ActiveSupport::TestCase` runs ahead of every test class's own
+callbacks, in Rails' order. Any other statement in the block is
+refused by name.
+
 ### RSpec specs
 
 A file whose name ends in `_spec.rb` in one of these folders is read as

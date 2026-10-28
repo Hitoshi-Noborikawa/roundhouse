@@ -1895,6 +1895,29 @@ end
         }
     };
 
+    // The test helper Concerns: an `include` of one runs its `included`
+    // block's statements on the including test class, and the ones the
+    // helper mixes into every test case run on each of them.
+    let test_concerns = {
+        let helpers_dir = dir.join("test/test_helpers");
+        let mut files: Vec<PathBuf> =
+            if vfs.is_dir(&helpers_dir) { read_rb_files(vfs, &helpers_dir)? } else { Vec::new() };
+        files.extend(test_files.iter().cloned());
+        let mut concerns = Vec::new();
+        for f in files {
+            let Some(source) = read_or_ledger(vfs, &f)? else { continue };
+            let file = f.display().to_string();
+            for name in super::test::concern_modules(&source, &file) {
+                concerns.push(super::test::TestConcern { name, file: file.clone(), source: source.to_vec() });
+            }
+        }
+        let case_wide = test_case_wide_includes(vfs, dir)?
+            .iter()
+            .map(|s| s.as_str().trim_start_matches("::").to_string())
+            .collect();
+        super::test::TestConcerns { concerns, case_wide }
+    };
+
     // A test-case base the helper DEFINES (`class GemCompat::TestCase
     // < ActiveSupport::TestCase`), which the app's tests then subclass. A
     // reopen (`class ActiveSupport::TestCase` with no superclass) is the
@@ -1941,10 +1964,15 @@ end
             }
             continue;
         }
-        if let Some(tms) =
-            unwrap_or_record(ingest_test_files(&source, &entry.display().to_string()))?
-        {
+        let ingested = super::test::with_test_concerns(test_concerns.clone(), || {
+            ingest_test_files(&source, &entry.display().to_string())
+        });
+        if let Some(tms) = unwrap_or_record(ingested)? {
             for mut tm in tms {
+                // A module every test case already includes, included
+                // again: a no-op in Ruby, and spliced rather than
+                // carried here, so the `include` would name nothing.
+                tm.includes.retain(|i| !shared_test_helpers.iter().any(|lc| &lc.name == i));
                 splice_test_helpers(&mut tm, &shared_test_helpers);
                 carry_included_test_helpers(&mut tm, &included_test_helpers);
                 if let Some(case_setup) = &test_case_setup {
@@ -11345,15 +11373,11 @@ pub(super) fn extract_config_time_zone(source: &[u8]) -> Option<String> {
 /// Reading the include list rather than globbing the directory is also
 /// what makes this track the app: a module the app stops mixing in
 /// stops being spliced.
-fn ingest_test_helper_modules<V: Vfs + ?Sized>(
-    vfs: &V,
-    dir: &Path,
-) -> IngestResult<Vec<LibraryClass>> {
+/// The modules `test/test_helper.rb` mixes into every test case: what
+/// its `ActiveSupport::TestCase` reopen includes, and what a
+/// `test/test_helpers/` file includes through an `on_load` hook.
+fn test_case_wide_includes<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<Symbol>> {
     let helpers_dir = dir.join("test/test_helpers");
-    if !vfs.is_dir(&helpers_dir) {
-        return Ok(Vec::new());
-    }
-
     // Which modules get mixed into every test case. `test/test_helper.rb`
     // reopens `ActiveSupport::TestCase` and includes them there; ingest
     // the file as library classes and read that class's include list.
@@ -11380,7 +11404,7 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
     //     include SessionTestHelper
     //   end
     // — and `test/test_helper.rb` only `require_relative`s it.
-    for entry in read_rb_files(vfs, &helpers_dir)? {
+    for entry in if vfs.is_dir(&helpers_dir) { read_rb_files(vfs, &helpers_dir)? } else { Vec::new() } {
         let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
         for name in on_load_test_includes(&source, &entry.display().to_string()) {
             if !wanted.contains(&name) {
@@ -11388,6 +11412,19 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
             }
         }
     }
+    Ok(wanted)
+}
+
+fn ingest_test_helper_modules<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+) -> IngestResult<Vec<LibraryClass>> {
+    let helpers_dir = dir.join("test/test_helpers");
+    if !vfs.is_dir(&helpers_dir) {
+        return Ok(Vec::new());
+    }
+
+    let wanted = test_case_wide_includes(vfs, dir)?;
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
