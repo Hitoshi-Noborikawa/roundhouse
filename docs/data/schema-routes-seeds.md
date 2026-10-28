@@ -282,7 +282,8 @@ Rails' `ActiveRecord::DatabaseConfigurations` reads it: every
 environment, each one's configurations (three-tier when every value of
 the environment is a mapping, otherwise the one configuration
 `primary`), the primary (named `primary`, else the first), replicas, and
-the adapter (`adapter:`, or the scheme of a literal `url:`, which wins).
+the adapter (`adapter:`, or the scheme of a literal `url:`, which wins;
+an environment given as a URL string is that URL's configuration).
 Only identity keys are read (`adapter`, `url`, `replica`,
 `database_tasks`, `migrations_paths`, `schema_search_path`), so no
 connection value or credential reaches the IR. ERB is not run: an
@@ -298,7 +299,11 @@ The emitted runtime opens only the primary, so a model whose writing
 database is another, a name the file does not configure, a computed or
 conditional `connects_to`, `shards:`, `establish_connection`, an
 app-defined `connection_pool`, and any role or shard switch are errors
-at their source (`App::database_refusals`). A `connects_to` whose
+at their source (`App::database_refusals`). A switch is Active Record's
+when it is called on a class (`self`, a constant, or no receiver) and,
+for `connected_to`, `connected_to_many` and `connecting_to`, passes the
+`role:` or `shard:` Rails requires; a call on another object is the
+app's own method. A `connects_to` whose
 writing database is the primary checks clean and runs.
 
 The enum `database::DatabaseAdapter` names a configuration's adapter;

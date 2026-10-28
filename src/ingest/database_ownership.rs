@@ -162,6 +162,32 @@ fn calls_named(expr: &Expr, names: &[&str], out: &mut Vec<(Span, String)>) {
     expr.node.for_each_child(&mut |child| calls_named(child, names, out));
 }
 
+/// Every Active Record role or shard switch under `expr`: a [`SWITCHES`]
+/// call on a class (`self`, a constant, or no receiver), and for the
+/// `connected_to` family with the `role:` or `shard:` Rails requires of
+/// it. A call on another object, or without those keywords, is the
+/// app's own method of the same name.
+fn switches_in(expr: &Expr, out: &mut Vec<(Span, String)>) {
+    if let ExprNode::Send { recv, method, args, .. } = &*expr.node {
+        let name = method.as_str();
+        let on_class = recv.as_ref().is_none_or(|r| matches!(*r.node, ExprNode::SelfRef | ExprNode::Const { .. }));
+        let keyed = || {
+            args.iter().any(|arg| match &*arg.node {
+                ExprNode::Hash { entries, .. } => entries.iter().any(|(k, _)| matches!(sym(k).as_deref(), Some("role" | "shard"))),
+                _ => false,
+            })
+        };
+        let switch = match name {
+            "connected_to" | "connected_to_many" | "connecting_to" => keyed(),
+            _ => SWITCHES.contains(&name),
+        };
+        if on_class && switch {
+            out.push((expr.span, name.to_string()));
+        }
+    }
+    expr.node.for_each_child(&mut |child| switches_in(child, out));
+}
+
 /// The first thing `model`'s own body says about its connection, plus
 /// the refusals for anything else it says.
 fn own_decision(
@@ -423,7 +449,7 @@ pub(super) fn resolve(app: &mut App) {
 
     // Role and shard switches, wherever the app makes one.
     let mut switches = Vec::new();
-    let mut walk = |e: &Expr| calls_named(e, SWITCHES, &mut switches);
+    let mut walk = |e: &Expr| switches_in(e, &mut switches);
     for model in &app.models {
         for item in &model.body {
             match item {

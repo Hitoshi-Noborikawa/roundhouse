@@ -105,7 +105,13 @@ pub(crate) fn database_configurations(text: &str, file: FileId) -> Configuration
     let Value::Mapping(envs) = doc else { return out };
     for (env, config) in envs {
         let Value::String(env) = env else { continue };
-        let Value::Mapping(config) = config else { continue };
+        // A string is the configuration's URL (Rails'
+        // `build_db_config_from_string`), read as `url:` would be.
+        let config = match config {
+            Value::Mapping(config) => config,
+            Value::String(url) => serde_yaml_ng::Mapping::from_iter([(Value::String("url".to_string()), Value::String(url))]),
+            _ => continue,
+        };
         let env_at = key_offset(text, &env, 0, true).unwrap_or(0);
         let three_tier = !config.is_empty() && config.values().all(|value| matches!(value, Value::Mapping(_)));
         let named: Vec<(String, serde_yaml_ng::Mapping)> =
@@ -445,6 +451,17 @@ production:
         assert_eq!(&yml[events.span.start as usize..events.span.end as usize], "events");
         assert!(queue.detail.contains("`test.queue`") && queue.detail.contains("`url`"), "{queue:?}");
         assert_eq!(&yml[queue.span.start as usize..queue.span.end as usize], "queue");
+    }
+
+    /// An environment that is only a URL string is that URL's
+    /// configuration, as Rails builds it; a computed one is a warning.
+    #[test]
+    fn an_environment_given_as_a_url_string_is_its_configuration() {
+        let yml = "production: postgres://db.example.test/app\nstaging: <%= ENV[\"DATABASE_URL\"] %>\n";
+        let configurations = database_configurations(yml, FileId(1));
+        assert_eq!(shape(yml), vec![row("production", "primary", "postgresql", true, false, true)]);
+        let [staging] = configurations.refusals.as_slice() else { panic!("{:?}", configurations.refusals) };
+        assert!(staging.warning && staging.detail.contains("`staging.primary`") && staging.detail.contains("`url`"), "{staging:?}");
     }
 
     #[test]

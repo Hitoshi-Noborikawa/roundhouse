@@ -222,6 +222,36 @@ fn each_routing_shape_the_runtime_does_not_carry_is_refused_at_its_span() {
     assert!(missed.is_empty(), "{} not refused at their span:\n{}", missed.len(), missed.join("\n"));
 }
 
+/// Only Active Record's own switches are refused: a call on another
+/// object, or one without the `role:` / `shard:` that Rails requires of
+/// `connected_to`, is the app's own method of the same name.
+#[test]
+fn a_method_named_like_a_switch_on_another_object_is_not_refused() {
+    let mut files = base_files();
+    put(
+        &mut files,
+        "app/models/station.rb",
+        "class Station\n  def initialize(links)\n    @links = links\n  end\n\n  def reachable(other)\n    @links.connected_to(other)\n  end\n\n  def handler(registry)\n    registry.connection_handler\n  end\n\n  def connected_to(other)\n    @links.include?(other)\n  end\n\n  def linked?(other)\n    connected_to(other)\n  end\nend\n",
+    );
+    let checked = check(&files);
+    let switches: Vec<&String> = checked.errors.iter().filter(|e| e.contains("connected_to") || e.contains("connection_handler")).collect();
+    assert!(switches.is_empty(), "{switches:#?}");
+}
+
+/// A switch in a controller's class body (an `around_action` block) runs
+/// every request on another role, so it is refused there too.
+#[test]
+fn a_switch_in_a_controller_filter_block_is_refused() {
+    let mut files = base_files();
+    put(
+        &mut files,
+        "app/controllers/reports_controller.rb",
+        "class ReportsController < ApplicationController\n  around_action do |_controller, action|\n    ActiveRecord::Base.connected_to(role: :reading) { action.call }\n  end\n\n  def index\n    head :ok\n  end\nend\n",
+    );
+    let checked = check(&files);
+    assert_at(&checked.errors, "app/controllers/reports_controller.rb:3:", &["connected_to", "role and shard switching is not modeled"]);
+}
+
 /// A concern's `class_methods` override reaches every includer; the error
 /// is at the concern's `def`, and the includer's ownership says so.
 #[test]
