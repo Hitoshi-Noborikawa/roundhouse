@@ -4128,6 +4128,36 @@ mod controller_concern_surface_tests {
             app.controllers.reverse();
         }
     }
+
+    #[test]
+    fn a_namespaced_source_reopening_keeps_own_and_inherited_includes() {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+            ("app/controllers/a_base_controller.rb", "module Review\n  class BaseController < ActionController::Base\n    include ParentConcern\n  end\nend\n"),
+            ("app/controllers/b_base_extra.rb", "module Review\n  class BaseController\n    include ExtraConcern\n  end\nend\n"),
+            ("app/controllers/c_base_nested.rb", "module Review\n  class BaseController\n    class Nested; end\n  end\nend\n"),
+            ("app/controllers/d_child_controller.rb", "module Review\n  class ChildController < BaseController\n    include ChildConcern\n  end\nend\n"),
+        ]
+        .into_iter()
+        .map(|(path, source)| (std::path::PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let base = crate::ident::ClassId("Review::BaseController".into());
+        let child = crate::ident::ClassId("Review::ChildController".into());
+        assert_eq!(app.controllers.iter().filter(|c| c.name == base).count(), 3);
+        for _ in 0..2 {
+            let surfaces = controller_concern_surfaces(&app);
+            let parent = &surfaces.controllers[&base];
+            let child = &surfaces.controllers[&child];
+            for included in ["ParentConcern", "ExtraConcern"] {
+                let id = crate::ident::ClassId(included.into());
+                assert!(parent.direct_includes.contains(&id));
+                assert!(child.inherited_includes.contains(&id));
+            }
+            assert!(child.direct_includes.contains(&crate::ident::ClassId("ChildConcern".into())));
+            app.controllers.reverse();
+        }
+    }
 }
 
 /// Rails' `remove_duplicates`: declaring `before_action :set_room` a
