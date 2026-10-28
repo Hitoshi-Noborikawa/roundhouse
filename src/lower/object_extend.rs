@@ -104,7 +104,7 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
 /// `.new` of a class Spinel can subclass. A fresh empty Array or Hash
 /// extended with one of the program's modules right after is made an
 /// instance of a synthesized subclass that includes the module
-/// (`ArrayWithParslet_Source_RangeSearch < Array`), and the `extend` goes:
+/// (`ArrayWithParslet__Source__RangeSearch < Array`), and the `extend` goes:
 /// the object answers the module's methods, is an Array, and holds what
 /// it held. What differs from Ruby is its `class`, which is the subclass.
 fn lift_fresh_builtin_extends(app: &mut App) {
@@ -119,11 +119,12 @@ fn lift_fresh_builtin_extends(app: &mut App) {
         }))
         .map(|c| c.name.0.to_string())
         .collect();
+    let taken: HashSet<String> = app.library_classes.iter().map(|c| c.name.0.to_string()).collect();
     let mut synthesized: Vec<(String, String, String, Span)> = Vec::new();
     for lc in &mut app.library_classes {
         let owner = lc.name.0.to_string();
         for m in &mut lc.methods {
-            lift_in(&mut m.body, &owner, &modules, &mut synthesized);
+            lift_in(&mut m.body, &owner, &modules, &taken, &mut synthesized);
         }
     }
     for (name, base, module, site) in synthesized {
@@ -147,8 +148,14 @@ fn lift_fresh_builtin_extends(app: &mut App) {
     }
 }
 
-fn lift_in(e: &mut Expr, owner: &str, modules: &HashSet<String>, out: &mut Vec<(String, String, String, Span)>) {
-    e.node.for_each_child_mut(&mut |c| lift_in(c, owner, modules, out));
+fn lift_in(
+    e: &mut Expr,
+    owner: &str,
+    modules: &HashSet<String>,
+    taken: &HashSet<String>,
+    out: &mut Vec<(String, String, String, Span)>,
+) {
+    e.node.for_each_child_mut(&mut |c| lift_in(c, owner, modules, taken, out));
     let ExprNode::Seq { exprs } = &mut *e.node else { return };
     for i in 0..exprs.len().saturating_sub(1) {
         let (target, base) = match &*exprs[i].node {
@@ -182,7 +189,11 @@ fn lift_in(e: &mut Expr, owner: &str, modules: &HashSet<String>, out: &mut Vec<(
         };
         let Some(module) = module else { continue };
         // Not `::` dropped: `A::BC` and `AB::C` would share one class.
-        let name = format!("{base}With{}", module.replace("::", "_"));
+        let name = format!("{base}With{}", module.replace("::", "__"));
+        // Not a name the program already has, or one minted for another module: the site keeps the unsupported path.
+        if taken.contains(&name) || out.iter().any(|(n, b, m, _)| *n == name && (b != base || *m != module)) {
+            continue;
+        }
         let span = exprs[i].span;
         if let ExprNode::Assign { value, .. } = &mut *exprs[i].node {
             *value = Expr::new(

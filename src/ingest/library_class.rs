@@ -2418,7 +2418,9 @@ fn walk_decl_body_with_visibility<'pr>(
         // branch has neither a `def` nor a marker, so reject it here:
         // skipping it would drop `attr_reader :token` with no error.
         // Not an unmodeled conditional: when the class body runs, a constant it has not written yet is undefined, so svg-graph's `DEFAULT_SHAPE = … unless defined? DEFAULT_SHAPE` is the write.
-        if statement.as_call_node().is_some_and(|c| c.receiver().is_none() && matches!(constant_id_str(&c.name()), "include" | "extend" | "prepend")) {
+        if statement.as_call_node().is_some_and(|c| {
+            c.receiver().is_none_or(|r| r.as_self_node().is_some()) && matches!(constant_id_str(&c.name()), "include" | "extend" | "prepend")
+        }) {
             mixed_in = true;
         }
         if !mixed_in
