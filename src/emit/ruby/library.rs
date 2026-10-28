@@ -1164,7 +1164,25 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         Vec<(&crate::ident::ClassId, &[crate::dialect::Param])>,
     > = Default::default();
     for model in &app.models {
-        let Some(per) = scopes.get(&model.name) else { continue };
+        // The model's own scopes, then each ancestor's it does not declare
+        // itself: an `ApplicationRecord` scope reached on `Article`'s
+        // relation calls `Article.__scope_…`, which Ruby resolves to the
+        // ancestor's entry.
+        let mut chain: Vec<&crate::ident::ClassId> = Vec::new();
+        let mut current = Some(&model.name);
+        while let Some(id) = current.filter(|id| chain.len() < 32 && !chain.contains(id)) {
+            chain.push(id);
+            current = app.models.iter().find(|m| &m.name == id).and_then(|m| m.parent.as_ref());
+        }
+        let mut per: std::collections::HashMap<&Symbol, &Vec<crate::dialect::Param>> = Default::default();
+        for owner in chain {
+            for (n, params) in scopes.get(owner).into_iter().flatten() {
+                per.entry(n).or_insert(params);
+            }
+        }
+        if per.is_empty() {
+            continue;
+        }
         // The registry carries the SYNTHESIZED preload scopes too (it
         // must — the scope-body rewriter reads it to thread `__rel`
         // through a bare `with_attached_attachment`). They are handled
@@ -1184,7 +1202,7 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
                 .chain(crate::lower::attached::preload_scope_names(model))
                 .map(|n| n.as_str().to_string())
                 .collect();
-        let mut names: Vec<&Symbol> = per.keys().collect();
+        let mut names: Vec<&Symbol> = per.keys().copied().collect();
         names.sort_by_key(|n| n.as_str());
         for n in names {
             if RELATION_BUILTINS.contains(&n.as_str()) || synthesized.contains(n.as_str()) {

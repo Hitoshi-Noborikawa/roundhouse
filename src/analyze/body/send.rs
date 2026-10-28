@@ -2366,9 +2366,12 @@ impl<'a> BodyTyper<'a> {
                         // `@room.messages.last_page` a relation — then
                         // `Message | nil` one hop later. Its Array is the
                         // answer, same as the terminal arm below.
+                        // A model element only: a class method answering
+                        // `Array[HashWithIndifferentAccess[…]]` (a `pluck`
+                        // mapped to hashes) is that Array, not a relation.
                         Some(Ty::Array { elem }) if !cls.materializing_scopes.contains(method) => {
                             return match &**elem {
-                                Ty::Class { id, .. } => Ty::Relation { of: id.clone() },
+                                Ty::Class { id, .. } if self.is_model_class(Some(elem)) => Ty::Relation { of: id.clone() },
                                 _ => Ty::Array { elem: elem.clone() },
                             };
                         }
