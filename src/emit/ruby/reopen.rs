@@ -407,12 +407,11 @@ fn apply_edits(content: &str, mut edits: Vec<Edit>) -> String {
     out
 }
 
-/// An RBS line's declaration: `class`/`module` (with the name it
-/// opens), `end`, or a method (`def name:` / `def self.name:`).
+/// A line of an app's generated sidecar: a `class`/`module` header
+/// (with the name it opens), `end`, or anything else.
 enum RbsLine<'a> {
     Open(&'a str),
     End,
-    Def(bool, &'a str),
     Other,
 }
 
@@ -426,14 +425,6 @@ fn rbs_line(line: &str) -> RbsLine<'_> {
             let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':')).unwrap_or(rest.len());
             return RbsLine::Open(&rest[..end]);
         }
-    }
-    if let Some(rest) = t.strip_prefix("def ") {
-        let (class_side, rest) = match rest.strip_prefix("self.") {
-            Some(rest) => (true, rest),
-            None => (false, rest),
-        };
-        let end = rest.find(':').unwrap_or(rest.len());
-        return RbsLine::Def(class_side, rest[..end].trim());
     }
     RbsLine::Other
 }
@@ -449,36 +440,32 @@ fn rbs_qualified(stack: &[String], name: &str) -> String {
 }
 
 /// A runtime sidecar without the declarations of the methods the app
-/// redefines, their `|` overload lines included.
+/// redefines. Each goes whole: a signature over several lines, its `|`
+/// overloads and its annotations, the spans `resolve_runtime_sig_conflicts`
+/// removes as well (`project::rbs_method_declarations`). A `self?.`
+/// declaration covers both receivers, so either one redefined takes it.
+/// A sidecar that does not parse stays as it is, for Spinel to report.
 fn drop_declarations(content: &str, overridden: &HashSet<MethodKey>) -> String {
-    let mut out = String::with_capacity(content.len());
-    let mut stack: Vec<String> = Vec::new();
-    let mut skipping = false;
-    let mut changed = false;
-    for line in content.split_inclusive('\n') {
-        if skipping && line.trim_start().starts_with('|') {
-            continue;
-        }
-        skipping = false;
-        match rbs_line(line) {
-            RbsLine::Open(name) => stack.push(rbs_qualified(&stack, name)),
-            RbsLine::End => {
-                stack.pop();
-            }
-            RbsLine::Def(class_side, name) => {
-                if let Some(owner) = stack.last() {
-                    if overridden.contains(&(owner.clone(), class_side, name.to_string())) {
-                        skipping = true;
-                        changed = true;
-                        continue;
-                    }
-                }
-            }
-            RbsLine::Other => {}
-        }
-        out.push_str(line);
+    let Ok(decls) = crate::project::rbs_method_declarations(content) else {
+        return content.to_string();
+    };
+    let spans: Vec<std::ops::Range<usize>> = decls
+        .into_iter()
+        .filter(|decl| {
+            let sides: &[bool] = match decl.receiver {
+                "" => &[false],
+                "self." => &[true],
+                _ => &[false, true],
+            };
+            sides.iter().any(|side| overridden.contains(&(decl.owner.clone(), *side, decl.name.clone())))
+        })
+        .map(|decl| decl.span)
+        .collect();
+    if spans.is_empty() {
+        content.to_string()
+    } else {
+        crate::project::remove_rbs_spans(content, spans)
     }
-    if changed { out } else { content.to_string() }
 }
 
 /// An app sidecar whose class headers no longer name a parent for a
@@ -557,15 +544,27 @@ mod tests {
     #[test]
     fn a_reopen_header_drops_its_superclass_in_the_rb_and_the_rbs() {
         let mut files = tree(&[
-            ("runtime/active_storage.rb", "module ActiveStorage\n  class PurgeJob\n  end\nend\n"),
-            ("app/models/active_storage/purge_job.rb", "class ActiveStorage::PurgeJob < ActiveJob::Base\n  def perform(blob)\n    blob\n  end\nend\n"),
-            ("app/models/active_storage/purge_job.rbs", "module ActiveStorage\n  class PurgeJob < ActiveJob::Base\n    def perform: (untyped blob) -> untyped\n  end\nend\n"),
-            ("app/models/job.rb", "class Job < ActiveJob::Base\nend\n"),
+            ("runtime/active_storage.rb", "module ActiveStorage\n  class Blob\n  end\nend\n"),
+            ("app/models/active_storage/blob.rb", "class ActiveStorage::Blob < ActiveStorage::Record\n  def label\n    \"x\"\n  end\nend\n"),
+            ("app/models/active_storage/blob.rbs", "module ActiveStorage\n  class Blob < ActiveStorage::Record\n    def label: () -> String\n  end\nend\n"),
+            ("app/models/record.rb", "class Record < ActiveStorage::Record\nend\n"),
         ]);
         apply_runtime_reopens(&mut files, &HashSet::default());
-        assert_eq!(files[1].1, "class ActiveStorage::PurgeJob\n  def perform(blob)\n    blob\n  end\nend\n");
-        assert_eq!(files[2].1, "module ActiveStorage\n  class PurgeJob\n    def perform: (untyped blob) -> untyped\n  end\nend\n");
-        assert_eq!(files[3].1, "class Job < ActiveJob::Base\nend\n");
+        assert_eq!(files[1].1, "class ActiveStorage::Blob\n  def label\n    \"x\"\n  end\nend\n");
+        assert_eq!(files[2].1, "module ActiveStorage\n  class Blob\n    def label: () -> String\n  end\nend\n");
+        assert_eq!(files[3].1, "class Record < ActiveStorage::Record\nend\n");
+    }
+
+    #[test]
+    fn a_multiline_declaration_goes_whole_with_its_overloads_and_annotations() {
+        let rbs = "module ActionView\n  module ViewHelpers\n    %a{pure}\n    def self.word_wrap: (\n      String text,\n      ?line_width: Integer\n    ) -> String\n                      | (nil text) -> String\n    def self.kept: (\n      String text\n    ) -> String\n  end\nend\n";
+        let mut files = tree(&[
+            ("runtime/action_view/view_helpers.rb", "module ActionView\n  module ViewHelpers\n    def self.word_wrap(text, line_width: 80)\n      text\n    end\n\n    def self.kept(text)\n      text\n    end\n  end\nend\n"),
+            ("runtime/action_view/view_helpers.rbs", rbs),
+            ("app/models/action_view/view_helpers.rb", "module ActionView::ViewHelpers\n  def self.word_wrap(text, line_width: 80)\n    \"wrapped\"\n  end\nend\n"),
+        ]);
+        apply_runtime_reopens(&mut files, &HashSet::default());
+        assert_eq!(files[1].1, "module ActionView\n  module ViewHelpers\n    def self.kept: (\n      String text\n    ) -> String\n  end\nend\n");
     }
 
     #[test]

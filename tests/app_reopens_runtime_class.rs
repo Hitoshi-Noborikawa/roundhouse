@@ -80,6 +80,16 @@ const RELATION: &str = r#"class ActiveRecord::Relation
 end
 "#;
 
+/// A redefinition of a runtime method whose RBS signature spans lines
+/// (`ActionView::ViewHelpers.word_wrap`, the module `word_wrap` in a view
+/// lowers to).
+const VIEW_HELPER: &str = r#"module ActionView::ViewHelpers
+  def self.word_wrap(text, line_width: 80, break_sequence: "\n")
+    "wrapped: " + text
+  end
+end
+"#;
+
 /// Rails' parent in the header: neither class is one the runtime ships.
 const WITH_PARENT: &str = r#"class ActiveStorage::Blob < ActiveStorage::Record
   def kind_label
@@ -220,6 +230,21 @@ fn a_redefined_private_method_loads_and_wins() {
         .assert_passes();
 }
 
+/// The runtime's declaration goes whole, every line of its signature, so
+/// the sidecar stays valid RBS; the app's method is the one that runs.
+#[test]
+fn a_redefined_method_with_a_multiline_signature_goes_whole() {
+    let (emitted, errors) = reopening("action_view_view_helpers.rb", VIEW_HELPER).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:?}");
+    let sig = read(&emitted, "runtime/action_view/view_helpers.rbs");
+    assert_eq!(defs(&sig, "self.word_wrap"), Vec::<&str>::new());
+    assert!(sig.contains("Integer pos) -> Integer\n    def self.word_wrap_finish: "), "{sig}");
+    drop(emitted);
+    reopening("action_view_view_helpers.rb", VIEW_HELPER)
+        .run_ruby("raise ActionView::ViewHelpers.word_wrap(\"abc\") unless ActionView::ViewHelpers.word_wrap(\"abc\") == \"wrapped: abc\"\n")
+        .assert_passes();
+}
+
 /// `ActiveStorage::Record` is Rails' parent for `Blob`; the runtime has
 /// neither it nor a parent for its `Blob`. The reopen loads, as in Rails.
 #[test]
@@ -335,12 +360,14 @@ fn the_reopens_compile_and_run_on_spinel() {
         .write("lib/core_ext/active_storage_blob_label.rb", WITH_PARENT)
         .write("lib/core_ext/active_storage_purge_job.rb", PURGE_JOB)
         .write("lib/core_ext/active_record_relation.rb", RELATION)
+        .write("lib/core_ext/action_view_view_helpers.rb", VIEW_HELPER)
         .run_spinel_with_rbs(&format!(
             "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{ATTACHED}\
              raise blob.kind_label unless blob.kind_label == \"file\"\n\
              raise \"audio? is the runtime's\" unless blob.audio?\n\
              raise blob.key unless blob.key == \"app-key-5\"\n\
              raise Doc.all.cache_version unless Doc.all.cache_version == \"app-version\"\n\
+             raise ActionView::ViewHelpers.word_wrap(\"abc\") unless ActionView::ViewHelpers.word_wrap(\"abc\") == \"wrapped: abc\"\n\
              doc.destroy\n\
              raise \"blobs left\" unless ActiveStorage::Blob.count == 0\n\
              raise \"the app's perform did not run\" unless Doc.where(name: \"purged by the app\").count == 1\n\
