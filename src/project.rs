@@ -1161,17 +1161,16 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
-/// True when the app schema or emitted roots mention a date-only value.
-/// Shared by the unsupported-target gate and Spinel's conditional Date
-/// runtime load (matz/spinel#7334: defining `Date#strftime` currently
-/// breaks poly `Time | Date` dispatch for `Time#strftime`).
+/// True when the app schema or emitted roots mention a date-only value
+/// (or `DateTime`). Shared by the unsupported-target gate and Spinel's
+/// conditional load of its `date` package.
 fn app_uses_date(app: &App) -> bool {
     fn expr_has_date(e: &crate::expr::Expr) -> bool {
         if e.ty.as_ref().is_some_and(crate::ty::Ty::contains_date)
             || matches!(&*e.node, crate::expr::ExprNode::Cast { target_ty, .. } if target_ty.contains_date())
             || matches!(&*e.node, crate::expr::ExprNode::Const { path }
                 if (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty()))
-                    && path.last().is_some_and(|name| name.as_str() == "Date"))
+                    && path.last().is_some_and(|name| matches!(name.as_str(), "Date" | "DateTime")))
         {
             return true;
         }
@@ -1244,20 +1243,20 @@ fn app_uses_date(app: &App) -> bool {
 }
 
 /// Insert Date-package requires after `active_record_serialization` in
-/// `boot.rb`. Spinel only — the program-defined `Date` class and the
-/// date-column JSON reopen belong on that target (matz/spinel#7334).
+/// `boot.rb`. Spinel only — Spinel's `date` package and the date-column
+/// JSON reopen belong on that target.
 fn inject_date_package_into_boot(boot: &mut String) -> Result<(), String> {
     let anchor = "require_relative \"runtime/active_record_serialization\"\n";
     // Prefer concat! over one escaped multiline string: the CI
     // planner's project.rs body-scope regex backtracks for minutes
     // on `\"` + `\` continuations in a single literal this large.
     let inject = concat!(
-        "# Date package — only when the app uses date-only values (matz/spinel#7334).\n",
-        "require_relative \"runtime/date\"\n",
+        "# Date package — only when the app uses Date or DateTime.\n",
+        "require \"date\"\n",
         "require_relative \"runtime/active_support_date_parsing\"\n",
         "require_relative \"runtime/active_record_date_serialization\"\n",
     );
-    if boot.contains("require_relative \"runtime/date\"") {
+    if boot.contains("require_relative \"runtime/active_support_date_parsing\"") {
         return Ok(());
     }
     if let Some(at) = boot.find(anchor) {
@@ -1274,8 +1273,7 @@ fn inject_date_package_into_boot(boot: &mut String) -> Result<(), String> {
 
 /// CRuby/JRuby overlay boot replaces Spinel's boot wholesale, wiping
 /// the Date-package inject. Re-inject **only** the shared `date_*`
-/// calendar helpers (invariant 2). Do not load Spinel's `date.rb`
-/// polyfill (clobbers stdlib Date → `@year` nil on `>>`) or
+/// calendar helpers (invariant 2). Do not load
 /// `active_record_date_serialization` (overlay already wraps
 /// `_as_json_only`; a second alias infinite-recurses).
 fn inject_cruby_date_calendar_helpers(boot: &mut String) -> Result<(), String> {
@@ -1623,9 +1621,9 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
 
 /// The date and decimal coercions `ingest::dry_struct` and
 /// `ingest::dry_initializer` generate call
-/// stdlib the CRuby and JRuby trees load. Spinel's tree has its own
-/// `Date` (`runtime/spinel/date.rb`, ISO `parse` included) and
-/// `BigDecimal()`, but no `DateTime`, `Time.parse` or
+/// stdlib the CRuby and JRuby trees load. Spinel's tree has `Date`
+/// (Spinel's `date` package) and `BigDecimal()`. Its `DateTime` coercion
+/// stays reported until a run pins it, and it has no `Time.parse` or
 /// `BigDecimal.interpret_loosely`; the other targets have none of them.
 fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
@@ -5944,7 +5942,7 @@ enum RequireTarget {
 /// flags`) makes that fatal. The spinel tree leaves them out, as it did
 /// before app requires were carried; the ruby family loads them all.
 const SPINEL_LACKS: &[&str] = &[
-    "date", "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
+    "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
     "weakref",
 ];
 
@@ -7669,22 +7667,18 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         ));
     }
 
-    // Program-defined Date package for apps that use date-only values.
-    // Loading Date#strftime into every Spinel tree breaks poly
-    // Time|Date receivers (matz/spinel#7334). Default boot has no Date
-    // requires; when needed we inject the package (class + date parse/
-    // format + date JSON rewrite) after always-on AR serialization.
+    // Spinel's `date` package for apps that use Date or DateTime. Default
+    // boot has no Date requires; when needed we inject the package (stdlib
+    // date + date parse/format + date JSON rewrite) after always-on AR
+    // serialization.
     const DATE_PACKAGE_FILES: &[&str] = &[
-        "runtime/date.rb",
         "runtime/active_support_date_parsing.rb",
         "runtime/active_record_date_serialization.rb",
-        "sig/runtime/date.rbs",
         "sig/runtime/active_support_date_parsing.rbs",
         "sig/runtime/active_record_date_serialization.rbs",
     ];
     if needs_date {
         for (src, dest) in [
-            ("runtime/spinel/date.rbs", "sig/runtime/date.rbs"),
             (
                 "runtime/spinel/active_support_date_parsing.rbs",
                 "sig/runtime/active_support_date_parsing.rbs",

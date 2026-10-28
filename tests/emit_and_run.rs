@@ -20018,3 +20018,6 @@ mod unknown_return;
 
 #[path = "emit_and_run/hash_ivar_symbol_keys.rs"]
 mod hash_ivar_symbol_keys;
+
+#[path = "emit_and_run/date_time_package.rs"]
+mod date_time_package;
