@@ -49,7 +49,6 @@ fn a_rails_dependent_gem_compiled_from_source_is_not_refused() {
 }
 
 #[test]
-#[ignore = "fork spec: gem closures"]
 fn a_rails_dependent_gem_compiled_from_source_runs() {
     let run = app().run_ruby("p AuthenticationHelper.login_without_db_writes({})\n");
     assert!(!run.errors.iter().any(|e| e.contains("gem_requires_rails")), "{:#?}", run.errors);
