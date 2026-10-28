@@ -1980,6 +1980,29 @@ pub(crate) fn spinel_runtime_constants() -> &'static crate::det::HashSet<String>
 /// The same over the shared ports too (`runtime/ruby/typeid.rb`'s `TypeID`),
 /// which every Ruby-family tree and the Spinel one carry. Not a façade: its
 /// raising stand-in is what a gem compiled from source replaces.
+/// Top-level namespaces whose façade in `runtime/ruby/gem_facades.rb`
+/// answers a call by `GemFacade.fail!` (rotp's `ROTP`): the Spinel tree
+/// has no working body for them.
+pub(crate) fn stub_facade_namespaces() -> &'static crate::det::HashSet<String> {
+    static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut out = crate::det::HashSet::default();
+        let Ok(text) = crate::runtime_files::read_to_string("runtime/ruby/gem_facades.rb") else { return out };
+        let mut current: Option<String> = None;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("module ").or_else(|| line.strip_prefix("class ")) {
+                let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                current = (!name.is_empty() && name != "GemFacade").then_some(name);
+            } else if line.contains("GemFacade.fail!")
+                && let Some(name) = &current
+            {
+                out.insert(name.clone());
+            }
+        }
+        out
+    })
+}
+
 pub(crate) fn ported_runtime_constants() -> &'static crate::det::HashSet<String> {
     static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
     NAMES.get_or_init(|| declared_runtime_constants(&["runtime/spinel", "runtime/ruby"]))
