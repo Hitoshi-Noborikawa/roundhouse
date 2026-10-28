@@ -1740,6 +1740,15 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
+                // Not an unknown Kernel call: `lambda { |x| … }` is the stabby `->(x) { … }`, whose value is the block (svg-graph's `DataPoint::DEFAULT_SHAPE`).
+                if recv.is_none()
+                    && method.as_str() == "lambda"
+                    && args.is_empty()
+                    && !self.owns_operator(ctx.self_ty.as_ref(), method, ctx.class_side)
+                    && let Some(b) = block.as_mut().filter(|b| matches!(&*b.node, ExprNode::Lambda { .. }))
+                {
+                    return self.analyze_expr(b, ctx);
+                }
                 if let Some(ty) = self.class_factories.and_then(|factories| factories.get(&expr_span)) {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
                     if let Some(recv) = recv { self.analyze_expr(recv, ctx); }

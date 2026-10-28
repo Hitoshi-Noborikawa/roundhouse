@@ -1133,6 +1133,19 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("dup", scanner.clone()), ("clone", scanner.clone()), ("unscan", scanner.clone()),
         ("terminate", scanner.clone()), ("reset", scanner),
     ]);
+    // `Vips::Image` (`require "vips"`): the ruby-vips gem on the ruby family,
+    // the spinel-ruby-vips package on spinel, which answers these.
+    let vips_image = Ty::Class { id: ClassId(Symbol::from("Vips::Image")), args: vec![].into() };
+    register_stdlib_class(classes, "Vips", &[], &[]);
+    classes.entry(ClassId(Symbol::from("Vips"))).or_default().is_module = true;
+    register_stdlib_class(classes, "Vips::Image", &[
+        ("new_from_file", vips_image.clone()), ("new_from_buffer", vips_image.clone()),
+        ("thumbnail_buffer", vips_image.clone()), ("black", vips_image.clone()),
+    ], &[
+        ("width", Ty::Int), ("height", Ty::Int), ("bands", Ty::Int), ("has_alpha?", Ty::Bool),
+        ("thumbnail_image", vips_image.clone()), ("add", vips_image.clone()), ("cast", vips_image),
+        ("write_to_buffer", Ty::Str), ("write_to_file", Ty::Untyped),
+    ]);
     // `Zlib` (`require "zlib"`): the ruby family's own, spinel's `packages/zlib`.
     let gzip_writer = Ty::Class { id: ClassId(Symbol::from("Zlib::GzipWriter")), args: vec![].into() };
     register_stdlib_class(classes, "Zlib", &[

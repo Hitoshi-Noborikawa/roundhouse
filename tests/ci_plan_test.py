@@ -796,7 +796,6 @@ class Routing(unittest.TestCase):
             "runtime/spinel/active_record_equality_spinel.rb": "framework_tests_spinel",
             "runtime/spinel/param_builder.rb": "spinel_param_builder",
             "runtime/spinel/multipart.rb": "spinel_param_builder",
-            "runtime/spinel/date.rb": "date_columns_spinel",
             "runtime/spinel/active_support_date_parsing.rb": "date_columns_spinel",
             "runtime/spinel/net_http.rb": "spinel_net_http_start",
             "runtime/spinel/http_stub.rb": "spinel_net_http_start",
@@ -916,8 +915,6 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
                 "db_sqlite_concurrency", "spinel_pg_db", "spinel_db_contract",
             ],
-            "runtime/spinel/date.rb": ["date_columns_spinel"],
-            "runtime/spinel/date.rbs": ["date_columns_spinel"],
             "runtime/spinel/active_support_date_parsing.rb": ["date_columns_spinel"],
             "runtime/spinel/active_support_date_parsing.rbs": ["date_columns_spinel"],
             "runtime/spinel/active_record_date_serialization.rb": [

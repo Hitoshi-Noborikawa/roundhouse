@@ -63,12 +63,6 @@ module ActiveRecord
     def initialize: (?String message) -> void
   end
 
-  class StaleObjectError < ActiveRecordError
-    def record: () -> Object?
-    def attempted_action: () -> Object?
-    def initialize: (?Object? record, ?Object? attempted_action) -> void
-  end
-
   # Raised by `Base.find` when no row matches the given id.
   class RecordNotFound < ActiveRecordError
     # `id` is the value passed to `find`: a String from params, an

@@ -1161,17 +1161,16 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
-/// True when the app schema or emitted roots mention a date-only value.
-/// Shared by the unsupported-target gate and Spinel's conditional Date
-/// runtime load (matz/spinel#7334: defining `Date#strftime` currently
-/// breaks poly `Time | Date` dispatch for `Time#strftime`).
+/// True when the app schema or emitted roots mention a date-only value
+/// (or `DateTime`). Shared by the unsupported-target gate and Spinel's
+/// conditional load of its `date` package.
 fn app_uses_date(app: &App) -> bool {
     fn expr_has_date(e: &crate::expr::Expr) -> bool {
         if e.ty.as_ref().is_some_and(crate::ty::Ty::contains_date)
             || matches!(&*e.node, crate::expr::ExprNode::Cast { target_ty, .. } if target_ty.contains_date())
             || matches!(&*e.node, crate::expr::ExprNode::Const { path }
                 if (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty()))
-                    && path.last().is_some_and(|name| name.as_str() == "Date"))
+                    && path.last().is_some_and(|name| matches!(name.as_str(), "Date" | "DateTime")))
         {
             return true;
         }
@@ -1244,20 +1243,20 @@ fn app_uses_date(app: &App) -> bool {
 }
 
 /// Insert Date-package requires after `active_record_serialization` in
-/// `boot.rb`. Spinel only — the program-defined `Date` class and the
-/// date-column JSON reopen belong on that target (matz/spinel#7334).
+/// `boot.rb`. Spinel only — Spinel's `date` package and the date-column
+/// JSON reopen belong on that target.
 fn inject_date_package_into_boot(boot: &mut String) -> Result<(), String> {
     let anchor = "require_relative \"runtime/active_record_serialization\"\n";
     // Prefer concat! over one escaped multiline string: the CI
     // planner's project.rs body-scope regex backtracks for minutes
     // on `\"` + `\` continuations in a single literal this large.
     let inject = concat!(
-        "# Date package — only when the app uses date-only values (matz/spinel#7334).\n",
-        "require_relative \"runtime/date\"\n",
+        "# Date package — only when the app uses Date or DateTime.\n",
+        "require \"date\"\n",
         "require_relative \"runtime/active_support_date_parsing\"\n",
         "require_relative \"runtime/active_record_date_serialization\"\n",
     );
-    if boot.contains("require_relative \"runtime/date\"") {
+    if boot.contains("require_relative \"runtime/active_support_date_parsing\"") {
         return Ok(());
     }
     if let Some(at) = boot.find(anchor) {
@@ -1274,8 +1273,7 @@ fn inject_date_package_into_boot(boot: &mut String) -> Result<(), String> {
 
 /// CRuby/JRuby overlay boot replaces Spinel's boot wholesale, wiping
 /// the Date-package inject. Re-inject **only** the shared `date_*`
-/// calendar helpers (invariant 2). Do not load Spinel's `date.rb`
-/// polyfill (clobbers stdlib Date → `@year` nil on `>>`) or
+/// calendar helpers (invariant 2). Do not load
 /// `active_record_date_serialization` (overlay already wraps
 /// `_as_json_only`; a second alias infinite-recurses).
 fn inject_cruby_date_calendar_helpers(boot: &mut String) -> Result<(), String> {
@@ -1623,9 +1621,9 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
 
 /// The date and decimal coercions `ingest::dry_struct` and
 /// `ingest::dry_initializer` generate call
-/// stdlib the CRuby and JRuby trees load. Spinel's tree has its own
-/// `Date` (`runtime/spinel/date.rb`, ISO `parse` included) and
-/// `BigDecimal()`, but no `DateTime`, `Time.parse` or
+/// stdlib the CRuby and JRuby trees load. Spinel's tree has `Date`
+/// (Spinel's `date` package) and `BigDecimal()`. Its `DateTime` coercion
+/// stays reported until a run pins it, and it has no `Time.parse` or
 /// `BigDecimal.interpret_loosely`; the other targets have none of them.
 fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
@@ -2495,12 +2493,11 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
     let mut trimmed = app.clone();
     // A class records no span of its own: the first real file among its parts names where it was written.
     let file_of_class = |c: &crate::dialect::LibraryClass| {
-        c.methods
-            .iter()
-            .map(|m| m.body.span.file)
-            .chain(c.constants.iter().map(|(_, value)| value.span.file))
-            .chain(std::iter::once(c.parent_span.file))
+        // The class's own header first: a macro the gem defines (parslet's `rule`) leaves its expanded methods' spans in the gem.
+        std::iter::once(c.parent_span.file)
             .chain(c.include_spans.iter().map(|span| span.file))
+            .chain(c.constants.iter().map(|(_, value)| value.span.file))
+            .chain(c.methods.iter().map(|m| m.body.span.file))
             .find(|file| file.0 != 0)
     };
     let dropped: crate::det::HashSet<String> = app
@@ -2536,6 +2533,15 @@ fn target_files_inner(
         Some(trimmed) => {
             without_auto_sources = trimmed;
             &without_auto_sources
+        }
+        None => app,
+    };
+    // The Spinel tree carries only the part of a gem compiled from source the program reaches.
+    let shaken_gems;
+    let app = match (target == BuildTarget::Spinel).then(|| crate::source_gem_shake::shake(app)).flatten() {
+        Some(trimmed) => {
+            shaken_gems = trimmed;
+            &shaken_gems
         }
         None => app,
     };
@@ -6194,7 +6200,7 @@ enum RequireTarget {
 /// flags`) makes that fatal. The spinel tree leaves them out, as it did
 /// before app requires were carried; the ruby family loads them all.
 const SPINEL_LACKS: &[&str] = &[
-    "date", "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
+    "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
     "weakref",
 ];
 
@@ -7020,9 +7026,10 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "Arel::Nodes::Ascending",
     "Arel::Nodes::Descending",
     "Arel::Nodes::Predicate",
-    // `runtime/ruby/active_record/connection_not_established.rb` and
-    // `encryption_errors.rb`. A rescue of ConnectionNotEstablished
-    // catches the two children. Strict targets do not load the files.
+    // `runtime/ruby/active_record/connection_not_established.rb`,
+    // `encryption_errors.rb` and `stale_object_error.rb`. A rescue of
+    // ConnectionNotEstablished catches the two children. Strict targets
+    // do not load the files.
     "ActiveRecord::ConnectionFailed",
     "ActiveRecord::ConnectionTimeoutError",
     "ActiveRecord::Encryption::Errors::Decryption",
@@ -7107,6 +7114,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
         | "StringScanner" | "Zlib::GzipWriter"
+        // ruby-vips on the ruby family, spinel-ruby-vips on spinel.
+        | "Vips::Image"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
@@ -7917,22 +7926,18 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         ));
     }
 
-    // Program-defined Date package for apps that use date-only values.
-    // Loading Date#strftime into every Spinel tree breaks poly
-    // Time|Date receivers (matz/spinel#7334). Default boot has no Date
-    // requires; when needed we inject the package (class + date parse/
-    // format + date JSON rewrite) after always-on AR serialization.
+    // Spinel's `date` package for apps that use Date or DateTime. Default
+    // boot has no Date requires; when needed we inject the package (stdlib
+    // date + date parse/format + date JSON rewrite) after always-on AR
+    // serialization.
     const DATE_PACKAGE_FILES: &[&str] = &[
-        "runtime/date.rb",
         "runtime/active_support_date_parsing.rb",
         "runtime/active_record_date_serialization.rb",
-        "sig/runtime/date.rbs",
         "sig/runtime/active_support_date_parsing.rbs",
         "sig/runtime/active_record_date_serialization.rbs",
     ];
     if needs_date {
         for (src, dest) in [
-            ("runtime/spinel/date.rbs", "sig/runtime/date.rbs"),
             (
                 "runtime/spinel/active_support_date_parsing.rbs",
                 "sig/runtime/active_support_date_parsing.rbs",
@@ -10347,10 +10352,63 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
     }
 }
 
+/// Take out of `runtime/gem_facades.rb` (and its `.rbs`) each top-level
+/// `module X` / `class X` block whose namespace a gem compiled from source
+/// (`ingest::auto_source_gems`) defines: that is the real class, and the
+/// façade's raising one would be a second definition of it (spinel
+/// refuses two signatures for one method).
+fn drop_facades_the_program_defines(files: &mut [(String, String)]) {
+    let top_name = |line: &str| -> Option<String> {
+        let rest = line.strip_prefix("module ").or_else(|| line.strip_prefix("class "))?;
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        (!name.is_empty()).then_some(name)
+    };
+    // Not any program file: campfire's own `module WebPush` reopens the namespace its façade fills.
+    // Only a file compiled from a gem's source (its `#<SPINEL_SOURCE>` line names the mount) is the gem's.
+    let defined: std::collections::BTreeSet<String> = files
+        .iter()
+        .filter(|(p, c)| {
+            !p.starts_with("runtime/")
+                && p.ends_with(".rb")
+                && c.lines().any(|l| l.starts_with("#<SPINEL_SOURCE>") && l.contains(crate::ingest::source_gems::MOUNT))
+        })
+        .flat_map(|(_, c)| c.lines().filter_map(top_name).collect::<Vec<_>>())
+        .collect();
+    for (path, content) in files.iter_mut() {
+        if path != "runtime/gem_facades.rb" && path != "runtime/gem_facades.rbs" {
+            continue;
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        let mut keep = vec![true; lines.len()];
+        let mut i = 0;
+        while i < lines.len() {
+            if top_name(lines[i]).is_some_and(|n| defined.contains(&n)) {
+                let mut start = i;
+                // The block's own comment header goes with it.
+                while start > 0 && lines[start - 1].starts_with('#') {
+                    start -= 1;
+                }
+                let end = (i + 1..lines.len()).find(|&j| lines[j] == "end").unwrap_or(lines.len() - 1);
+                keep[start..=end].iter_mut().for_each(|k| *k = false);
+                i = end + 1;
+            } else {
+                i += 1;
+            }
+        }
+        if keep.iter().any(|k| !k) {
+            let mut out: String = lines.iter().zip(&keep).filter(|(_, k)| **k).map(|(l, _)| format!("{l}\n")).collect();
+            if !content.ends_with('\n') {
+                out.pop();
+            }
+            *content = out;
+        }
+    }
+}
+
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 29] = [
+const BUNDLED: [(&str, &str); 30] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -10376,6 +10434,9 @@ const BUNDLED: [(&str, &str); 29] = [
     ("Set", "set"),
     ("StringIO", "stringio"),
     ("StringScanner", "strscan"),
+    // `Vips::Image.new_from_buffer`: the ruby-vips gem on CRuby/JRuby, the
+    // spinel-ruby-vips package on spinel; an app requires it by hand.
+    ("Vips", "vips"),
     ("URI", "uri"),
     // `Net::HTTP` — a REAL client on both lanes, so unlike IPAddr there
     // is nothing for roundhouse to port: CRuby resolves this to its own
@@ -10871,6 +10932,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         apply_spinel_css_select(&mut files);
     }
 
+    // A gem compiled from source (svg-graph's `SVG`) defines what its raising façade stands in for.
+    drop_facades_the_program_defines(&mut files);
+
     // redis: the same swap, for a tree on queue_adapter :sidekiq with a
     // payload job (`needs_redis`, recorded as the registry's `sidekiq?`).
     // `runtime/sidekiq_redis.rb` becomes the real connection over
@@ -10941,7 +11005,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     // package is the spinel-ruby-vips spin package; the manifest gains
     // it below, in the same git form bcrypt uses and for the same
     // reason (matz/spin-index#7 is the registration).
-    let needs_vips = apply_image_processor_wiring(&mut files)?;
+    // An app that draws with vips itself (lobsters' StoryImage) needs the package too.
+    let needs_vips = apply_image_processor_wiring(&mut files)?
+        || files.iter().any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, "Vips"));
 
     write_bundled_requires(&mut files);
     // 6. Package manifest + compile root.

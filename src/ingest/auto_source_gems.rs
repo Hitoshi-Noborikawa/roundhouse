@@ -33,7 +33,7 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
         .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
         .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
         .collect();
-    let ported = crate::gems::spinel_runtime_constants();
+    let ported = crate::gems::ported_runtime_constants();
     // Not a gem the Spinel tree already carries (a spin package or a facade): the same boundary `project::report_spinel_unknown_gem_constants` reports.
     let carried = crate::gems::native_extension_gem_namespaces(app);
     let mut out: BTreeSet<String> = BTreeSet::new();

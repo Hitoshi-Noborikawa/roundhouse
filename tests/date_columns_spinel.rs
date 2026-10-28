@@ -11,7 +11,7 @@ fn spinel_gate_date_column_crud_and_month_shifts_run() {
             "  create_table \"calendar_entries\" do |t|\n    t.date \"due_on\"\n  end\n\n  create_table \"articles\"",
         )
         .write("app/models/calendar_entry.rb", include_str!("date_columns_model.rb"));
-    let run = overlay.run_spinel(r#"
+    let run = overlay.run_spinel(r##"
 Db.configure(":memory:")
 Schema.statements.each { |sql| Db.exec(sql) }
 ActiveRecord.adapter = SqliteAdapter
@@ -85,7 +85,7 @@ begin
 rescue Date::Error
 end
 raise SqliteAdapter.escape_value(Date.new(2024, 2, 29)).inspect unless SqliteAdapter.escape_value(Date.new(2024, 2, 29)) == "'2024-02-29'"
-raise Date.new(2024, 1, 31).inspect.inspect unless Date.new(2024, 1, 31).inspect == "2024-01-31"
+raise Date.new(2024, 1, 31).inspect.inspect unless Date.new(2024, 1, 31).inspect == "#<Date: 2024-01-31 ((2460341j,0s,0n),+0s,2299161j)>"
 raise Date.new(2024, 1, 31).xmlschema.inspect unless Date.new(2024, 1, 31).xmlschema == "2024-01-31"
 raise ActiveSupport.date_beginning_of_month(Date.new(2024, 2, 14)).iso8601 unless ActiveSupport.date_beginning_of_month(Date.new(2024, 2, 14)).iso8601 == "2024-02-01"
 raise ActiveSupport.date_end_of_month(Date.new(2024, 2, 14)).iso8601 unless ActiveSupport.date_end_of_month(Date.new(2024, 2, 14)).iso8601 == "2024-02-29"
@@ -94,7 +94,7 @@ raise ActiveSupport.date_beginning_of_day(Date.new(2024, 2, 14)).strftime("%Y-%m
 raise ActiveSupport.date_end_of_day(Date.new(2024, 2, 14)).strftime("%Y-%m-%d %H:%M:%S") unless ActiveSupport.date_end_of_day(Date.new(2024, 2, 14)).strftime("%Y-%m-%d %H:%M:%S") == "2024-02-14 23:59:59"
 raise ActiveSupport.date_current(ActiveSupport.now).inspect unless ActiveSupport.date_current(ActiveSupport.now).year >= 2024
 puts "Spinel Date column contract passed"
-"#);
+"##);
     run.assert_passes();
     assert!(run.stdout.contains("Spinel Date column contract passed"));
 }

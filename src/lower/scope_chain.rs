@@ -3755,8 +3755,13 @@ fn lower_relation_args(
     ctx: &Ctx,
 ) -> Vec<Symbol> {
     let mut aliases: Vec<Symbol> = Vec::new();
+    // Not by the written name: lobsters' Search builds its query with `where!` and `joins!`, which left `story:` and `:user` unresolved.
+    let canonical = crate::catalog::BUILDER_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == method.as_str())
+        .map_or(method.as_str(), |(_, name)| name);
     // Not handed to the runtime as an Array: Rails flattens `order([a, b])` into `order(a, b)`, and the runtime's parts are the elements.
-    if matches!(method.as_str(), "order" | "reorder")
+    if matches!(canonical, "order" | "reorder")
         && args.iter().any(|a| matches!(&*a.node, ExprNode::Array { .. }))
     {
         let mut flat = Vec::with_capacity(args.len());
@@ -3768,9 +3773,9 @@ fn lower_relation_args(
         }
         *args = flat;
     }
-    match method.as_str() {
+    match canonical {
         "joins" | "left_outer_joins" | "left_joins" => {
-            let kind = if method.as_str() == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };
+            let kind = if canonical == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };
             for a in args {
                 if let Some(sql) = join_spec_sql(model, a, kind, ctx) {
                     *a.node = ExprNode::Lit { value: Literal::Str { value: sql } };
@@ -3799,7 +3804,7 @@ fn lower_relation_args(
             // half a conversion is worse than none (the multi-key form
             // keeps its current, honest, matches-nothing behavior until
             // a corpus app writes one).
-            if matches!(method.as_str(), "where" | "not" | "find_by" | "find_by!")
+            if matches!(canonical, "where" | "not" | "find_by" | "find_by!")
                 && args.len() == 1
             {
                 if let Some((fragment, binds)) = range_condition_fragment(model, &args[0], ctx) {
@@ -3811,6 +3816,7 @@ fn lower_relation_args(
             for a in args.iter_mut() {
                 let span = a.span;
                 let ExprNode::Hash { entries, .. } = &mut *a.node else { continue };
+                hoist_nested_association_tables(model, entries, ctx);
                 let mut type_conditions: Vec<(Expr, Expr)> = Vec::new();
                 // (value, type column) of each polymorphic condition whose
                 // value may be nil at run time; see the guard after the loop.
@@ -3897,7 +3903,16 @@ fn lower_relation_args(
                         }
                         continue;
                     }
-                    let Some(fk) = ctx.assocs.belongs_to_fk(model, key) else { continue };
+                    let Some(fk) = ctx.assocs.belongs_to_fk(model, key) else {
+                        // Not this model's column: Rails reads `where(tags: tags)` on a has_many as the associated table's key (`tags.id IN (…)`).
+                        if let Some(table) = ctx.assocs.assoc_table(model, key) {
+                            let id = syn(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("id") } });
+                            let value = std::mem::replace(v, syn(span, ExprNode::Lit { value: Literal::Nil }));
+                            *v = syn(span, ExprNode::Hash { entries: vec![(id, value)], kwargs: false });
+                            *k.node = ExprNode::Lit { value: Literal::Sym { value: table.clone() } };
+                        }
+                        continue;
+                    };
                     *k.node = ExprNode::Lit { value: Literal::Sym { value: fk.clone() } };
                     // The VALUE rides through unchanged. It used to be
                     // narrowed to `v && v.id` for plain reads, but an
@@ -4001,6 +4016,42 @@ fn lower_relation_args(
     aliases
 }
 
+/// `where(story: { users: { username: x } })` after `joins(story: :user)`:
+/// Rails resolves the inner keys against the association's tables, so the
+/// condition is `users.username = x`. Left nested, the runtime read
+/// `story.users` as a column.
+fn hoist_nested_association_tables(model: &ClassId, entries: &mut Vec<(Expr, Expr)>, ctx: &Ctx) {
+    let mut flat: Vec<(Expr, Expr)> = Vec::with_capacity(entries.len());
+    for (k, v) in entries.drain(..) {
+        let target = match (&*k.node, &*v.node) {
+            (ExprNode::Lit { value: Literal::Sym { value: key } }, ExprNode::Hash { entries: inner, .. })
+                if !inner.is_empty()
+                    && inner.iter().all(|(ik, iv)| {
+                        matches!(&*ik.node, ExprNode::Lit { value: Literal::Sym { .. } })
+                            && matches!(&*iv.node, ExprNode::Hash { .. })
+                    }) =>
+            {
+                ctx.assocs.assoc_target(model, key).cloned()
+            }
+            _ => None,
+        };
+        let Some(target) = target else {
+            flat.push((k, v));
+            continue;
+        };
+        let ExprNode::Hash { entries: inner, .. } = *v.node else { unreachable!() };
+        for (mut ik, iv) in inner {
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &mut *ik.node
+                && let Some(table) = ctx.assocs.assoc_table(&target, value)
+            {
+                *value = table.clone();
+            }
+            flat.push((ik, iv));
+        }
+    }
+    *entries = flat;
+}
+
 /// Re-emit an already-lowered `joins(:assoc)` in the receiver chain with
 /// the association-name alias Rails uses once a `where` hash keys off
 /// that name. Both spellings come from the registry, so the match is on
@@ -4008,8 +4059,8 @@ fn lower_relation_args(
 /// (or a chain with no join at all) is left alone.
 fn alias_join_in_chain(expr: &mut Expr, plain: &str, aliased: &str) -> bool {
     let ExprNode::Send { recv, method, args, .. } = &mut *expr.node else { return false };
-    if matches!(method.as_str(), "joins" | "left_outer_joins" | "left_joins") {
-        let kind = if method.as_str() == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };
+    if matches!(method.as_str(), "joins" | "joins!" | "left_outer_joins" | "left_joins") {
+        let kind = if method.as_str().starts_with("joins") { "INNER JOIN" } else { "LEFT OUTER JOIN" };
         for a in args.iter_mut() {
             let ExprNode::Lit { value: Literal::Str { value } } = &mut *a.node else { continue };
             if *value == format!("{kind} {plain}") {
@@ -4026,14 +4077,35 @@ fn alias_join_in_chain(expr: &mut Expr, plain: &str, aliased: &str) -> bool {
 
 /// Apply every alias `lower_relation_args` asked for to the receiver
 /// chain the `where` hangs off.
-fn apply_join_aliases(recv: &mut Expr, model: &ClassId, aliases: &[Symbol], ctx: &Ctx) {
+fn apply_join_aliases(recv: &mut Expr, model: &ClassId, aliases: &[Symbol], ctx: &Ctx) -> Vec<Symbol> {
+    let mut unapplied = Vec::new();
     for assoc in aliases {
         let (Some(plain), Some(aliased)) =
             (ctx.assocs.join_tail(model, assoc), ctx.assocs.aliased_join_tail(model, assoc))
         else {
             continue;
         };
-        alias_join_in_chain(recv, plain, aliased);
+        if !alias_join_in_chain(recv, plain, aliased) {
+            unapplied.push(assoc.clone());
+        }
+    }
+    unapplied
+}
+
+/// `query.joins!(:article); query.where!(article: { title: t })`: the join
+/// is another statement's, so it keeps the table name, and the condition
+/// names the table too rather than an alias no join declares.
+fn key_unapplied_aliases_by_table(args: &mut [Expr], model: &ClassId, unapplied: &[Symbol], ctx: &Ctx) {
+    for a in args.iter_mut() {
+        let ExprNode::Hash { entries, .. } = &mut *a.node else { continue };
+        for (k, _) in entries.iter_mut() {
+            let ExprNode::Lit { value: Literal::Sym { value } } = &mut *k.node else { continue };
+            if unapplied.contains(value)
+                && let Some(table) = ctx.assocs.assoc_table(model, value)
+            {
+                *value = table.clone();
+            }
+        }
     }
 }
 
@@ -5143,7 +5215,8 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 {
                     let aliases = lower_relation_args(&mr, &method, &mut args, ctx);
                     let mut r = r;
-                    apply_join_aliases(&mut r, &mr, &aliases, ctx);
+                    let unapplied = apply_join_aliases(&mut r, &mr, &aliases, ctx);
+                    key_unapplied_aliases_by_table(&mut args, &mr, &unapplied, ctx);
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return Some(mr);
                 }

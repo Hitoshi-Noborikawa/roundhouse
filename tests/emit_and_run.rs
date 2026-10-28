@@ -88,6 +88,8 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "emit_and_run/source_gem_facade.rs"]
+mod source_gem_facade;
 #[path = "support/for_loops.rs"]
 mod for_loops_contract;
 #[path = "emit_and_run/for_loops.rs"]
@@ -20004,3 +20006,30 @@ end
         .run_test("test/models/article_json_escape_test.rb")
         .assert_passes();
 }
+
+#[path = "emit_and_run/fresh_builtin_extend.rs"]
+mod fresh_builtin_extend;
+
+#[path = "emit_and_run/module_function_includer.rs"]
+mod module_function_includer;
+
+#[path = "emit_and_run/unknown_return.rs"]
+mod unknown_return;
+
+#[path = "emit_and_run/hash_ivar_symbol_keys.rs"]
+mod hash_ivar_symbol_keys;
+
+#[path = "emit_and_run/date_time_package.rs"]
+mod date_time_package;
+
+#[path = "emit_and_run/data_point_shapes.rs"]
+mod data_point_shapes;
+
+#[path = "emit_and_run/bang_relation_builders.rs"]
+mod bang_relation_builders;
+
+#[path = "emit_and_run/helper_param_after_views.rs"]
+mod helper_param_after_views;
+
+#[path = "emit_and_run/layout_ivar_unset.rs"]
+mod layout_ivar_unset;

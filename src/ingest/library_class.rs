@@ -612,6 +612,16 @@ pub(super) fn library_class_and_struct_base(
         mut class_initializers,
         class_attributes: _,
     } = walk_decl_body(class.body(), &owner, file, DeclBodyMode::Instance)?;
+    // Not the write under a superclass: Ruby skips `X = … unless defined?(X)` when the parent holds `X`, which this body cannot see.
+    if class.superclass().is_some()
+        && let Some(stmts) = class.body().and_then(|b| b.as_statements_node())
+    {
+        for stmt in stmts.body().iter() {
+            if let Some(cw) = constant_write_unless_defined(&stmt) {
+                constants.retain(|(n, _)| n.as_str() != constant_id_str(&cw.name()));
+            }
+        }
+    }
     // An alias of a builtin captured the superclass's method where the
     // superclass defines it; the delegation can't tell (`OBJECT_BUILTINS`).
     if class.superclass().is_some() && methods.iter().any(|m| delegates_to_builtin(&m.body)) {
@@ -2232,7 +2242,7 @@ pub(super) fn walk_decl_body<'pr>(
     file: &str,
     mode: DeclBodyMode,
 ) -> IngestResult<DeclBody> {
-    let visibility = Visibility::resolve(body.as_ref(), file, None)?;
+    let visibility = Visibility::resolve_owned(body.as_ref(), file, None, Some(owner))?;
     walk_decl_body_with_visibility(body, owner, file, mode, &visibility)
 }
 
@@ -2284,11 +2294,11 @@ fn walk_decl_body_with_visibility<'pr>(
     let mut class_attributes: HashSet<Symbol> = HashSet::default();
     let mut class_attr_defaults: IndexMap<Symbol, Expr> = IndexMap::new();
     // `module_function` (called bare inside a module body) marks every
-    // subsequent direct `def` as a module-function — both an instance
-    // method AND a class method. For our targets (which call these as
-    // `Mod.x(...)`), we only need the class-method form, so flip the
-    // receiver to Class. Doesn't affect nested `class`/`module` bodies
-    // — they get their own walk_decl_body recursion.
+    // subsequent direct `def` as a module-function — both a private
+    // instance method AND a public class method. The def becomes the
+    // class method and a private copy goes to `module_function_copies`.
+    // Doesn't affect nested `class`/`module` bodies — they get their own
+    // walk_decl_body recursion.
     let mut module_function_active = false;
     // `extend self` exposes methods with their instance visibility; unlike
     // module_function, it neither makes a public copy nor ends at `private`.
@@ -2300,6 +2310,7 @@ fn walk_decl_body_with_visibility<'pr>(
     // appended to the same vec but belong to a different scope.
     let mut module_function_named: Vec<String> = Vec::new();
     let mut direct_def_positions: Vec<usize> = Vec::new();
+    let mut module_function_copies = Vec::new();
 
     let Some(b) = body else {
         return Ok(out);
@@ -2415,6 +2426,8 @@ fn walk_decl_body_with_visibility<'pr>(
         }
         names
     });
+    // A module mixed in before `X = … unless defined?(X)` may hold `X` already.
+    let mut mixed_in = false;
     for statement in statements {
         // An `if` / `unless` around a `def`, a visibility marker, or an
         // accessor this walk would otherwise lower is not a statement it
@@ -2422,6 +2435,20 @@ fn walk_decl_body_with_visibility<'pr>(
         // wrapper replaces it with its inner `def`. An accessor in the
         // branch has neither a `def` nor a marker, so reject it here:
         // skipping it would drop `attr_reader :token` with no error.
+        // Not an unmodeled conditional: when the class body runs, a constant it has not written yet is undefined, so svg-graph's `DEFAULT_SHAPE = … unless defined? DEFAULT_SHAPE` is the write.
+        if statement.as_call_node().is_some_and(|c| {
+            c.receiver().is_none_or(|r| r.as_self_node().is_some()) && matches!(constant_id_str(&c.name()), "include" | "extend" | "prepend")
+        }) {
+            mixed_in = true;
+        }
+        if !mixed_in
+            && let Some(cw) = constant_write_unless_defined(&statement)
+            && !out.constants.iter().any(|(n, _)| n.as_str() == constant_id_str(&cw.name()))
+        {
+            let name = Symbol::from(constant_id_str(&cw.name()));
+            out.constants.push((name, ingest_expr(&cw.value(), file)?));
+            continue;
+        }
         if statement.as_if_node().is_some() || statement.as_unless_node().is_some() {
             Visibility::reject_conditional_declaration(&statement, file)?;
             reject_conditional_accessor(&statement, file)?;
@@ -2566,6 +2593,9 @@ fn walk_decl_body_with_visibility<'pr>(
             }
             visibility.apply(&statement, &mut m);
             if module_function_active && m.receiver == MethodReceiver::Instance {
+                let mut copy = m.clone();
+                copy.visibility = crate::dialect::MethodVisibility::Private;
+                module_function_copies.push((out.methods.len(), copy));
                 // The retained singleton copy is public even if the original
                 // instance definition is private/protected, unless
                 // `private_class_method` / `public_class_method` already
@@ -3132,11 +3162,11 @@ fn walk_decl_body_with_visibility<'pr>(
     // method — and lobsters uses both spellings of the same name
     // (`EmailBlocklistValidation.email_on_blocklist?` from a mailer and
     // a view; a bare `email_on_blocklist?(email)` from the sibling
-    // validation method that runs on an includer instance). We emit one
-    // method per name, so promoting alone would just move the breakage
-    // from the module spelling to the instance one. Retarget the
-    // sibling bare calls to the module spelling instead, which keeps a
-    // single definition and leaves both call sites resolving.
+    // validation method that runs on an includer instance; parslet's
+    // `match` / `str` called bare inside a parser's rules). Both are kept:
+    // the promoted method here, and a private instance copy appended at
+    // the end. The promoted copy's sibling bare calls are retargeted to
+    // the module spelling, since its `self` is the module.
     if !module_function_named.is_empty() {
         let mut promoted: Vec<Symbol> = Vec::new();
         for pos in &direct_def_positions {
@@ -3144,6 +3174,9 @@ fn walk_decl_body_with_visibility<'pr>(
                 .iter()
                 .any(|n| n == out.methods[*pos].name.as_str())
             {
+                let mut copy = out.methods[*pos].clone();
+                copy.visibility = crate::dialect::MethodVisibility::Private;
+                module_function_copies.push((*pos, copy));
                 out.methods[*pos].receiver = MethodReceiver::Class;
                 // Same rule as the bare marker: the copy starts public,
                 // and a later `private_class_method :name` keeps the
@@ -3160,6 +3193,15 @@ fn walk_decl_body_with_visibility<'pr>(
                 // self-recursive call needs the same retarget.
                 retarget_module_function_calls(&mut m.body, owner, &promoted);
             }
+        }
+    }
+
+    // Not kept beside an earlier instance method of the name (an `attr_reader :value`): the module function replaces it, and only a later `def` wins.
+    for (at, copy) in module_function_copies {
+        match out.methods.iter().position(|e| e.name == copy.name && e.receiver == MethodReceiver::Instance) {
+            Some(existing) if existing < at => out.methods[existing] = copy,
+            Some(_) => {}
+            None => out.methods.push(copy),
         }
     }
 
@@ -5551,4 +5593,17 @@ fn is_ruby_reserved_word(m: &str) -> bool {
             | "redo" | "rescue" | "retry" | "return" | "self" | "super" | "then" | "true" | "undef"
             | "unless" | "until" | "when" | "while" | "yield"
     )
+}
+
+/// `NAME = value unless defined?(NAME)`, no `else`: the write.
+fn constant_write_unless_defined<'pr>(stmt: &ruby_prism::Node<'pr>) -> Option<ruby_prism::ConstantWriteNode<'pr>> {
+    let unless = stmt.as_unless_node()?;
+    if unless.else_clause().is_some() {
+        return None;
+    }
+    let body: Vec<_> = unless.statements()?.body().iter().collect();
+    let [only] = body.as_slice() else { return None };
+    let write = only.as_constant_write_node()?;
+    let tested = unless.predicate().as_defined_node()?.value().as_constant_read_node()?;
+    (tested.name().as_slice() == write.name().as_slice()).then_some(write)
 }
