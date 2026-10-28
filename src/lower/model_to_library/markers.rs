@@ -1990,7 +1990,7 @@ fn reads_only(expr: &Expr, bound: &[&Symbol]) -> bool {
     }
 }
 
-fn collect_local_names(expr: &Expr, names: &mut crate::det::HashSet<Symbol>) {
+pub(crate) fn collect_local_names(expr: &Expr, names: &mut crate::det::HashSet<Symbol>) {
     match &*expr.node {
         ExprNode::Var { name, .. } => {
             names.insert(name.clone());

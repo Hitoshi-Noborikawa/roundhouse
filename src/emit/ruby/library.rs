@@ -5521,6 +5521,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
     // the same helper, so the projection has to read what the signature
     // actually says.
     let helper_param_tys = route_helper_param_types(app);
+    let integer_columns = integer_columns(app);
     let mut sig = RecordSignals {
         all_models: &all_models,
         slug_models: &slug_models,
@@ -5529,6 +5530,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         class_method_targets: &class_method_targets,
         direct_helpers: &direct_helpers,
         helper_param_tys: &helper_param_tys,
+        integer_columns: &integer_columns,
         controller_names: app
             .controllers
             .iter()
@@ -5537,6 +5539,8 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         self_returns: crate::det::HashMap::default(),
         local_records: crate::det::HashMap::default(),
         self_model: None,
+        next_local: std::cell::Cell::new(0),
+        taken_locals: std::cell::RefCell::new(crate::det::HashSet::default()),
     };
     // What each INSTANCE method in this slice answers, to a fixpoint.
     //
@@ -5614,6 +5618,12 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         for m in &mut lc.methods {
             sig.local_records.clear();
             sig.local_records = collect_local_records(&m.body, &sig);
+            {
+                let mut taken = sig.taken_locals.borrow_mut();
+                taken.clear();
+                taken.extend(m.params.iter().map(|p| p.name.clone()));
+                crate::lower::model_to_library::markers::collect_local_names(&m.body, &mut taken);
+            }
             rewrite_route_params(&mut m.body, &sig);
         }
     }
@@ -5755,6 +5765,22 @@ fn models_overriding_to_param(app: &App) -> crate::det::HashSet<String> {
         .collect()
 }
 
+/// `(model, column)` for each integer column of a model's table: what
+/// `comment.article_id` reads, where a view body still carries `Ty::Var`.
+fn integer_columns(app: &App) -> crate::det::HashSet<(String, String)> {
+    use crate::schema::ColumnType;
+    let mut out = crate::det::HashSet::default();
+    for m in &app.models {
+        let Some(table) = app.schema.tables.get(&m.table.0) else { continue };
+        for c in &table.columns {
+            if matches!(c.col_type, ColumnType::Integer | ColumnType::BigInt) {
+                out.insert((m.name.0.as_str().to_string(), c.name.as_str().to_string()));
+            }
+        }
+    }
+    out
+}
+
 /// Singular association reader → target model name. `belongs_to` and
 /// `has_one` only: a `has_many` reader is a collection and never lands
 /// in a path segment. An ambiguous name (two models naming the same
@@ -5872,6 +5898,8 @@ pub(crate) struct RecordSignals<'a> {
     direct_helpers: &'a crate::det::HashSet<String>,
     /// `<helper>_path` -> declared type per positional parameter.
     helper_param_tys: &'a crate::det::HashMap<String, Vec<crate::ty::Ty>>,
+    /// `(model, column)` for each integer column (`integer_columns`).
+    integer_columns: &'a crate::det::HashSet<(String, String)>,
     /// Controller class names (last path segment), so a class-side
     /// respelling (`ApplicationController.last_room_visited`) is
     /// recognized as the controller-method read it is.
@@ -5887,6 +5915,11 @@ pub(crate) struct RecordSignals<'a> {
     /// The model whose methods are being rewritten, when the enclosing
     /// class is one — what a bare `self` names there.
     self_model: Option<String>,
+    /// Numbers the `route_segment_<n>` locals an optional segment binds.
+    next_local: std::cell::Cell<usize>,
+    /// The names the method being rewritten binds (its params and locals),
+    /// plus the `route_segment_<n>` taken so far. Rebuilt per method.
+    taken_locals: std::cell::RefCell<crate::det::HashSet<Symbol>>,
 }
 
 fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
@@ -5934,7 +5967,73 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
                     continue;
                 }
             }
-            if wants_str_here && (is_bare_id_read(arg) || is_symbol_arg(arg)) {
+            // Any other Integer too (roundhouse#1468): a segment one call
+            // fills with a String is declared `String`, and a foreign key
+            // another call passes (`comment.article_id`) is an Integer
+            // there. Rails renders it with `to_param`, its `to_s`. A view
+            // body's read still carries `Ty::Var`, so a record's integer
+            // column counts as well.
+            // An optional segment (`/top(/:length)`) is `String | nil`
+            // (CodeRabbit on #1473). An Integer there is its `to_s` too, but
+            // a `nil` has to stay `nil`: Rails drops the segment for it, and
+            // `nil.to_s` would keep an empty one. A column read can be nil
+            // whatever the schema says (a new record's key, a reader the
+            // model overrides), so the argument is bound once and only a
+            // value that isn't nil is converted.
+            let wants_opt_str_here = matches!(
+                declared.as_ref().and_then(|tys| tys.get(idx)),
+                Some(crate::ty::Ty::Union { variants })
+                    if variants.len() == 2
+                        && variants.contains(&crate::ty::Ty::Str)
+                        && variants.contains(&crate::ty::Ty::Nil)
+            );
+            // `Integer | nil` too (`flag ? n : nil`): the binding keeps the nil.
+            let int_or_nil = matches!(&arg.ty, Some(crate::ty::Ty::Union { variants })
+                if variants.len() == 2
+                    && variants.contains(&crate::ty::Ty::Int)
+                    && variants.contains(&crate::ty::Ty::Nil));
+            if wants_opt_str_here
+                && (matches!(arg.ty, Some(crate::ty::Ty::Int)) || int_or_nil || is_integer_column_read(arg, sig))
+            {
+                let span = arg.span;
+                let value = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+                // A name the method doesn't already bind: the `Let` assigns in
+                // the method's own scope.
+                let name = loop {
+                    let n = sig.next_local.get();
+                    sig.next_local.set(n + 1);
+                    let candidate = Symbol::from(format!("route_segment_{n}"));
+                    if sig.taken_locals.borrow_mut().insert(candidate.clone()) {
+                        break candidate;
+                    }
+                };
+                let value_ty = value.ty.clone().unwrap_or(crate::ty::Ty::Untyped);
+                let typed = |node: ExprNode, ty: crate::ty::Ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
+                let read = || typed(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() }, value_ty.clone());
+                let send = |method: &str, ty: crate::ty::Ty| {
+                    typed(
+                        ExprNode::Send { recv: Some(read()), method: Symbol::from(method), args: vec![], block: None, parenthesized: false },
+                        ty,
+                    )
+                };
+                let opt_str = crate::ty::Ty::Union { variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil].into() };
+                let check = typed(
+                    ExprNode::If {
+                        cond: send("nil?", crate::ty::Ty::Bool),
+                        then_branch: typed(ExprNode::Lit { value: crate::expr::Literal::Nil }, crate::ty::Ty::Nil),
+                        else_branch: send("to_s", crate::ty::Ty::Str),
+                    },
+                    opt_str.clone(),
+                );
+                *arg = typed(ExprNode::Let { id: crate::ident::VarId(0), name, value, body: check }, opt_str);
+                continue;
+            }
+            if wants_str_here
+                && (is_bare_id_read(arg)
+                    || is_symbol_arg(arg)
+                    || matches!(arg.ty, Some(crate::ty::Ty::Int))
+                    || is_integer_column_read(arg, sig))
+            {
                 let span = arg.span;
                 let inner =
                     std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
@@ -6055,6 +6154,17 @@ fn is_bare_id_read(arg: &Expr) -> bool {
     matches!(&*arg.node,
         ExprNode::Send { recv: Some(_), method, args, block: None, .. }
             if method.as_str() == "id" && args.is_empty())
+}
+
+/// `record.<column>` where the record resolves to a model and the column
+/// is one of its integer columns.
+fn is_integer_column_read(arg: &Expr, sig: &RecordSignals<'_>) -> bool {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*arg.node else {
+        return false;
+    };
+    args.is_empty()
+        && arg_record_model(r, sig)
+            .is_some_and(|model| sig.integer_columns.contains(&(model, method.as_str().to_string())))
 }
 
 fn is_symbol_arg(arg: &Expr) -> bool {

@@ -280,8 +280,10 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::BoolOp { op, surface, left, right } => {
             emit_bool_op(*op, *surface, left, right)
         }
+        // The value as an argument would be: `x = (a if c)`, not the
+        // trailing modifier `x = a if c`, which skips the assignment.
         ExprNode::Let { name, value, body, .. } => {
-            format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
+            format!("{name} = {}\n{}", emit_arg(value), emit_expr(body))
         }
         ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
             let mut ps = lambda_params(params, extra_params, rest_param.as_ref());
@@ -1066,7 +1068,10 @@ fn emit_arg(e: &Expr) -> String {
     // A multiple assignment is a statement unless parenthesized: `if a, b
     // = pair` does not parse, and as an argument its comma splits it.
     let multi_assign = matches!(&*e.node, ExprNode::MultiAssign { .. });
-    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign {
+    // A `Let` emits as two lines, its binding and its body; as an argument
+    // the parens keep them one value.
+    let binding = matches!(&*e.node, ExprNode::Let { .. });
+    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign || binding {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)
