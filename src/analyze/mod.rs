@@ -1726,6 +1726,36 @@ impl Analyzer {
                 TypingMode::ViewsAndTests,
             )
         });
+        // Not done at the restamp: lobsters' `upvoter_score` kept the `String` its view site saw before `comment_score_for_user` widened to `Integer | String`.
+        for _ in 0..FIXPOINT_CAP {
+            let before = self.inferred_params.clone();
+            self.unify_params_from_call_sites(app, UnifyScope::WithViews);
+            self.overlay_test_params(app);
+            if self.inferred_params == before {
+                break;
+            }
+            crate::timings::phase("typing passes (after view param restamp)", || {
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    TypingMode::Production { dirty: None },
+                );
+                self.harvest_returns_to_registry(app, true);
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    TypingMode::ViewsAndTests,
+                )
+            });
+        }
         // Effects are a function of the converged typed trees, not of
         // the fixpoint. Collecting inside every typing round walked
         // the same bodies two or three times per round for no harvest

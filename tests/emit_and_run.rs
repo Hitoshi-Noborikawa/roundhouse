@@ -20027,3 +20027,6 @@ mod data_point_shapes;
 
 #[path = "emit_and_run/bang_relation_builders.rs"]
 mod bang_relation_builders;
+
+#[path = "emit_and_run/helper_param_after_views.rs"]
+mod helper_param_after_views;
