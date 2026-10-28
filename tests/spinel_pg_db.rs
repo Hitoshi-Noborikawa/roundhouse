@@ -64,9 +64,10 @@ fn definitions(src: &str, rbs: bool) -> BTreeSet<(String, String)> {
     out
 }
 
-/// Every method the shim (db_pg.rb, pg_errors.rb) defines carries a
-/// signature: the contract in runtime/ruby/db.rbs, or the shim's own
-/// db_pg.rbs / pg_errors.rbs. All of them parse as RBS.
+/// Every method the shim (db_pg.rb, pg_errors.rb, pg_driver.rb) defines
+/// carries a signature: the contract in runtime/ruby/db.rbs, or the
+/// shim's own db_pg.rbs / pg_errors.rbs / pg_driver.rbs. All of them
+/// parse as RBS.
 #[test]
 fn db_pg_rbs_declares_every_method() {
     let read =
@@ -74,7 +75,11 @@ fn db_pg_rbs_declares_every_method() {
     let contract = read("runtime/ruby/db.rbs");
     let mut ruby = String::new();
     let mut own = String::new();
-    for stem in ["runtime/spinel/db_pg", "runtime/spinel/pg_errors"] {
+    for stem in [
+        "runtime/spinel/db_pg",
+        "runtime/spinel/pg_errors",
+        "runtime/spinel/pg_driver",
+    ] {
         ruby.push_str(&read(&format!("{stem}.rb")));
         ruby.push('\n');
         let rbs = read(&format!("{stem}.rbs"));

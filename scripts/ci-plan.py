@@ -462,6 +462,7 @@ def native_coverage(path):
         "runtime/spinel/db_jruby.rb",
         "runtime/spinel/markly_jruby.rb",
         "runtime/spinel/db_cruby.rb",
+        "runtime/spinel/pg_driver_cruby.rb",
         "runtime/spinel/message_digest_cruby.rb",
         "runtime/spinel/module_delegate.rb",
     }
@@ -544,7 +545,14 @@ def native_coverage(path):
             )
         ) or path.startswith("runtime/spinel/tep/url."):
             owned_tests.add("rails_compat_vectors_spinel")
-        if name in {"db_pg.rb", "db_pg.rbs", "pg_errors.rb", "pg_errors.rbs"}:
+        if name in {
+            "db_pg.rb",
+            "db_pg.rbs",
+            "pg_errors.rb",
+            "pg_errors.rbs",
+            "pg_driver.rb",
+            "pg_driver.rbs",
+        }:
             # PostgreSQL, not SQLite: the SQLite database suites below
             # never load it.
             owned_tests.add("spinel_pg_db")
