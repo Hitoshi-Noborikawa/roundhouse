@@ -2472,6 +2472,10 @@ impl Analyzer {
             layout: LayoutDecl,
         }
         let mut meta_by_name: HashMap<ClassId, ControllerMeta> = HashMap::default();
+        let mut action_meta_cache: HashMap<
+            ClassId,
+            (HashMap<Symbol, HashMap<Symbol, Ty>>, HashMap<Symbol, Expr>),
+        > = HashMap::default();
         // Parent links and concern-module tables are cloned once in
         // `analyze` and reused every round — they do not depend on the
         // refined registry.
@@ -2902,10 +2906,9 @@ impl Analyzer {
                     action_bindings.insert(name.clone(), ivars);
                 }
                 if retype {
-                    self.controller_action_meta_cache.insert(
-                        controller.name.clone(),
-                        (action_bindings.clone(), action_bodies.clone()),
-                    );
+                    let (bindings, bodies) = action_meta_cache.entry(controller.name.clone()).or_default();
+                    bindings.extend(action_bindings.clone());
+                    bodies.extend(action_bodies.clone());
                 }
             }
 
@@ -2929,6 +2932,10 @@ impl Analyzer {
             );
         }
         drop(_typing_controllers_a);
+
+        // Publish once per class after all reopenings have contributed.
+        // A namespace-only part must not erase a sibling's memoized ivars.
+        self.controller_action_meta_cache.extend(action_meta_cache);
 
         // Controller→layout-view ivar channel: every action that
         // renders also flows its ivars into whatever layout wraps it
@@ -8112,6 +8119,35 @@ impl<'a> SourceMethodIndex<'a> {
             }
         }
         names
+    }
+}
+
+#[cfg(test)]
+mod controller_meta_cache_tests {
+    use super::*;
+
+    #[test]
+    fn a_reopening_does_not_erase_cached_concern_ivar_bindings() {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+            ("app/controllers/concerns/memoized.rb", "module Memoized\n  def token\n    @token ||= \"ready\"\n  end\nend\n"),
+            ("app/controllers/cache_controller.rb", "class CacheController < ActionController::Base\n  include Memoized\n  def show\n    token\n  end\nend\n"),
+        ]
+        .into_iter()
+        .map(|(path, source)| (std::path::PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let mut reopening = app.controllers.iter().find(|c| c.name.0.as_str() == "CacheController").unwrap().clone();
+        reopening.parent = None;
+        reopening.parent_span = Default::default();
+        reopening.body.clear();
+        app.controllers.push(reopening);
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        let (bindings, bodies) = &analyzer.controller_action_meta_cache[&ClassId("CacheController".into())];
+        assert_eq!(bindings.get(&Symbol::from("token")).and_then(|b| b.get(&Symbol::from("token"))), Some(&Ty::Str));
+        assert!(bodies.contains_key(&Symbol::from("token")));
+        assert!(bodies.contains_key(&Symbol::from("show")));
     }
 }
 
