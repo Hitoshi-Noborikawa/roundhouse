@@ -287,7 +287,11 @@ cases.each_with_index do |(class_name, table, _), i|
   # quoted table, column and output alias in the generated _columns_sql.
   source = '"' + table.gsub('"', '""') + '"'
   check(model._table_sql, table == 'purchases' ? 'purchases' : source)
-  check(model._hydrate_all("SELECT #{model._columns_sql} FROM #{source} ORDER BY id DESC").map(&:name), ['other', value, value])
+  sql = Db.capture_sql { check(ActiveRecord::Relation.new(model).where(id: 3).update_all(name: 'bulk'), 1) }
+  check(sql.length, 1)
+  check(sql.first.start_with?("UPDATE #{source} SET "), true)
+  check(model.find(3).name, 'bulk')
+  check(model._hydrate_all("SELECT #{model._columns_sql} FROM #{source} ORDER BY id DESC").map(&:name), ['bulk', value, value])
   begin
     ActiveRecord::Relation.new(model).find(99)
     raise 'missing record did not raise'
