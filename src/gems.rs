@@ -1974,37 +1974,52 @@ pub const GEM_STYLESHEETS: &[(&str, &[&str])] = &[
 /// constant ported there (`Net::HTTP::Persistent`) runs on the Spinel tree.
 pub(crate) fn spinel_runtime_constants() -> &'static crate::det::HashSet<String> {
     static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
-    NAMES.get_or_init(|| {
-        struct Declared {
-            nesting: Vec<String>,
-            out: crate::det::HashSet<String>,
+    NAMES.get_or_init(|| declared_runtime_constants(&["runtime/spinel"]))
+}
+
+/// The same over the shared ports too (`runtime/ruby/typeid.rb`'s `TypeID`),
+/// which every Ruby-family tree and the Spinel one carry. Not a façade: its
+/// raising stand-in is what a gem compiled from source replaces.
+pub(crate) fn ported_runtime_constants() -> &'static crate::det::HashSet<String> {
+    static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| declared_runtime_constants(&["runtime/spinel", "runtime/ruby"]))
+}
+
+fn declared_runtime_constants(dirs: &[&str]) -> crate::det::HashSet<String> {
+    struct Declared {
+        nesting: Vec<String>,
+        out: crate::det::HashSet<String>,
+    }
+    impl Declared {
+        fn enter(&mut self, path: &ruby_prism::Node<'_>) {
+            let name = String::from_utf8_lossy(path.location().as_slice()).trim_start_matches("::").to_string();
+            self.nesting.push(name);
+            self.out.insert(self.nesting.join("::"));
         }
-        impl Declared {
-            fn enter(&mut self, path: &ruby_prism::Node<'_>) {
-                let name = String::from_utf8_lossy(path.location().as_slice()).trim_start_matches("::").to_string();
-                self.nesting.push(name);
-                self.out.insert(self.nesting.join("::"));
-            }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Declared {
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            self.enter(&node.constant_path());
+            ruby_prism::visit_module_node(self, node);
+            self.nesting.pop();
         }
-        impl<'pr> ruby_prism::Visit<'pr> for Declared {
-            fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
-                self.enter(&node.constant_path());
-                ruby_prism::visit_module_node(self, node);
-                self.nesting.pop();
-            }
-            fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
-                self.enter(&node.constant_path());
-                ruby_prism::visit_class_node(self, node);
-                self.nesting.pop();
-            }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            self.enter(&node.constant_path());
+            ruby_prism::visit_class_node(self, node);
+            self.nesting.pop();
         }
-        let mut files = Vec::new();
-        let _ = crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files);
-        let mut declared = Declared { nesting: Vec::new(), out: crate::det::HashSet::default() };
-        for (_, source) in &files {
-            let parsed = ruby_prism::parse(source.as_bytes());
-            ruby_prism::Visit::visit(&mut declared, &parsed.node());
+    }
+    let mut files = Vec::new();
+    for dir in dirs {
+        let _ = crate::runtime_files::walk_flat(dir, &["rb"], "runtime/", &mut files);
+    }
+    let mut declared = Declared { nesting: Vec::new(), out: crate::det::HashSet::default() };
+    for (path, source) in &files {
+        if path.ends_with("facade.rb") || path.ends_with("facades.rb") {
+            continue;
         }
-        declared.out
-    })
+        let parsed = ruby_prism::parse(source.as_bytes());
+        ruby_prism::Visit::visit(&mut declared, &parsed.node());
+    }
+    declared.out
 }
