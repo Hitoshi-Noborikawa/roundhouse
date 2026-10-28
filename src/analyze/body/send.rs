@@ -664,7 +664,7 @@ impl<'a> BodyTyper<'a> {
                 | "select" | "filter" | "reject"
                 | "any?" | "all?" | "none?"
                 | "count" | "find" | "detect" | "sort_by" | "min_by" | "max_by"
-                | "group_by" | "partition" | "sum" | "filter_map" => {
+                | "group_by" | "partition" | "sum" | "filter_map" | "to_h" => {
                     Some(vec![(**key).clone(), (**value).clone()])
                 }
                 // `transform_values { |v| ... }` — block receives just the value.
