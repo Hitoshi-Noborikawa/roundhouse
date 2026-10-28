@@ -355,9 +355,10 @@ fn try_rewrite(e: &mut Expr, acc: &str, variants: &HashMap<(String, String), Var
     let ExprNode::Const { path } = &*callee_recv.node else { return false };
     // A rooted receiver (`::Rooms::InvolvementsHelper`, from
     // `apply_constant_rooting`) names the same module as the App's
-    // `Rooms::InvolvementsHelper`.
+    // `Rooms::InvolvementsHelper`. The root marker rides on the head
+    // segment (`"::Rooms"`), so it is trimmed rather than filtered.
     let key = (
-        path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"),
+        path.iter().map(|s| s.as_str().trim_start_matches("::")).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"),
         callee.as_str().to_string(),
     );
     let Some(variant) = variants.get(&key) else { return false };

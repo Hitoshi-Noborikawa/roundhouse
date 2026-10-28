@@ -2542,6 +2542,32 @@ fn block_tag_helper_appends_through_an_open_half_and_an_inline_close() {
     let after = view_src.find("<p>after</p>").unwrap();
     assert!(open < body && body < close && close < after, "{view_src}");
 }
+/// A rooted receiver gets the same rewrite. Inside `Views::Users`, the
+/// call to `Users::PanelsHelper` is spelled `::Users::PanelsHelper`
+/// (`apply_constant_rooting`); the pass's lookup has to read past the
+/// root marker, or every rooted helper call keeps its capture buffer.
+#[test]
+fn a_rooted_block_tag_helper_receiver_appends_through_an_open_half() {
+    let mut app = ingest_tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+        (
+            "app/helpers/users/panels_helper.rb",
+            "module Users::PanelsHelper\n  def panel_tag(kind, &)\n    tag.div class: \"panel panel--#{kind}\", &\n  end\nend\n",
+        ),
+        (
+            "app/views/users/index.html.erb",
+            "<%= panel_tag(\"wide\") do %>\n  <p>inside</p>\n<% end %>\n",
+        ),
+    ]);
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    let view_files = ruby::emit_lowered_views(&app);
+    let view_src = find(&view_files, "app/views/users/index.rb");
+    assert!(view_src.contains("::Users::PanelsHelper.panel_tag_open_into(io, \"wide\")"), "{view_src}");
+    assert!(!view_src.contains("_cap = String.new"), "no capture buffer remains:\n{view_src}");
+}
+
 
 /// A tag helper that takes only the block (`def search_results_tag(&)`)
 /// has no signature when the variant is built; its `_open_into` still
