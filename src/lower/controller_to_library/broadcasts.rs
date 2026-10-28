@@ -190,7 +190,7 @@ fn payload(
             Some((_, l)) => hash_entries(l)?,
             None => Vec::new(),
         };
-        return partial_view_call_with_record(name, &locals, recv, module_name, partials, span)
+        return partial_view_call_with_record(name, &locals, recv, module_name, partials, None, span)
             .map(wrap_broadcast_render)
             .or_else(|| decline(span, &format!("partial `{name}` has no def-site contract")));
     }

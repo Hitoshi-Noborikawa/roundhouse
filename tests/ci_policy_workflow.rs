@@ -936,11 +936,14 @@ fn framework_loop_supplies_postgres_and_pinned_spinel_pg_to_the_pg_gate() {
         Some("${{ github.workspace }}/spinel-pg")
     );
     assert!(
-        run["env"]["DATABASE_URL"]
+        run["env"]["ROUNDHOUSE_PG_TEST_URL"]
             .as_str()
             .unwrap()
             .contains("@127.0.0.1:5432/")
     );
+    // Required where the server is provided: an unset URL fails the
+    // gate there instead of skipping it.
+    assert_eq!(run["env"]["ROUNDHOUSE_PG_TEST_REQUIRED"].as_str(), Some("1"));
 }
 
 #[test]

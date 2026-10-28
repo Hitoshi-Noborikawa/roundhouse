@@ -1479,7 +1479,30 @@ module ActiveRecord
     # targets' adapter contract stops at `all`/`find`/`count`, and
     # their models always carry the emitted override.
     def self._hydrate_all(sql)
-      ActiveRecord.adapter.select_rows(sql).map { |row| instantiate(row) }
+      records = []
+      # Through a local, as `Relation#load_records` explains.
+      adapter = ActiveRecord.adapter
+      adapter.each_row(sql) { |row| records << instantiate(row) }
+      records
+    end
+
+    # base.rb's `_adapter_all` / `_adapter_find_by_id` defaults, for the
+    # same hand-written models: the adapter's `all` / `find` queries,
+    # each row yielded to `instantiate` rather than taken from the Array
+    # `all`/`find` build (on Spinel that row reached every model's
+    # `<Model>Row.from_raw` boxed). Lowerer-emitted models override both.
+    def self._adapter_all
+      records = []
+      adapter = ActiveRecord.adapter
+      adapter.each_row("SELECT * FROM #{table_name}") { |row| records << instantiate(row) }
+      records
+    end
+
+    def self._adapter_find_by_id(id)
+      found = nil
+      adapter = ActiveRecord.adapter
+      adapter.each_row("SELECT * FROM #{table_name} WHERE id = #{Db.escape_int(id)} LIMIT 1") { |row| found = instantiate(row) }
+      found
     end
 
     # A plucked value as the record would hold it (`Relation#pluck`). A

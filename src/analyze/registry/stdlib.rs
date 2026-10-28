@@ -1109,6 +1109,38 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "StringIO", &[], &[
         ("string", Ty::Str), ("<<", string_io),
     ]);
+    // `StringScanner` (`require "strscan"`): the ruby family's own, spinel's
+    // `packages/strscan`, whose native bindings these returns follow
+    // (a pattern method answers nil on no match).
+    let scanner = Ty::Class { id: ClassId(Symbol::from("StringScanner")), args: vec![].into() };
+    let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    let int_or_nil = || Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() };
+    register_stdlib_class(classes, "StringScanner", &[], &[
+        ("scan", str_or_nil()), ("check", str_or_nil()), ("scan_until", str_or_nil()),
+        ("check_until", str_or_nil()), ("getch", str_or_nil()), ("get_byte", str_or_nil()),
+        ("matched", str_or_nil()), ("[]", str_or_nil()), ("pre_match", str_or_nil()),
+        ("post_match", str_or_nil()),
+        ("match?", int_or_nil()), ("skip", int_or_nil()), ("exist?", int_or_nil()),
+        ("skip_until", int_or_nil()), ("scan_byte", int_or_nil()), ("peek_byte", int_or_nil()),
+        // Not `charpos`: spinel's binding answers the byte offset, not CRuby's character one.
+        ("pos", Ty::Int), ("pos=", Ty::Int), ("rest_size", Ty::Int),
+        ("eos?", Ty::Bool), ("matched?", Ty::Bool), ("rest?", Ty::Bool),
+        ("peek", Ty::Str), ("rest", Ty::Str), ("string", Ty::Str),
+        ("dup", scanner.clone()), ("clone", scanner.clone()), ("unscan", scanner.clone()),
+        ("terminate", scanner.clone()), ("reset", scanner),
+    ]);
+    // `Zlib` (`require "zlib"`): the ruby family's own, spinel's `packages/zlib`.
+    let gzip_writer = Ty::Class { id: ClassId(Symbol::from("Zlib::GzipWriter")), args: vec![].into() };
+    register_stdlib_class(classes, "Zlib", &[
+        ("deflate", Ty::Str), ("inflate", Ty::Str), ("gzip", Ty::Str), ("gunzip", Ty::Str),
+        ("crc32", Ty::Int), ("adler32", Ty::Int), ("zlib_version", Ty::Str),
+    ], &[]);
+    classes.entry(ClassId(Symbol::from("Zlib"))).or_default().is_module = true;
+    register_stdlib_class(classes, "Zlib::GzipWriter", &[], &[
+        ("write", Ty::Int), ("<<", gzip_writer.clone()), ("puts", Ty::Nil), ("print", Ty::Nil),
+        // Not `finish`: spinel's package has `close` only.
+        ("close", Ty::Untyped),
+    ]);
     // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
     // in indexed app source (`time_limited_video_previewer`, web-push
     // connection pool, unfurl deadline). They were listed in
@@ -1393,7 +1425,7 @@ fn register_stdlib_class(
 /// runtime (`lib/sp_exc.c`) defines too.
 const ERRNO_CLASSES: &[&str] = &[
     "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO", "E2BIG", "ENOEXEC", "EBADF",
-    "ECHILD", "EAGAIN", "ENOMEM", "EACCES", "EFAULT", "EBUSY", "EEXIST", "EXDEV", "ENODEV",
+    "ECHILD", "EAGAIN", "EWOULDBLOCK", "ENOMEM", "EACCES", "EFAULT", "EBUSY", "EEXIST", "EXDEV", "ENODEV",
     "ENOTDIR", "EISDIR", "EINVAL", "ENFILE", "EMFILE", "ENOTTY", "EFBIG", "ENOSPC", "ESPIPE",
     "EROFS", "EMLINK", "EPIPE", "EDOM", "ERANGE", "EDEADLK", "ENAMETOOLONG", "ENOLCK",
     "ENOSYS", "ENOTEMPTY", "ELOOP", "ENOTSOCK", "EMSGSIZE", "EPROTOTYPE", "ENOPROTOOPT",

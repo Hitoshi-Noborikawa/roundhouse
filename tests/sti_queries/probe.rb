@@ -75,4 +75,16 @@ class StiProbe
     record = Feature.find_or_create_by(title: "s")
     [record.class.name, record.id]
   end
+
+  def self.select_first_class
+    Feature.select(:id, :title).order(:id).first.class.name
+  end
+
+  def self.select_classes
+    Feature.select(:id, :title).order(:id).map { |record| record.class.name }
+  end
+
+  def self.select_typed_classes
+    Feature.select(:id, :title, :type).order(:id).map { |record| record.class.name }
+  end
 end

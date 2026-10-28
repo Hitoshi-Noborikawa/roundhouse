@@ -43,6 +43,7 @@ mod representable;
 mod active_model_serializer;
 mod action_cable_config;
 mod session_config;
+pub(crate) mod database_ownership;
 pub(crate) mod database_yml;
 pub mod sidekiq_yml;
 pub mod cable_yml;

@@ -192,6 +192,26 @@ mod stdlib_rnp;
 mod representable_decorator;
 #[path = "spinel_toolchain/representable.rs"]
 mod representable;
+#[path = "support/for_loops.rs"]
+mod for_loops_contract;
+#[path = "spinel_toolchain/for_loops.rs"]
+mod for_loops;
+#[path = "support/block_macros.rs"]
+mod block_macros_contract;
+#[path = "spinel_toolchain/block_macros.rs"]
+mod block_macros;
+#[path = "support/stdlib_scan_zlib.rs"]
+mod stdlib_scan_zlib_contract;
+#[path = "spinel_toolchain/stdlib_scan_zlib.rs"]
+mod stdlib_scan_zlib;
+#[path = "support/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include_contract;
+#[path = "spinel_toolchain/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include;
+#[path = "support/mutable_literals.rs"]
+mod mutable_literals_contract;
+#[path = "spinel_toolchain/mutable_literals.rs"]
+mod mutable_literals;
 #[path = "support/auto_source_gem.rs"]
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]

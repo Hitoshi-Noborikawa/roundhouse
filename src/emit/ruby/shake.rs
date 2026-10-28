@@ -404,6 +404,97 @@ pub fn shake_tree(
     }
 }
 
+/// `ActiveRecord::Base` methods that `runtime/active_record/base.rb`
+/// defines and `connection.rb` defines again in its `class Base`
+/// reopen, dropped from `base.rb` in the Spinel tree.
+///
+/// `connection.rb` loads later, so Ruby discards the first body, but
+/// Spinel still infers through it and the replaced body's calls type
+/// their callees: `base.rb`'s `find_by` and `where` call `instantiate`
+/// on rows from the untyped `ActiveRecord.adapter`, which widened every
+/// model's `instantiate` and `<Model>Row.from_raw` to the boxed path.
+///
+/// The strict targets never load `connection.rb`, and on the Ruby lanes
+/// the redefinition already wins, so only the Spinel tree is rewritten.
+/// Returns the number of defs dropped.
+pub fn drop_shadowed_base_defs(files: &mut [(String, String)]) -> usize {
+    const BASE: &str = "runtime/active_record/base.rb";
+    const CONNECTION: &str = "runtime/active_record/connection.rb";
+    let Some(base_idx) = files.iter().position(|(p, _)| p == BASE) else { return 0 };
+    let Some(conn_idx) = files.iter().position(|(p, _)| p == CONNECTION) else { return 0 };
+
+    let conn_lines: Vec<&str> = files[conn_idx].1.lines().collect();
+    let Some((cs, ce)) = base_class_block(&conn_lines) else { return 0 };
+    let redefined: HashSet<&str> = conn_lines[cs..ce].iter().filter_map(|l| base_def_key(l)).collect();
+
+    let lines: Vec<&str> = files[base_idx].1.lines().collect();
+    let Some((bs, be)) = base_class_block(&lines) else { return 0 };
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.extend(lines[..bs].iter().map(|l| l.to_string()));
+    let mut changed = 0;
+    let mut i = bs;
+    while i < be {
+        let line = lines[i];
+        let key = base_def_key(line);
+        let drop = key.is_some_and(|k| redefined.contains(k));
+        if !drop {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        }
+        let one_line = line.contains(';') && line.trim_end().ends_with("end");
+        let end = if one_line {
+            Some(i)
+        } else {
+            (i + 1..be).find(|&j| lines[j].trim_end() == "    end")
+        };
+        let Some(end) = end else {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        };
+        // The comment block directly above documents the dropped body.
+        while out.last().is_some_and(|l| l.starts_with("    #")) {
+            out.pop();
+        }
+        changed += 1;
+        // Nor one closing it.
+        if end + 1 == be && out.last().is_some_and(|l| l.trim().is_empty()) {
+            out.pop();
+        }
+        // No blank line left doubled, or opening the class body.
+        let after_blank = end + 1 < be && lines[end + 1].trim().is_empty();
+        if after_blank && out.last().is_none_or(|l| l.trim().is_empty() || l.trim_end() == "  class Base") {
+            i = end + 2;
+            continue;
+        }
+        i = end + 1;
+    }
+    out.extend(lines[be..].iter().map(|l| l.to_string()));
+    if changed > 0 {
+        let mut text = out.join("\n");
+        text.push('\n');
+        files[base_idx].1 = text;
+    }
+    changed
+}
+
+/// `  class Base` … `  end` (module-level indent): the line range of the
+/// class body.
+fn base_class_block(lines: &[&str]) -> Option<(usize, usize)> {
+    let start = lines.iter().position(|l| l.trim_end() == "  class Base")?;
+    let end = (start + 1..lines.len()).find(|&j| lines[j].trim_end() == "  end")?;
+    Some((start + 1, end))
+}
+
+/// A def at the class-body indent, keyed with its receiver:
+/// `self.find_by`, `save!`, `name=`.
+fn base_def_key(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("    def ")?;
+    let end = rest.find([' ', '(', ';']).unwrap_or(rest.len());
+    (end > 0).then(|| &rest[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +516,24 @@ mod tests {
         tokens("def kept; kept; leaf; end", &mut found, Some("kept"));
         tokens("def orphan; orphan; twig; end", &mut found, Some("orphan"));
         assert_eq!(found, HashSet::from_iter(["kept", "def", "leaf", "end", "twig"]));
+    }
+
+    #[test]
+    fn base_defs_redefined_in_the_connection_reopen_are_dropped() {
+        let base = "module ActiveRecord\n  class Base\n    # Generic fallback.\n    def self.find_by(c)\n      instantiate(c)\n    end\n\n    def self.keep(x)\n      x\n    end\n\n    def find_by(c); c; end\n\n    def save!; end\n  end\nend\n";
+        let conn = "module ActiveRecord\n  class Relation\n    def self.keep(x)\n      x\n    end\n  end\n\n  class Base\n    def self.find_by(c)\n      where(c).first\n    end\n\n    def save!\n      save\n    end\n  end\nend\n";
+        let mut files: Vec<(String, String)> = vec![
+            ("runtime/active_record/base.rb".into(), base.into()),
+            ("runtime/active_record/connection.rb".into(), conn.into()),
+        ];
+        assert_eq!(drop_shadowed_base_defs(&mut files), 2);
+        // `self.keep` is redefined only on another class, and the instance
+        // `find_by` is not the class method the reopen defines.
+        assert_eq!(
+            files[0].1,
+            "module ActiveRecord\n  class Base\n    def self.keep(x)\n      x\n    end\n\n    def find_by(c); c; end\n  end\nend\n"
+        );
+        assert_eq!(files[1].1, conn);
     }
 
     #[test]

@@ -86,6 +86,26 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "support/for_loops.rs"]
+mod for_loops_contract;
+#[path = "emit_and_run/for_loops.rs"]
+mod for_loops;
+#[path = "support/block_macros.rs"]
+mod block_macros_contract;
+#[path = "emit_and_run/block_macros.rs"]
+mod block_macros;
+#[path = "support/stdlib_scan_zlib.rs"]
+mod stdlib_scan_zlib_contract;
+#[path = "emit_and_run/stdlib_scan_zlib.rs"]
+mod stdlib_scan_zlib;
+#[path = "support/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include_contract;
+#[path = "emit_and_run/stdlib_rexml_include.rs"]
+mod stdlib_rexml_include;
+#[path = "support/mutable_literals.rs"]
+mod mutable_literals_contract;
+#[path = "emit_and_run/mutable_literals.rs"]
+mod mutable_literals;
 #[path = "support/auto_source_gem.rs"]
 mod auto_source_gem_contract;
 #[path = "emit_and_run/auto_source_gem.rs"]

@@ -942,7 +942,8 @@ jobs:
     timeout-minutes: 30
 
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
-    # spinel_pg_db runs the PostgreSQL Db shim against this server.
+    # spinel_pg_db runs the PostgreSQL Db shim against this server
+    # (ROUNDHOUSE_PG_TEST_URL below).
     services:
       postgres:
         image: postgres:17
@@ -989,9 +990,12 @@ jobs:
       - name: Run selected native framework checks
         env:
           TESTS: ${{ join(matrix.tests, ' ') }}
-          # Inputs of spinel_pg_db only; it fails without them.
+          # Inputs of spinel_pg_db only; it fails without them. Tests that
+          # need PostgreSQL read the URL through tests/support/pg_test_url.rs,
+          # which skips without it unless the run requires it, as this one does.
           SPINEL_PG_DIR: ${{ github.workspace }}/spinel-pg
-          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          ROUNDHOUSE_PG_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          ROUNDHOUSE_PG_TEST_REQUIRED: "1"
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/framework-${{ matrix.shard }}.jsonl
         run: |
           test -n "$TESTS"

@@ -32,7 +32,7 @@ or exercise Rails engine lifecycle. No existing Alba or JSON regression is chang
    No original classes/gems are injected into output. Boot performs no dispatch
    or adapter configuration; it is not a Rails boot or an app integration pass.
 3. **Original gem source → Spinel**: original installed entry files by explicit
-   relative paths, original transitive load roots, require gate, real compile,
+   relative paths, original transitive load roots, strict require, real compile,
    artifact hash and native binary execution when compilation succeeds.
    Optional/dynamic requires remain compiler inputs, not patched-away sources.
    Native CRuby extensions cannot become passes via Spinel package replacements.

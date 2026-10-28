@@ -87,6 +87,7 @@ SPINEL_TESTS = [
     "spinel_net_http_start",
     "rails_compat_vectors_spinel",
     "spinel_pg_db",
+    "spinel_db_contract",
     "generated_columns_spinel",
     "postgres_json_types_spinel",
     "array_column_storage_spinel",
@@ -114,6 +115,7 @@ SPINEL_TESTS = [
     "default_scope_dynamic_spinel",
     "typed_writer_cast_spinel",
     "pundit_source_spinel",
+    "row_from_raw_hash_spinel",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.
@@ -149,6 +151,8 @@ SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_WORKER_INPUTS - {"runtime/spinel/sidekiq_redis.rb
 SPINEL_TEST_SECONDS = {
     "spinel_transaction_connection": 501,
     "spinel_stmt_cache_lru": 203,
+    # Two Spinel compiles and a run; measured in #1455's CI run 40602974151.
+    "row_from_raw_hash_spinel": 183,
     "param_binds": 181,
     "not_found_parity_spinel": 169,
     "param_binds_values": 126,
@@ -219,7 +223,25 @@ PG_DB_INPUTS = {
     "runtime/ruby/db.rbs",
     "runtime/spinel/active_support_time_parsing.rb",
     "runtime/spinel/active_support_time_parsing.rbs",
-    "tests/spinel_pg_db_cases.rb",
+}
+# The Db contract suite (tests/support/db_contract.rs): the Spinel lanes
+# each of its files feeds, and the runtime files its LANES copy beside a
+# shim that nothing above routes to them. cruby_prelude.rb feeds only the
+# CRuby lane, which the unit job runs.
+DB_CONTRACT_INPUTS = {
+    "tests/db_contract/support.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "tests/db_contract/contract_cases.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "tests/db_contract/spinel_prelude.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "tests/db_contract/sqlite_main.rb": ("spinel_db_contract",),
+    "tests/db_contract/postgres_cases.rb": ("spinel_pg_db",),
+    "tests/db_contract/postgres_main.rb": ("spinel_pg_db",),
+    "tests/db_contract/db_pg_lane.rb": ("spinel_pg_db",),
+    "tests/support/db_contract.rs": ("spinel_db_contract", "spinel_pg_db"),
+    "tests/support/pg_test_url.rs": ("spinel_pg_db",),
+    "runtime/spinel/active_support_interval.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "runtime/spinel/active_support_duration.rb": ("spinel_db_contract", "spinel_pg_db"),
+    "runtime/spinel/active_support_interval.rbs": ("spinel_pg_db",),
+    "runtime/spinel/active_support_duration.rbs": ("spinel_pg_db",),
 }
 GENERATED_COLUMNS_SPINEL_INPUTS = {
     "src/emit/ruby/library.rs",
@@ -491,6 +513,7 @@ def native_coverage(path):
         suites.add("param_binds")
     if path in PG_DB_INPUTS:
         suites.add("spinel_pg_db")
+    suites.update(DB_CONTRACT_INPUTS.get(path, ()))
     if path in {
         "tests/support/emit_and_run.rs",
         "src/lower/model_to_library/adapter_emit.rs",
@@ -538,6 +561,7 @@ def native_coverage(path):
                     "spinel_stmt_cache_lru",
                     "stmt_stats",
                     "db_sqlite_concurrency",
+                    "spinel_db_contract",
                 )
             )
         if any(word in name for word in ("param", "multipart", "request")):

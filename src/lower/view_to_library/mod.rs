@@ -2615,6 +2615,9 @@ pub struct PartialCallContract {
     /// non-record locals as KEYWORD params (see the strict-locals
     /// override in the view lowering), not trailing positionals.
     pub keyword_extras: bool,
+    /// The keyword locals a strict-locals partial declares itself, whose
+    /// header default stands when a caller omits them.
+    pub declared: Vec<String>,
 }
 
 impl PartialCallContract {
@@ -2717,8 +2720,19 @@ pub(crate) fn partial_call_contracts(
                     method,
                     record: declared[0].clone(),
                     closure,
-                    extras: declared[1..].to_vec(),
+                    // The request-context keywords the def adds (`request_context_views`).
+                    extras: declared[1..]
+                        .iter()
+                        .cloned()
+                        .chain(
+                            ["action_name", "controller_name", "path_parameters"]
+                                .into_iter()
+                                .filter(|n| request_context.contains(view.name.as_str()) && !declared.iter().any(|d| d == n))
+                                .map(str::to_string),
+                        )
+                        .collect(),
                     keyword_extras: true,
+                    declared: declared[1..].to_vec(),
                 },
             );
             continue;
@@ -2747,7 +2761,7 @@ pub(crate) fn partial_call_contracts(
         drop_closure_names(&mut extras, &closure_locals);
         out.insert(
             spelled,
-            PartialCallContract { method, record, closure, extras, keyword_extras: false },
+            PartialCallContract { method, record, closure, extras, keyword_extras: false, declared: Vec::new() },
         );
     }
     out

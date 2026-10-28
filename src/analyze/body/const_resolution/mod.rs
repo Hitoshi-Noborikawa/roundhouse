@@ -102,6 +102,9 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     // `URI::RFC2396_PARSER.escape(url)` — lobsters' webmention job. The
     // uri library's on the ruby family, spinel's `packages/uri` on spinel;
     // DEFAULT_PARSER is RFC 3986's, as on Ruby 3.4.
+    // `Math.cos(deg * Math::PI / 180)` — svg-graph's label rotation.
+    ("Math", "PI", || Ty::Float),
+    ("Math", "E", || Ty::Float),
     ("URI", "DEFAULT_PARSER", uri_rfc3986_parser),
     ("URI", "RFC3986_PARSER", uri_rfc3986_parser),
     ("URI", "RFC2396_PARSER", uri_rfc2396_parser),
@@ -116,7 +119,7 @@ fn uri_rfc3986_parser() -> Ty {
 }
 
 /// Owners of value Consts that Ruby defines as modules, not classes.
-const CORE_VALUE_MODULES: &[&str] = &["URI"];
+const CORE_VALUE_MODULES: &[&str] = &["URI", "Math"];
 
 /// Ruby's top-level value Consts: `STDERR.puts "…"` (discourse's
 /// warnings) reads the process's own stream, which `$stderr` is only
@@ -199,10 +202,38 @@ fn core_rbs() -> &'static str {
             out.push_str(name);
             out.push_str(": String\n");
         }
+        out.push_str(STDLIB_NAMESPACES_RBS);
         out
     })
     .as_str()
 }
+
+/// Library namespaces an app `include`s to name their classes bare
+/// (svg-graph's `include REXML`, then `Document.new`, `Comment.new`): Ruby
+/// looks the name up in the included module before `Object`, so the app's
+/// own top-level `Comment` model is not the one meant. Only the classes
+/// spinel's package defines too (`packages/rexml`).
+const STDLIB_NAMESPACES_RBS: &str = "\
+module REXML\n\
+  class Child\n  end\n\
+  class Parent < Child\n  end\n\
+  class Element < Parent\n  end\n\
+  class Document < Element\n  end\n\
+  class Text < Child\n  end\n\
+  class CData < Text\n  end\n\
+  class Comment < Child\n  end\n\
+  class Instruction < Child\n  end\n\
+  class XMLDecl < Child\n  end\n\
+  class DocType < Parent\n  end\n\
+  module Formatters\n\
+    class Default\n    end\n\
+    class Pretty < Default\n    end\n\
+  end\n\
+  class Attribute\n  end\n\
+  class Attributes\n  end\n\
+  class Elements\n  end\n\
+  class ParseException < StandardError\n  end\n\
+end\n";
 
 /// The type of a value constant `core_rbs()` declares, as Ruby defines it.
 fn core_value_type(name: &str) -> Option<Ty> {

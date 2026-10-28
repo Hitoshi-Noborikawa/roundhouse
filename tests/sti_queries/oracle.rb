@@ -28,5 +28,22 @@ class Article < ApplicationRecord
   validates :title, presence: true
   validates :body, presence: true, length: { minimum: 10 }
 end
+# HOOKED=1 adds the hook tests/sti_queries.rs's hooked case writes, and
+# its checks.
+if ENV["HOOKED"]
+  class Article
+    after_initialize :mark_hooked
+
+    def mark_hooked
+      @hook_calls = (@hook_calls || 0) + 1
+      @hook_title = title
+    end
+
+    def hook_seen
+      [@hook_calls, @hook_title]
+    end
+  end
+end
 %w[feature special_feature probe script].each { |f| load File.join(__dir__, "#{f}.rb") }
+%w[hook_probe hooked].each { |f| load File.join(__dir__, "#{f}.rb") } if ENV["HOOKED"]
 puts "SQL: #{Feature.where(title: "f").to_sql}"

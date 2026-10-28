@@ -1566,6 +1566,15 @@ end
     // `config/database.yml`'s `pragmas:`, run on each connection after
     // the Db shim's own (see `database_yml`).
     app.database_pragmas = super::database_yml::database_pragmas(vfs, dir);
+    // Its configurations, resolved at build time; registered as a source
+    // so a refusal points into it. Before the source snapshot below.
+    let database_yml = dir.join("config/database.yml");
+    if let Ok(text) = vfs.read_to_string(&database_yml) {
+        let file = super::sources::register(&database_yml.display().to_string(), &text);
+        let configurations = super::database_yml::database_configurations(&text, file);
+        app.databases = configurations.databases;
+        app.database_refusals.extend(configurations.refusals);
+    }
 
     for root in &roots {
         let controllers_dir = dir.join(root).join("controllers");
@@ -1838,29 +1847,6 @@ end
     // the mixin means, and it needs nothing from a target's mixin
     // semantics.
     let shared_test_helpers = ingest_test_helper_modules(vfs, dir)?;
-    // The rest of `test/test_helpers/`: modules one test class includes
-    // itself (campfire's `include PushServiceTestHelper` in two web push
-    // tests). Kept whole — nested classes and module methods too — and
-    // carried into each including test's file as inner classes.
-    let included_test_helpers = ingest_included_test_helper_files(vfs, dir, &shared_test_helpers)?;
-    // The app-wide `setup` the same file declares — see
-    // `ingest_test_case_setup`. Prepended to every test module's own.
-    let test_case_setup: Option<crate::expr::Expr> = {
-        let helper_rb = dir.join("test/test_helper.rb");
-        if vfs.exists(&helper_rb) {
-            match read_or_ledger(vfs, &helper_rb)? {
-                Some(source) => unwrap_or_record(super::test::ingest_test_case_setup(
-                    &source,
-                    &helper_rb.display().to_string(),
-                ))?
-                .flatten(),
-                None => None,
-            }
-        } else {
-            None
-        }
-    };
-
     // Test files under the Rails defaults and the additional roots from
     // `roundhouse.yml`. Select every Ruby file recursively.
     let mut test_roots: Vec<PathBuf> = [
@@ -1892,6 +1878,54 @@ end
     test_files.retain(|f| f != &helper_rb && !f.starts_with(&helpers_dir) && !f.starts_with(&fixtures_dir));
     test_files.sort();
     test_files.dedup();
+
+    // The rest of `test/test_helpers/`: modules one test class includes
+    // itself (campfire's `include PushServiceTestHelper` in two web push
+    // tests). Kept whole — nested classes and module methods too — and
+    // carried into each including test's file as inner classes. A file
+    // in a test folder that defines a module and no test class is one
+    // too (`test_paths: [test/support]`, `include ArgsHelper`).
+    let included_test_helpers = ingest_included_test_helper_files(vfs, dir, &shared_test_helpers, &test_files)?;
+    // The app-wide `setup` the same file declares — see
+    // `ingest_test_case_setup`. Prepended to every test module's own.
+    let test_case_setup: Option<crate::expr::Expr> = {
+        let helper_rb = dir.join("test/test_helper.rb");
+        if vfs.exists(&helper_rb) {
+            match read_or_ledger(vfs, &helper_rb)? {
+                Some(source) => unwrap_or_record(super::test::ingest_test_case_setup(
+                    &source,
+                    &helper_rb.display().to_string(),
+                ))?
+                .flatten(),
+                None => None,
+            }
+        } else {
+            None
+        }
+    };
+
+    // The test helper Concerns: an `include` of one runs its `included`
+    // block's statements on the including test class, and the ones the
+    // helper mixes into every test case run on each of them.
+    let test_concerns = {
+        let helpers_dir = dir.join("test/test_helpers");
+        let mut files: Vec<PathBuf> =
+            if vfs.is_dir(&helpers_dir) { read_rb_files(vfs, &helpers_dir)? } else { Vec::new() };
+        files.extend(test_files.iter().cloned());
+        let mut concerns = Vec::new();
+        for f in files {
+            let Some(source) = read_or_ledger(vfs, &f)? else { continue };
+            let file = f.display().to_string();
+            for name in super::test::concern_modules(&source, &file) {
+                concerns.push(super::test::TestConcern { name, file: file.clone(), source: source.to_vec() });
+            }
+        }
+        let case_wide = test_case_wide_includes(vfs, dir)?
+            .iter()
+            .map(|s| s.as_str().trim_start_matches("::").to_string())
+            .collect();
+        super::test::TestConcerns { concerns, case_wide }
+    };
 
     // A test-case base the helper DEFINES (`class GemCompat::TestCase
     // < ActiveSupport::TestCase`), which the app's tests then subclass. A
@@ -1939,10 +1973,15 @@ end
             }
             continue;
         }
-        if let Some(tms) =
-            unwrap_or_record(ingest_test_files(&source, &entry.display().to_string()))?
-        {
+        let ingested = super::test::with_test_concerns(test_concerns.clone(), || {
+            ingest_test_files(&source, &entry.display().to_string())
+        });
+        if let Some(tms) = unwrap_or_record(ingested)? {
             for mut tm in tms {
+                // A module every test case already includes, included
+                // again: a no-op in Ruby, and spliced rather than
+                // carried here, so the `include` would name nothing.
+                tm.includes.retain(|i| !shared_test_helpers.iter().any(|lc| &lc.name == i));
                 splice_test_helpers(&mut tm, &shared_test_helpers);
                 carry_included_test_helpers(&mut tm, &included_test_helpers);
                 if let Some(case_setup) = &test_case_setup {
@@ -2519,6 +2558,9 @@ end
     // including declarations contributed by either kind of Concern,
     // and reuses the prepared resolver rather than rebuilding it.
     super::concern_accessors::validate(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
+    // Model-to-database ownership reads every model, concern splice and
+    // library module, so it runs once they all exist.
+    super::database_ownership::resolve(&mut app);
 
     // After every library class and include is known: a `...` that only
     // reaches a stdlib method of known signature through `super` takes
@@ -11343,15 +11385,11 @@ pub(super) fn extract_config_time_zone(source: &[u8]) -> Option<String> {
 /// Reading the include list rather than globbing the directory is also
 /// what makes this track the app: a module the app stops mixing in
 /// stops being spliced.
-fn ingest_test_helper_modules<V: Vfs + ?Sized>(
-    vfs: &V,
-    dir: &Path,
-) -> IngestResult<Vec<LibraryClass>> {
+/// The modules `test/test_helper.rb` mixes into every test case: what
+/// its `ActiveSupport::TestCase` reopen includes, and what a
+/// `test/test_helpers/` file includes through an `on_load` hook.
+fn test_case_wide_includes<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<Symbol>> {
     let helpers_dir = dir.join("test/test_helpers");
-    if !vfs.is_dir(&helpers_dir) {
-        return Ok(Vec::new());
-    }
-
     // Which modules get mixed into every test case. `test/test_helper.rb`
     // reopens `ActiveSupport::TestCase` and includes them there; ingest
     // the file as library classes and read that class's include list.
@@ -11378,7 +11416,7 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
     //     include SessionTestHelper
     //   end
     // — and `test/test_helper.rb` only `require_relative`s it.
-    for entry in read_rb_files(vfs, &helpers_dir)? {
+    for entry in if vfs.is_dir(&helpers_dir) { read_rb_files(vfs, &helpers_dir)? } else { Vec::new() } {
         let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
         for name in on_load_test_includes(&source, &entry.display().to_string()) {
             if !wanted.contains(&name) {
@@ -11386,6 +11424,19 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
             }
         }
     }
+    Ok(wanted)
+}
+
+fn ingest_test_helper_modules<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+) -> IngestResult<Vec<LibraryClass>> {
+    let helpers_dir = dir.join("test/test_helpers");
+    if !vfs.is_dir(&helpers_dir) {
+        return Ok(Vec::new());
+    }
+
+    let wanted = test_case_wide_includes(vfs, dir)?;
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
@@ -11424,14 +11475,24 @@ fn ingest_included_test_helper_files<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     shared: &[LibraryClass],
+    test_files: &[PathBuf],
 ) -> IngestResult<Vec<(crate::ident::ClassId, Vec<LibraryClass>)>> {
     let helpers_dir = dir.join("test/test_helpers");
-    if !vfs.is_dir(&helpers_dir) {
-        return Ok(Vec::new());
+    let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
+    if vfs.is_dir(&helpers_dir) {
+        candidates.extend(read_rb_files(vfs, &helpers_dir)?.into_iter().map(|f| (f, false)));
     }
+    candidates.extend(test_files.iter().map(|f| (f.clone(), true)));
     let mut out = Vec::new();
-    for entry in read_rb_files(vfs, &helpers_dir)? {
+    for (entry, in_test_folder) in candidates {
         let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
+        // A test folder's file is a helper only when it holds no test
+        // class; the test-file pass below reads the others.
+        if in_test_folder
+            && !ingest_test_files(&source, &entry.display().to_string()).is_ok_and(|tms| tms.is_empty())
+        {
+            continue;
+        }
         let Some(classes) =
             unwrap_or_record(ingest_library_classes(&source, &entry.display().to_string()))?
         else {
@@ -11475,7 +11536,14 @@ fn restore_source_keywords(params: &mut [crate::dialect::Param]) {
 
 /// A test class that `include`s one of those modules gets the module's
 /// file as inner classes, so the include resolves in the test's own
-/// emitted file.
+/// emitted file. A module whose methods assert has the instance methods
+/// the test reaches spliced in as its helpers too, as the shared helpers
+/// are: a test class's methods are where assertions are lowered
+/// (`assert_equal`, `flunk` have no harness method), and the class's own
+/// copy wins over the carried module's, as a class body beats an
+/// included module. A module that asserts nothing stays carried alone:
+/// the splice would buy nothing, and the test-method lowering drops a
+/// forwarded `**options` (campfire's `with_push_service`).
 fn carry_included_test_helpers(tm: &mut TestModule, helpers: &[(crate::ident::ClassId, Vec<LibraryClass>)]) {
     for (module, classes) in helpers {
         if !tm.includes.contains(module) {
@@ -11484,6 +11552,35 @@ fn carry_included_test_helpers(tm: &mut TestModule, helpers: &[(crate::ident::Cl
         for lc in classes {
             if !tm.inner_classes.iter().any(|c| c.name == lc.name) {
                 tm.inner_classes.push(lc.clone());
+            }
+        }
+        if let Some(top) = classes.iter().find(|c| &c.name == module) {
+            // Minitest runs every `test_*` method a test class responds
+            // to, the included module's too (shared tests: `include
+            // SharedTests` with `def test_creates`). Carried but not
+            // listed, it would never run, and the file would pass
+            // without the test.
+            for m in &top.methods {
+                let Some(stem) = m.name.as_str().strip_prefix("test_") else { continue };
+                if m.receiver != MethodReceiver::Instance || !m.params.is_empty() {
+                    continue;
+                }
+                let name = stem.replace('_', " ");
+                if !tm.tests.iter().any(|t| t.name == name) {
+                    tm.tests.push(crate::dialect::Test { name, body: m.body.clone() });
+                }
+            }
+            let mut called = crate::det::HashSet::default();
+            let mut consts = crate::det::HashSet::default();
+            for m in &top.methods {
+                collect_referenced_names(&m.body, &mut called, &mut consts);
+            }
+            let asserts = called.iter().any(|name| {
+                let name = name.as_str();
+                name.starts_with("assert") || name.starts_with("refute") || name == "flunk"
+            });
+            if asserts {
+                splice_test_helpers(tm, std::slice::from_ref(top));
             }
         }
     }

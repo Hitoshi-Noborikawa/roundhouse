@@ -2248,11 +2248,26 @@ impl TestModule {
     /// a `def` of its own or of a test class it inherits from (among
     /// `modules`), before the framework's method of that name. A `def
     /// self.<method>` is not one: the call is sent to the test instance.
+    /// The instance methods of the carried modules this class includes
+    /// (`include LinkHelper` with `LinkHelper` among `inner_classes`):
+    /// the class answers them as its own, as Ruby's `include` makes it.
+    pub fn included_module_methods(&self) -> impl Iterator<Item = &Symbol> + '_ {
+        self.inner_classes
+            .iter()
+            .filter(|lc| lc.is_module && self.includes.contains(&lc.name))
+            .flat_map(|lc| lc.methods.iter())
+            .filter(|m| m.receiver == MethodReceiver::Instance)
+            .map(|m| &m.name)
+    }
+
     pub fn defines_instance_method(&self, modules: &[TestModule], method: &str) -> bool {
         let mut current = Some(self);
         for _ in 0..32 {
             let Some(tm) = current else { break };
             if tm.helpers.iter().any(|helper| helper.name.as_str() == method && helper.receiver == MethodReceiver::Instance) {
+                return true;
+            }
+            if tm.included_module_methods().any(|name| name.as_str() == method) {
                 return true;
             }
             current = tm.parent.as_ref()
