@@ -151,6 +151,8 @@ SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_WORKER_INPUTS - {"runtime/spinel/sidekiq_redis.rb
 SPINEL_TEST_SECONDS = {
     "spinel_transaction_connection": 501,
     "spinel_stmt_cache_lru": 203,
+    # Two Spinel compiles and a run; measured in #1455's CI run 40602974151.
+    "row_from_raw_hash_spinel": 183,
     "param_binds": 181,
     "not_found_parity_spinel": 169,
     "param_binds_values": 126,
