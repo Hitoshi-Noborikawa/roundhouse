@@ -7208,7 +7208,14 @@ fn root_shadowed_constants(
     // Rooted, that was `::Type`: uninitialized constant Type. A resolved
     // class reference is no exception: its absolute spelling would name
     // a private constant.
-    if known(&format!("{own}::{}", head.as_str())) {
+    //
+    // A view has no such scope in the source: an ERB template is not
+    // inside any module, so its `Views::…` nesting is all the emit's,
+    // and its own module is one more enclosing namespace (below).
+    // Inside `Views::Accounts`, campfire's `Users::ProfilesHelper` would
+    // otherwise bind to the `Views::Accounts::Users` view module.
+    let view = own.starts_with("Views::");
+    if !view && known(&format!("{own}::{}", head.as_str())) {
         return;
     }
     // Emission nests compact declarations such as `class UI::Explicit`
@@ -7236,7 +7243,7 @@ fn root_shadowed_constants(
     // … or an ENCLOSING namespace defines it and the full path under
     // that namespace does not exist, which is the nesting the emit
     // introduced. See the prefix note at the call site.
-    let by_enclosing = prefixes.iter().any(|p| {
+    let by_enclosing = prefixes.iter().map(String::as_str).chain(view.then_some(own)).any(|p| {
         known(&format!("{p}::{}", head.as_str())) && !known(&format!("{p}::{joined}"))
     });
     if !by_own_segment && !by_enclosing {
