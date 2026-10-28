@@ -64,12 +64,11 @@ pub(crate) fn shake(app: &App) -> Option<App> {
         })
     };
     let file_of_class = |c: &LibraryClass| {
-        c.methods
-            .iter()
-            .map(|m| m.body.span.file)
-            .chain(c.constants.iter().map(|(_, value)| value.span.file))
-            .chain(std::iter::once(c.parent_span.file))
+        // The class's own header first: a macro the gem defines (parslet's `rule`) leaves its expanded methods' spans in the gem.
+        std::iter::once(c.parent_span.file)
             .chain(c.include_spans.iter().map(|span| span.file))
+            .chain(c.constants.iter().map(|(_, value)| value.span.file))
+            .chain(c.methods.iter().map(|m| m.body.span.file))
             .find(|file| file.0 != 0)
     };
     let is_gem = |c: &LibraryClass| file_of_class(c).is_some_and(mounted);

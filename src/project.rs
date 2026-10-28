@@ -2495,12 +2495,11 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
     let mut trimmed = app.clone();
     // A class records no span of its own: the first real file among its parts names where it was written.
     let file_of_class = |c: &crate::dialect::LibraryClass| {
-        c.methods
-            .iter()
-            .map(|m| m.body.span.file)
-            .chain(c.constants.iter().map(|(_, value)| value.span.file))
-            .chain(std::iter::once(c.parent_span.file))
+        // The class's own header first: a macro the gem defines (parslet's `rule`) leaves its expanded methods' spans in the gem.
+        std::iter::once(c.parent_span.file)
             .chain(c.include_spans.iter().map(|span| span.file))
+            .chain(c.constants.iter().map(|(_, value)| value.span.file))
+            .chain(c.methods.iter().map(|m| m.body.span.file))
             .find(|file| file.0 != 0)
     };
     let dropped: crate::det::HashSet<String> = app
