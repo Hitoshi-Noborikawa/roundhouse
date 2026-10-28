@@ -1648,7 +1648,8 @@ module ActiveRecord
         end
         fill_timestamps(true) if stamps_timestamps?
         @__id_before_insert = @id
-        self.id = _adapter_insert
+        inserted_key = _adapter_insert
+        self.id = inserted_key unless self.class.primary_key.nil?
         @persisted = true
         _enlist_write(0)
         __track_saved_changes(was_new)

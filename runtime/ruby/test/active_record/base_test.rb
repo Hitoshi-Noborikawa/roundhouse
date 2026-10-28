@@ -228,6 +228,26 @@ class BaseTest < Minitest::Test
     refute_equal 0, item.id
   end
 
+  class Tagging < ActiveRecord::Base
+    def self.table_name = "taggings"
+    def self.schema_columns = [:tag_id]
+    def self.primary_key = nil
+
+    def _adapter_insert
+      Db.exec("INSERT INTO taggings (tag_id) VALUES (1)")
+    end
+  end
+
+  def test_save_without_a_primary_key_inserts_without_assigning_id
+    Db.exec("CREATE TABLE taggings (tag_id INTEGER)")
+    tagging = Tagging.new
+
+    assert tagging.save()
+    assert_predicate tagging, :persisted?
+    refute_predicate tagging, :new_record?
+    assert_equal [{ "tag_id" => 1 }], ActiveRecord.adapter.select_rows("SELECT tag_id FROM taggings")
+  end
+
   # ── class-level finders ─────────────────────────────────────
 
   def test_find_returns_instance_for_existing_row
