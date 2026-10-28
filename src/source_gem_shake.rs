@@ -153,6 +153,7 @@ pub(crate) fn shake(app: &App) -> Option<App> {
         })
     };
 
+    const DYNAMIC: &str = "\u{0}send ";
     // Walk a body: the calls it makes and the classes it names.
     struct Scan<'a> {
         context: Option<(&'a str, bool, &'a str)>,
@@ -180,12 +181,25 @@ pub(crate) fn shake(app: &App) -> Option<App> {
                         },
                     },
                 };
-                s.calls.push((target, method.as_str().to_string()));
+                let by_name = matches!(method.as_str(), "send" | "public_send" | "__send__" | "method" | "public_method" | "respond_to?" | "instance_method");
+                s.calls.push((target.clone(), method.as_str().to_string()));
                 // `send(:name)`: a call by a name held as a Symbol.
-                if matches!(method.as_str(), "send" | "public_send" | "__send__" | "method" | "public_method" | "respond_to?" | "instance_method")
-                    && let Some(ExprNode::Lit { value: Literal::Sym { value } }) = args.first().map(|a| &*a.node)
-                {
-                    s.calls.push((Target::Any, value.as_str().to_string()));
+                match args.first().map(|a| &*a.node) {
+                    Some(ExprNode::Lit { value: Literal::Sym { value } }) if by_name => {
+                        s.calls.push((Target::Any, value.as_str().to_string()));
+                    }
+                    // Not dropped as unknown: svg-graph's `init_with` reaches its option writers by `send(key.to_s + "=", value)`.
+                    Some(name) if by_name && matches!(method.as_str(), "send" | "public_send" | "__send__") => {
+                        let suffix = match name {
+                            ExprNode::Send { method, args, .. } if method.as_str() == "+" => match args.first().map(|a| &*a.node) {
+                                Some(ExprNode::Lit { value: Literal::Str { value } }) => value.to_string(),
+                                _ => String::new(),
+                            },
+                            _ => String::new(),
+                        };
+                        s.calls.push((target, format!("{DYNAMIC}{suffix}")));
+                    }
+                    _ => {}
                 }
             }
             ExprNode::Super { .. } => {
@@ -283,7 +297,22 @@ pub(crate) fn shake(app: &App) -> Option<App> {
         }
         // Calls: the method each one reaches on the reached classes.
         let mut reached: Vec<MethodKey> = Vec::new();
+        let mut named: Vec<(Target, String)> = Vec::new();
         for (target, method) in &calls {
+            let Some(suffix) = method.strip_prefix(DYNAMIC) else { continue };
+            let classes: Vec<&String> = match target {
+                Target::Virtual(c, _) if !c.starts_with('\u{0}') => live_classes.iter().filter(|d| ancestors(d).contains(c)).collect(),
+                _ => live_classes.iter().collect(),
+            };
+            for c in classes {
+                for entry in entries.get(c.as_str()).into_iter().flatten() {
+                    for m in entry.methods.iter().filter(|m| m.name.as_str().ends_with(suffix)) {
+                        named.push((target.clone(), m.name.to_string()));
+                    }
+                }
+            }
+        }
+        for (target, method) in calls.iter().filter(|(_, m)| !m.starts_with(DYNAMIC)).chain(named.iter()) {
             let (receivers, class_side): (Vec<String>, bool) = match target {
                 Target::Any => {
                     for c in &live_classes {

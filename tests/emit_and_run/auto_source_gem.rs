@@ -28,6 +28,7 @@ fn the_spinel_tree_compiles_the_installed_gem_and_its_dependency() {
     // Spelled whole: runtime/multipart.rb has `def self.boundary`.
     assert!(!mentions(&emitted, "class Bindings\n"), "an unreached gem class is in the Spinel tree");
     assert!(!mentions(&emitted, "def self.bound(values)"), "an unreached gem method is in the Spinel tree");
+    assert!(mentions(&emitted, "@width = value.to_i * 2"), "a writer reached by a built name is not in the Spinel tree");
 }
 
 #[test]
