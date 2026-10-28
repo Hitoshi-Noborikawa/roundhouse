@@ -176,6 +176,42 @@ puts "distinct tableless permit lists passed"
 "#).assert_passes();
 }
 
+#[test]
+fn tableless_factory_filters_a_private_override_of_an_accessor_writer() {
+    forms()
+        .write("app/models/end_request.rb", &END_REQUEST.replace("\nend\n", r#"
+  attr_accessor :note, :public_note
+
+  private
+
+  def note=(value)
+    raise "private accessor override called"
+  end
+end
+"#))
+        .write("app/controllers/previews_controller.rb", r#"class PreviewsController < ApplicationController
+  def create
+    form = EndRequest.new(preview_params)
+    render json: { id: form.pty_session_id }
+  end
+
+  private
+
+  def preview_params
+    params.expect(end_request: %i[pty_session_id note public_note])
+  end
+end
+"#)
+        .run_ruby(r#"
+params = PreviewsEndRequestParams.from_raw({"end_request" => {"pty_session_id" => "21", "note" => "hidden", "public_note" => "visible"}})
+preview = EndRequest.from_previews_end_request_params(params)
+raise preview.pty_session_id.inspect unless preview.pty_session_id == 21
+raise preview.note.inspect unless preview.note.nil?
+raise preview.public_note.inspect unless preview.public_note == "visible"
+puts "private accessor override filtered"
+"#).assert_passes();
+}
+
 fn forms_with_source_factories() -> emit_and_run::Overlay {
     forms()
         .write(

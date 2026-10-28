@@ -1112,7 +1112,10 @@ fn writable_permit_fields(
     fields
         .iter()
         .filter(|field| {
-            if writable.contains(*field) || model_defines_public_writer(model, field) {
+            let public_writer = model_defines_public_writer(model, field);
+            let private_override =
+                table.is_none() && model_defines_writer(model, field) && !public_writer;
+            if (writable.contains(*field) && !private_override) || public_writer {
                 return true;
             }
             let private = model_defines_writer(model, field);
