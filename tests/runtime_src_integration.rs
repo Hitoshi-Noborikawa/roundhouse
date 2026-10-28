@@ -631,7 +631,13 @@ fn every_runtime_method_body_is_fully_typed() {
             let methods_vec: Vec<(roundhouse::ident::Symbol, Ty)> = methods
                 .into_iter()
                 .map(|(name, ty)| {
+                    // A block-yielding method keeps its whole `Fn`, as
+                    // `runtime_src`'s typing registry does: the block
+                    // contract is what binds the block's parameters
+                    // (`each_row`'s `row`). Dispatch answers the `Fn`'s
+                    // return either way.
                     let ret_ty = match ty {
+                        Ty::Fn { block: Some(_), .. } => ty,
                         Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                         other => other,
                     };

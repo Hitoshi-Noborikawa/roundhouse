@@ -495,10 +495,18 @@ fn untyped_subexpressions_baseline() {
     // `restore_attribute!` take the column name; it is a var on this
     // RBS-less probe (+7 in active_record/connection.rb); the RBS-paired
     // gate types it.
-    // MEASURED 1130 on 2026-10-28: StaleObjectError accepts arbitrary records
+    // MEASURED 1127 on 2026-10-27 (on 1121): hydration through the
+    // adapter's `each_row` (`_hydrate_all`, `_adapter_all`,
+    // `_adapter_find_by_id`, `Relation#load_records`). `ActiveRecord.adapter`
+    // is `Var | nil` on this RBS-less probe, so the block's `row` is a var
+    // (+4); the `select_rows(...).map` it replaces answered `Untyped`, and
+    // `map` bound `row` to that. `_adapter_find_by_id`'s `id` goes through
+    // the unmodeled `Db.escape_int` (+2). The RBS-paired gate types all six
+    // through `each_row`'s block contract in base.rbs.
+    // MEASURED 1136 on 2026-10-28: StaleObjectError accepts arbitrary records
     // and actions. This probe omits their Object? signatures, so their reads
-    // are vars here (+9 in errors.rb, 1121 -> 1130); the RBS-paired gate adds 2.
-    const CEILING: usize = 1130;
+    // are vars here (+9 in errors.rb, 1127 -> 1136); the RBS-paired gate adds 2.
+    const CEILING: usize = 1136;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

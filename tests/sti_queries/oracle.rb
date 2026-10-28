@@ -35,14 +35,15 @@ if ENV["HOOKED"]
     after_initialize :mark_hooked
 
     def mark_hooked
-      @hooked = true
+      @hook_calls = (@hook_calls || 0) + 1
+      @hook_title = title
     end
 
-    def hooked
-      @hooked
+    def hook_seen
+      [@hook_calls, @hook_title]
     end
   end
 end
 %w[feature special_feature probe script].each { |f| load File.join(__dir__, "#{f}.rb") }
-load File.join(__dir__, "hooked.rb") if ENV["HOOKED"]
+%w[hook_probe hooked].each { |f| load File.join(__dir__, "#{f}.rb") } if ENV["HOOKED"]
 puts "SQL: #{Feature.where(title: "f").to_sql}"

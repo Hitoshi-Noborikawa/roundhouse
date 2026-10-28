@@ -10996,8 +10996,8 @@ def self._preload_batch_{name}(records)
   grouped = {{}}
   loaded = []
   if ids.length > 0
-    rows = ActiveRecord.adapter.select_rows("SELECT {table}.*, {group_col} AS __src FROM {table} {join} WHERE {group_col} IN (" + Db.{key_list}(ids) + "){order_sql}")
-    rows.each do |row|
+    adapter = ActiveRecord.adapter
+    adapter.each_row("SELECT {table}.*, {group_col} AS __src FROM {table} {join} WHERE {group_col} IN (" + Db.{key_list}(ids) + "){order_sql}") do |row|
       rec = {target}.instantiate(row)
       loaded << rec
       k = row["__src"].{to_key}

@@ -2861,6 +2861,9 @@ fn target_files_inner(
             }
         }
         let mut files = files;
+        if target == BuildTarget::Spinel {
+            emit::ruby::shake::drop_shadowed_base_defs(&mut files);
+        }
         crate::timings::phase(format_args!("emit {}: tree shake", target.as_str()), || {
             emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
         });
@@ -5227,9 +5230,25 @@ fn apply_cable_actions(files: &mut [(String, String)], app: &App) {
 /// active_record_db_config.rb): one arm per model, by the name
 /// `record.class.name` answers for it, and an STI subclass name the
 /// base hydrates. See `lower::record_snapshot`.
+///
+/// NO-OP when nothing in the tree calls it (every app without a
+/// snapshot rebuild): the default body raises. Spinel compiles the
+/// method whether or not it is called, and with no caller to type
+/// `attributes` its arms handed every model's `instantiate` an untyped
+/// row, widening each `<Model>Row.from_raw` to the boxed path.
 fn apply_instantiate_named(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "      # >>> generated: instantiate-named\n";
     const TAIL: &str = "      # <<< generated: instantiate-named\n";
+    // The runtime file that defines the method, by its path in the
+    // emitted tree. A basename match would also skip (and splice into)
+    // an app file of the same name, `app/models/active_record_db_config.rb`.
+    const DEFINER: &str = "runtime/active_record_db_config.rb";
+    let called = files
+        .iter()
+        .any(|(path, content)| path != DEFINER && content.contains("instantiate_named"));
+    if !called {
+        return;
+    }
     let mut arms: Vec<(String, String)> = Vec::new();
     for model in &app.models {
         // Only a class with a table has rows to snapshot, and only it has
@@ -5262,7 +5281,7 @@ fn apply_instantiate_named(files: &mut [(String, String)], app: &App) {
     generated.push_str("      else raise NameError, \"uninitialized constant #{name}\"\n      end\n");
     generated.push_str(TAIL);
     for (path, content) in files.iter_mut() {
-        if !path.ends_with("active_record_db_config.rb") {
+        if path != DEFINER {
             continue;
         }
         let Some(start) = content.find(HEAD) else { continue };
