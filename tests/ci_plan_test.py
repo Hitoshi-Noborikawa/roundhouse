@@ -812,6 +812,7 @@ class Routing(unittest.TestCase):
         for path, targets in {
             "runtime/spinel/db_jruby.rb": ["jruby"],
             "runtime/spinel/markly_jruby.rb": ["jruby"],
+            "runtime/spinel/pg_driver_cruby.rb": ["ruby", "jruby"],
             "runtime/spinel/scaffold/ruby_overlay/main.rb": ["ruby", "jruby"],
             "runtime/spinel/module_delegate.rb": ["ruby", "jruby"],
         }.items():
@@ -893,6 +894,8 @@ class Routing(unittest.TestCase):
             "runtime/spinel/db_pg.rbs": ["spinel_pg_db"],
             "runtime/spinel/pg_errors.rb": ["spinel_pg_db"],
             "runtime/spinel/pg_errors.rbs": ["spinel_pg_db"],
+            "runtime/spinel/pg_driver.rb": ["spinel_pg_db"],
+            "runtime/spinel/pg_driver.rbs": ["spinel_pg_db"],
             # The Db contract suite feeds the Spinel lanes that run its files.
             "tests/db_contract/contract_cases.rb": ["spinel_pg_db", "spinel_db_contract"],
             "tests/db_contract/sqlite_main.rb": ["spinel_db_contract"],

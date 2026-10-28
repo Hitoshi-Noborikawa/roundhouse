@@ -1,18 +1,22 @@
 # frozen_string_literal: true
-# Primitive Db surface over PostgreSQL, for spinel-compiled binaries.
+# Primitive Db surface over PostgreSQL, for spinel-compiled binaries and
+# for CRuby.
 #
 # The same `module Db` contract as runtime/spinel/db.rb (SQLite over
 # libsqlite3 FFI) and its gem-backed siblings, typed in
-# runtime/ruby/db.rbs, implemented on the spinel-pg driver
+# runtime/ruby/db.rbs. Under Spinel it runs on the spinel-pg driver
 # (https://github.com/rubys/spinel-pg): a pure spinel-Ruby PostgreSQL
 # client over Spinel's own sp_net sockets, so the program links no
 # libpq. A raw compile finds it with `spinel -I <spinel-pg checkout>`;
-# a spin package lists `pg` in `[dependencies]`.
+# a spin package lists `pg` in `[dependencies]`. Under CRuby it runs on
+# the pg gem, whose API spinel-pg mirrors; pg_driver.rb holds the few
+# places the two differ (pg_driver_cruby.rb is the gem's).
 #
 # Nothing selects this file yet. The `--database postgres` wiring for
-# `--target spinel` (shipping this file as runtime/db.rb, the `pg`
-# dependency, PostgreSQL DDL at boot) follows the shared database
-# selection; until then tests/spinel_pg_db.rs compiles it directly.
+# `--target spinel` and the Ruby target (shipping this file as
+# runtime/db.rb, the `pg` dependency, PostgreSQL DDL at boot) follows the
+# shared database selection; until then the Db contract runs it directly
+# on both runtimes (tests/spinel_pg_db.rs, tests/db_contract.rs).
 #
 # What maps onto what:
 #
@@ -64,6 +68,7 @@
 # (typed) before reading anything from a driver error.
 require "pg"
 require_relative "pg_errors"
+require_relative "pg_driver"
 
 # Connection settings from a URL, then the libpq PG* environment
 # variables, then libpq's defaults (localhost:5432, database named after
@@ -349,7 +354,7 @@ class PgConn
     c = @client
     if c.nil?
       cfg = @config
-      c = PG.connect(cfg.host, cfg.port, cfg.database, cfg.user, cfg.password)
+      c = PgDriver.open(cfg.host, cfg.port, cfg.database, cfg.user, cfg.password)
       @client = c
     end
     c
@@ -428,7 +433,7 @@ class PgConn
         st.finish(client.exec_params(st.sql, st.params))
       end
     rescue PG::Error => e
-      PgErrors.raise_mapped(e.result.error_field(PG::PG_DIAG_SQLSTATE).to_s, e.message)
+      PgErrors.raise_mapped(PgDriver.sqlstate(e), e.message)
       raise e
     end
     nil
@@ -523,7 +528,7 @@ class PgConn
       r = client.exec_prepared(name, st.params)
       return r
     rescue PG::Error => e
-      code = e.result.error_field(PG::PG_DIAG_SQLSTATE).to_s
+      code = PgDriver.sqlstate(e)
       raise e if code != "26000" && code != "0A000"
       forget_named(st.sql)
       if code == "0A000"
@@ -550,12 +555,12 @@ class PgConn
   def simple(sql)
     begin
       r = client.exec(sql)
-      @last_tag = r.cmd_tag
+      @last_tag = PgDriver.command_tag(r)
       @changes = Db.tag_count(@last_tag)
       @last_insert_table = @last_tag.start_with?("INSERT ") ? Db.insert_target(sql) : ""
       return r
     rescue PG::Error => e
-      PgErrors.raise_mapped(e.result.error_field(PG::PG_DIAG_SQLSTATE).to_s, e.message)
+      PgErrors.raise_mapped(PgDriver.sqlstate(e), e.message)
       raise e
     end
   end

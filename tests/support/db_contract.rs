@@ -57,13 +57,17 @@ pub struct Lane {
     pub backend: Backend,
     /// Runtime files the shim requires, copied beside it by basename.
     pub requires: &'static [&'static str],
+    /// Runtime files copied beside it under another name: a runtime's own
+    /// variant of a file the shim requires (`pg_driver_cruby.rb` as
+    /// `pg_driver.rb`), as the emitted tree ships it.
+    pub requires_as: &'static [(&'static str, &'static str)],
     /// RBS handed to Spinel with `--rbs`, copied into sig/.
     pub rbs: &'static [&'static str],
     /// A directory the compile adds with `-I`, named by this variable
     /// (a Spinel package checkout). Required when set.
     pub include_env: Option<(&'static str, &'static str)>,
     /// PostgreSQL lanes: the lane file (hook and shim-own cases), and
-    /// the checks it reports under its `lane_name`.
+    /// the checks it reports under its `lane_name`, the shim's file stem.
     pub lane_file: Option<&'static str>,
     pub lane_checks: usize,
 }
@@ -81,6 +85,7 @@ pub const LANES: &[Lane] = &[
         runtime: Runtime::Cruby,
         backend: Backend::Sqlite,
         requires: &[],
+        requires_as: &[],
         rbs: &[],
         include_env: None,
         lane_file: None,
@@ -92,6 +97,7 @@ pub const LANES: &[Lane] = &[
         runtime: Runtime::Spinel,
         backend: Backend::Sqlite,
         requires: SPINEL_TIME,
+        requires_as: &[],
         rbs: &[],
         include_env: None,
         lane_file: None,
@@ -104,12 +110,15 @@ pub const LANES: &[Lane] = &[
         backend: Backend::Postgres,
         requires: &[
             "runtime/spinel/pg_errors.rb",
+            "runtime/spinel/pg_driver.rb",
             "runtime/spinel/active_support_time_parsing.rb",
             "runtime/spinel/active_support_interval.rb",
             "runtime/spinel/active_support_duration.rb",
         ],
+        requires_as: &[],
         rbs: &[
             "runtime/spinel/db_pg.rbs",
+            "runtime/spinel/pg_driver.rbs",
             "runtime/spinel/pg_errors.rbs",
             "runtime/ruby/db.rbs",
             "runtime/spinel/active_support_time_parsing.rbs",
@@ -117,6 +126,23 @@ pub const LANES: &[Lane] = &[
             "runtime/spinel/active_support_duration.rbs",
         ],
         include_env: Some(("SPINEL_PG_DIR", "a spinel-pg checkout")),
+        lane_file: Some("tests/db_contract/db_pg_lane.rb"),
+        lane_checks: 104,
+    },
+    Lane {
+        name: "db_pg_cruby",
+        shim: "runtime/spinel/db_pg.rb",
+        runtime: Runtime::Cruby,
+        backend: Backend::Postgres,
+        requires: &[
+            "runtime/spinel/pg_errors.rb",
+            "runtime/spinel/active_support_time_parsing.rb",
+            "runtime/spinel/active_support_interval.rb",
+            "runtime/spinel/active_support_duration.rb",
+        ],
+        requires_as: &[("runtime/spinel/pg_driver_cruby.rb", "pg_driver.rb")],
+        rbs: &[],
+        include_env: None,
         lane_file: Some("tests/db_contract/db_pg_lane.rb"),
         lane_checks: 104,
     },
@@ -256,6 +282,9 @@ pub fn run_lane(lane: &Lane) {
         let path = Path::new(file);
         copy(&root().join(path), &dir.join(path.file_name().unwrap()));
     }
+    for (file, name) in lane.requires_as {
+        copy(&root().join(file), &dir.join(name));
+    }
     for file in lane.rbs {
         let path = Path::new(file);
         copy(
@@ -341,8 +370,11 @@ pub fn run_lane(lane: &Lane) {
             "the {} lane ran a different number of PostgreSQL checks than postgres_cases.rb makes",
             lane.name
         );
+        // The lane file reports under its shim's name, so one shim's
+        // lanes on both runtimes share it.
+        let shim = Path::new(lane.shim).file_stem().and_then(|stem| stem.to_str()).unwrap();
         assert_eq!(
-            reported(&stdout, lane.name),
+            reported(&stdout, shim),
             lane.lane_checks,
             "the {} lane's own checks",
             lane.name
