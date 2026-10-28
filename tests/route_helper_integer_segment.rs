@@ -66,13 +66,12 @@ fn an_integer_in_a_string_segment_is_stringified_at_the_call_site() {
         "{controller}"
     );
     // An optional segment (`/top(/:length)`, CodeRabbit on #1473) is
-    // `String | nil`: an Integer there is its `to_s` too, and the
-    // omitted segment stays `nil`.
+    // `String | nil`: an Integer there is bound once, and only a value
+    // that isn't nil becomes its `to_s`.
     assert!(helpers.contains("def self.top_path: (?String? length) -> String"), "{helpers}");
-    assert!(
-        controller.contains("[RouteHelpers.top_path(length.to_s), RouteHelpers.top_path(length.to_s), RouteHelpers.top_path]"),
-        "{controller}"
-    );
+    assert!(controller.contains("[RouteHelpers.top_path((route_segment_0 = length\n"), "{controller}");
+    assert!(controller.contains("route_segment_0.nil?") && controller.contains("route_segment_0.to_s"), "{controller}");
+    assert!(controller.contains("RouteHelpers.top_path(length.to_s), RouteHelpers.top_path]"), "{controller}");
 }
 
 /// The issue's own shape (roundhouse#1468): in a view, a String call and
@@ -98,27 +97,50 @@ fn a_foreign_key_in_a_view_is_stringified_at_the_call_site() {
     assert!(partial.contains("RouteHelpers.article_comments_path(comment.article_id.to_s)"), "{partial}");
 }
 
-/// A record's integer column under an optional segment: a `null: false`
-/// one is its `to_s`, a nullable one stays as it is, so a `nil` still
-/// drops the segment as Rails does (`top_path(nil)` is "/top").
-#[test]
-fn only_a_non_null_column_is_stringified_under_an_optional_segment() {
-    let (emitted, _) = emit_and_run::empty_app()
+/// A record's integer column under an optional segment can be nil
+/// whatever the schema says: a nullable column, a new record's primary
+/// key, a reader the model overrides (CodeRabbit on #1473). Each is bound
+/// once and stays `nil` when it is, so the segment is dropped as Rails
+/// does (`top_path(nil)` is "/top"); otherwise it's its `to_s`. The Ruby
+/// run leaves `note.id` out: an unsaved record's id is `0` in the emitted
+/// runtime, where Rails has `nil`, which is a separate gap.
+fn notes_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"rank\"\n    t.integer \"position\", null: false\n  end\nend\n",
+            "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"rank\"\n    t.integer \"position\", null: false\n    t.integer \"score\", null: false\n  end\nend\n",
         )
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
-        .write("app/models/note.rb", "class Note < ApplicationRecord\nend\n")
+        .write("app/models/note.rb", "class Note < ApplicationRecord\n  def score\n    nil\n  end\nend\n")
         .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
         .write(
             "app/controllers/notes_controller.rb",
-            "class NotesController < ApplicationController\n  def show\n    note = Note.find(params[:id])\n    render json: [top_path(note.rank), top_path(note.position), top_path(\"x\")]\n  end\nend\n",
+            "class NotesController < ApplicationController\n  def show\n    render json: note_paths(Note.find(params[:id]))\n  end\n\n  def note_paths(note)\n    [top_path(note.rank), top_path(note.position), top_path(note.score), top_path(\"x\")]\n  end\n\n  def id_path(note)\n    top_path(note.id)\n  end\nend\n",
         )
         .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"top(/:length)\", to: \"notes#show\", as: :top\nend\n")
-        .emit(BuildTarget::Ruby);
+}
+
+#[test]
+fn a_column_under_an_optional_segment_keeps_nil() {
+    let (emitted, _) = notes_app().emit(BuildTarget::Ruby);
     let controller = std::fs::read_to_string(emitted.join("app/controllers/notes_controller.rb")).expect("read the emitted controller");
-    assert!(controller.contains("RouteHelpers.top_path(note.rank), RouteHelpers.top_path(note.position.to_s)"), "{controller}");
+    for column in ["rank", "position", "id", "score"] {
+        assert!(controller.contains(&format!(" = note.{column}\n")), "{column}: {controller}");
+    }
+    assert!(controller.contains("RouteHelpers.top_path(\"x\")"), "{controller}");
+}
+
+#[test]
+fn a_column_under_an_optional_segment_keeps_nil_in_ruby() {
+    let script = r#"
+require_relative "app/controllers/notes_controller"
+paths = NotesController.new.note_paths(Note.new(position: 4))
+raise paths.inspect unless paths == ["/top", "/top/4", "/top", "/top/x"]
+puts "note paths passed"
+"#;
+    let run = notes_app().run_ruby(script);
+    run.assert_passes();
+    assert!(run.stdout.contains("note paths passed"), "{}", run.stdout);
 }
 
 #[test]

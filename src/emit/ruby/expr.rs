@@ -1066,7 +1066,10 @@ fn emit_arg(e: &Expr) -> String {
     // A multiple assignment is a statement unless parenthesized: `if a, b
     // = pair` does not parse, and as an argument its comma splits it.
     let multi_assign = matches!(&*e.node, ExprNode::MultiAssign { .. });
-    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign {
+    // A `Let` emits as two lines, its binding and its body; as an argument
+    // the parens keep them one value.
+    let binding = matches!(&*e.node, ExprNode::Let { .. });
+    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign || binding {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)

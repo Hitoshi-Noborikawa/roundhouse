@@ -5539,6 +5539,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         self_returns: crate::det::HashMap::default(),
         local_records: crate::det::HashMap::default(),
         self_model: None,
+        next_local: std::cell::Cell::new(0),
     };
     // What each INSTANCE method in this slice answers, to a fixpoint.
     //
@@ -5757,17 +5758,16 @@ fn models_overriding_to_param(app: &App) -> crate::det::HashSet<String> {
         .collect()
 }
 
-/// `(model, column)` → nullable, for each integer column of a model's
-/// table: what `comment.article_id` reads, where a view body still
-/// carries `Ty::Var`.
-fn integer_columns(app: &App) -> crate::det::HashMap<(String, String), bool> {
+/// `(model, column)` for each integer column of a model's table: what
+/// `comment.article_id` reads, where a view body still carries `Ty::Var`.
+fn integer_columns(app: &App) -> crate::det::HashSet<(String, String)> {
     use crate::schema::ColumnType;
-    let mut out = crate::det::HashMap::default();
+    let mut out = crate::det::HashSet::default();
     for m in &app.models {
         let Some(table) = app.schema.tables.get(&m.table.0) else { continue };
         for c in &table.columns {
             if matches!(c.col_type, ColumnType::Integer | ColumnType::BigInt) {
-                out.insert((m.name.0.as_str().to_string(), c.name.as_str().to_string()), c.nullable);
+                out.insert((m.name.0.as_str().to_string(), c.name.as_str().to_string()));
             }
         }
     }
@@ -5891,8 +5891,8 @@ pub(crate) struct RecordSignals<'a> {
     direct_helpers: &'a crate::det::HashSet<String>,
     /// `<helper>_path` -> declared type per positional parameter.
     helper_param_tys: &'a crate::det::HashMap<String, Vec<crate::ty::Ty>>,
-    /// `(model, column)` → nullable, for each integer column (`integer_columns`).
-    integer_columns: &'a crate::det::HashMap<(String, String), bool>,
+    /// `(model, column)` for each integer column (`integer_columns`).
+    integer_columns: &'a crate::det::HashSet<(String, String)>,
     /// Controller class names (last path segment), so a class-side
     /// respelling (`ApplicationController.last_room_visited`) is
     /// recognized as the controller-method read it is.
@@ -5908,6 +5908,8 @@ pub(crate) struct RecordSignals<'a> {
     /// The model whose methods are being rewritten, when the enclosing
     /// class is one — what a bare `self` names there.
     self_model: Option<String>,
+    /// Numbers the `route_segment_<n>` locals an optional segment binds.
+    next_local: std::cell::Cell<usize>,
 }
 
 fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
@@ -5961,11 +5963,13 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
             // there. Rails renders it with `to_param`, its `to_s`. A view
             // body's read still carries `Ty::Var`, so a record's integer
             // column counts as well.
-            //
-            // An optional segment (`/top(/:length)`) is `String | nil`. An
-            // Integer that can't be nil is its `to_s` there too; a nullable
-            // column stays as it is, because Rails drops the segment for
-            // `nil`, and `nil.to_s` would keep an empty one.
+            // An optional segment (`/top(/:length)`) is `String | nil`
+            // (CodeRabbit on #1473). An Integer there is its `to_s` too, but
+            // a `nil` has to stay `nil`: Rails drops the segment for it, and
+            // `nil.to_s` would keep an empty one. A column read can be nil
+            // whatever the schema says (a new record's key, a reader the
+            // model overrides), so the argument is bound once and only a
+            // value that isn't nil is converted.
             let wants_opt_str_here = matches!(
                 declared.as_ref().and_then(|tys| tys.get(idx)),
                 Some(crate::ty::Ty::Union { variants })
@@ -5973,14 +5977,40 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
                         && variants.contains(&crate::ty::Ty::Str)
                         && variants.contains(&crate::ty::Ty::Nil)
             );
-            let to_s_here = (wants_str_here
+            if wants_opt_str_here
+                && (matches!(arg.ty, Some(crate::ty::Ty::Int)) || is_integer_column_read(arg, sig))
+            {
+                let span = arg.span;
+                let value = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+                let name = Symbol::from(format!("route_segment_{}", sig.next_local.get()));
+                sig.next_local.set(sig.next_local.get() + 1);
+                let value_ty = value.ty.clone().unwrap_or(crate::ty::Ty::Untyped);
+                let typed = |node: ExprNode, ty: crate::ty::Ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
+                let read = || typed(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() }, value_ty.clone());
+                let send = |method: &str, ty: crate::ty::Ty| {
+                    typed(
+                        ExprNode::Send { recv: Some(read()), method: Symbol::from(method), args: vec![], block: None, parenthesized: false },
+                        ty,
+                    )
+                };
+                let opt_str = crate::ty::Ty::Union { variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil].into() };
+                let check = typed(
+                    ExprNode::If {
+                        cond: send("nil?", crate::ty::Ty::Bool),
+                        then_branch: typed(ExprNode::Lit { value: crate::expr::Literal::Nil }, crate::ty::Ty::Nil),
+                        else_branch: send("to_s", crate::ty::Ty::Str),
+                    },
+                    opt_str.clone(),
+                );
+                *arg = typed(ExprNode::Let { id: crate::ident::VarId(0), name, value, body: check }, opt_str);
+                continue;
+            }
+            if wants_str_here
                 && (is_bare_id_read(arg)
                     || is_symbol_arg(arg)
                     || matches!(arg.ty, Some(crate::ty::Ty::Int))
-                    || is_integer_column_read(arg, sig, false)))
-                || (wants_opt_str_here
-                    && (matches!(arg.ty, Some(crate::ty::Ty::Int)) || is_integer_column_read(arg, sig, true)));
-            if to_s_here {
+                    || is_integer_column_read(arg, sig))
+            {
                 let span = arg.span;
                 let inner =
                     std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
@@ -6104,17 +6134,14 @@ fn is_bare_id_read(arg: &Expr) -> bool {
 }
 
 /// `record.<column>` where the record resolves to a model and the column
-/// is one of its integer columns; with `non_null`, only a `null: false` one.
-fn is_integer_column_read(arg: &Expr, sig: &RecordSignals<'_>, non_null: bool) -> bool {
+/// is one of its integer columns.
+fn is_integer_column_read(arg: &Expr, sig: &RecordSignals<'_>) -> bool {
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*arg.node else {
         return false;
     };
     args.is_empty()
-        && arg_record_model(r, sig).is_some_and(|model| {
-            sig.integer_columns
-                .get(&(model, method.as_str().to_string()))
-                .is_some_and(|nullable| !(non_null && *nullable))
-        })
+        && arg_record_model(r, sig)
+            .is_some_and(|model| sig.integer_columns.contains(&(model, method.as_str().to_string())))
 }
 
 fn is_symbol_arg(arg: &Expr) -> bool {
