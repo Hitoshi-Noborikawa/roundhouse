@@ -5521,6 +5521,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
     // the same helper, so the projection has to read what the signature
     // actually says.
     let helper_param_tys = route_helper_param_types(app);
+    let integer_columns = integer_columns(app);
     let mut sig = RecordSignals {
         all_models: &all_models,
         slug_models: &slug_models,
@@ -5529,6 +5530,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         class_method_targets: &class_method_targets,
         direct_helpers: &direct_helpers,
         helper_param_tys: &helper_param_tys,
+        integer_columns: &integer_columns,
         controller_names: app
             .controllers
             .iter()
@@ -5755,6 +5757,22 @@ fn models_overriding_to_param(app: &App) -> crate::det::HashSet<String> {
         .collect()
 }
 
+/// `(model, column)` for each integer column of a model's table: what
+/// `comment.article_id` reads, where a view body still carries `Ty::Var`.
+fn integer_columns(app: &App) -> crate::det::HashSet<(String, String)> {
+    use crate::schema::ColumnType;
+    let mut out = crate::det::HashSet::default();
+    for m in &app.models {
+        let Some(table) = app.schema.tables.get(&m.table.0) else { continue };
+        for c in &table.columns {
+            if matches!(c.col_type, ColumnType::Integer | ColumnType::BigInt) {
+                out.insert((m.name.0.as_str().to_string(), c.name.as_str().to_string()));
+            }
+        }
+    }
+    out
+}
+
 /// Singular association reader → target model name. `belongs_to` and
 /// `has_one` only: a `has_many` reader is a collection and never lands
 /// in a path segment. An ambiguous name (two models naming the same
@@ -5872,6 +5890,8 @@ pub(crate) struct RecordSignals<'a> {
     direct_helpers: &'a crate::det::HashSet<String>,
     /// `<helper>_path` -> declared type per positional parameter.
     helper_param_tys: &'a crate::det::HashMap<String, Vec<crate::ty::Ty>>,
+    /// `(model, column)` for each integer column (`integer_columns`).
+    integer_columns: &'a crate::det::HashSet<(String, String)>,
     /// Controller class names (last path segment), so a class-side
     /// respelling (`ApplicationController.last_room_visited`) is
     /// recognized as the controller-method read it is.
@@ -5934,7 +5954,18 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
                     continue;
                 }
             }
-            if wants_str_here && (is_bare_id_read(arg) || is_symbol_arg(arg)) {
+            // Any other Integer too (roundhouse#1468): a segment one call
+            // fills with a String is declared `String`, and a foreign key
+            // another call passes (`comment.article_id`) is an Integer
+            // there. Rails renders it with `to_param`, its `to_s`. A view
+            // body's read still carries `Ty::Var`, so a record's integer
+            // column counts as well.
+            if wants_str_here
+                && (is_bare_id_read(arg)
+                    || is_symbol_arg(arg)
+                    || matches!(arg.ty, Some(crate::ty::Ty::Int))
+                    || is_integer_column_read(arg, sig))
+            {
                 let span = arg.span;
                 let inner =
                     std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
@@ -6055,6 +6086,17 @@ fn is_bare_id_read(arg: &Expr) -> bool {
     matches!(&*arg.node,
         ExprNode::Send { recv: Some(_), method, args, block: None, .. }
             if method.as_str() == "id" && args.is_empty())
+}
+
+/// `record.<column>` where the record resolves to a model and the column
+/// is one of its integer columns.
+fn is_integer_column_read(arg: &Expr, sig: &RecordSignals<'_>) -> bool {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*arg.node else {
+        return false;
+    };
+    args.is_empty()
+        && arg_record_model(r, sig)
+            .is_some_and(|model| sig.integer_columns.contains(&(model, method.as_str().to_string())))
 }
 
 fn is_symbol_arg(arg: &Expr) -> bool {
