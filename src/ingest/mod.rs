@@ -17,6 +17,7 @@
 
 mod alba;
 mod unreachable_views;
+mod view_paths;
 mod uncalled_helper_copies;
 mod written_names;
 mod pagy;
