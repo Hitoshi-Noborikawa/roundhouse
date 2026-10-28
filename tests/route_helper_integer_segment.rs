@@ -17,11 +17,15 @@ const CONTROLLER: &str = "class PartsController < ApplicationController
   end
 
   def show
-    render json: top_paths(current_widget)
+    render json: [top_paths(current_widget), maybe_top_paths(current_widget, params[:flag] == \"1\")]
   end
 
   def top_paths(length)
     [top_path(length), top_path(length.to_s), top_path]
+  end
+
+  def maybe_top_paths(length, flag)
+    [top_path(flag ? length : nil), top_path(flag ? length.to_s : nil)]
   end
 
   private
@@ -39,6 +43,8 @@ paths = PartsController.new.part_paths(1)
 raise paths.inspect unless paths == ["/widgets/1/parts", "/widgets/1/parts"]
 tops = PartsController.new.top_paths(3)
 raise tops.inspect unless tops == ["/top/3", "/top/3", "/top"]
+maybes = [PartsController.new.maybe_top_paths(3, true), PartsController.new.maybe_top_paths(3, false)]
+raise maybes.inspect unless maybes == [["/top/3", "/top/3"], ["/top", "/top"]]
 puts "part paths passed"
 "#;
 
@@ -72,6 +78,9 @@ fn an_integer_in_a_string_segment_is_stringified_at_the_call_site() {
     assert!(controller.contains("[RouteHelpers.top_path((route_segment_0 = length\n"), "{controller}");
     assert!(controller.contains("route_segment_0.nil?") && controller.contains("route_segment_0.to_s"), "{controller}");
     assert!(controller.contains("RouteHelpers.top_path(length.to_s), RouteHelpers.top_path]"), "{controller}");
+    // An `Integer | nil` expression (CodeRabbit on #1473) is bound the same way.
+    assert!(controller.contains(" = (length if flag)\n"), "{controller}");
+
 }
 
 /// The issue's own shape (roundhouse#1468): in a view, a String call and
@@ -141,6 +150,37 @@ puts "note paths passed"
     let run = notes_app().run_ruby(script);
     run.assert_passes();
     assert!(run.stdout.contains("note paths passed"), "{}", run.stdout);
+}
+
+/// The binding takes a name the method doesn't already use (CodeRabbit on
+/// #1473): a method with its own `route_segment_0` keeps it. This app's
+/// only optional-segment call is that method's, so its binding would be
+/// the first `route_segment_0`.
+fn own_local_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write(
+            "app/controllers/tops_controller.rb",
+            "class TopsController < ApplicationController\n  def show\n    render json: own_local_top_path(params[:length].to_i)\n  end\n\n  def own_local_top_path(length)\n    route_segment_0 = \"kept\"\n    [top_path(length), top_path(length.to_s), route_segment_0]\n  end\nend\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"top(/:length)\", to: \"tops#show\", as: :top\nend\n")
+}
+
+#[test]
+fn the_binding_does_not_take_a_local_the_method_uses() {
+    let (emitted, _) = own_local_app().emit(BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/tops_controller.rb")).expect("read the emitted controller");
+    assert!(!controller.contains("(route_segment_0 = length"), "{controller}");
+    let script = r#"
+require_relative "app/controllers/tops_controller"
+own = TopsController.new.own_local_top_path(3)
+raise own.inspect unless own == ["/top/3", "/top/3", "kept"]
+puts "own local passed"
+"#;
+    let run = own_local_app().run_ruby(script);
+    run.assert_passes();
+    assert!(run.stdout.contains("own local passed"), "{}", run.stdout);
 }
 
 #[test]

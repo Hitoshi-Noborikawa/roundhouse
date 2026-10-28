@@ -5540,6 +5540,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         local_records: crate::det::HashMap::default(),
         self_model: None,
         next_local: std::cell::Cell::new(0),
+        taken_locals: std::cell::RefCell::new(crate::det::HashSet::default()),
     };
     // What each INSTANCE method in this slice answers, to a fixpoint.
     //
@@ -5617,6 +5618,12 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         for m in &mut lc.methods {
             sig.local_records.clear();
             sig.local_records = collect_local_records(&m.body, &sig);
+            {
+                let mut taken = sig.taken_locals.borrow_mut();
+                taken.clear();
+                taken.extend(m.params.iter().map(|p| p.name.clone()));
+                crate::lower::model_to_library::markers::collect_local_names(&m.body, &mut taken);
+            }
             rewrite_route_params(&mut m.body, &sig);
         }
     }
@@ -5910,6 +5917,9 @@ pub(crate) struct RecordSignals<'a> {
     self_model: Option<String>,
     /// Numbers the `route_segment_<n>` locals an optional segment binds.
     next_local: std::cell::Cell<usize>,
+    /// The names the method being rewritten binds (its params and locals),
+    /// plus the `route_segment_<n>` taken so far. Rebuilt per method.
+    taken_locals: std::cell::RefCell<crate::det::HashSet<Symbol>>,
 }
 
 fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
@@ -5977,13 +5987,26 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
                         && variants.contains(&crate::ty::Ty::Str)
                         && variants.contains(&crate::ty::Ty::Nil)
             );
+            // `Integer | nil` too (`flag ? n : nil`): the binding keeps the nil.
+            let int_or_nil = matches!(&arg.ty, Some(crate::ty::Ty::Union { variants })
+                if variants.len() == 2
+                    && variants.contains(&crate::ty::Ty::Int)
+                    && variants.contains(&crate::ty::Ty::Nil));
             if wants_opt_str_here
-                && (matches!(arg.ty, Some(crate::ty::Ty::Int)) || is_integer_column_read(arg, sig))
+                && (matches!(arg.ty, Some(crate::ty::Ty::Int)) || int_or_nil || is_integer_column_read(arg, sig))
             {
                 let span = arg.span;
                 let value = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
-                let name = Symbol::from(format!("route_segment_{}", sig.next_local.get()));
-                sig.next_local.set(sig.next_local.get() + 1);
+                // A name the method doesn't already bind: the `Let` assigns in
+                // the method's own scope.
+                let name = loop {
+                    let n = sig.next_local.get();
+                    sig.next_local.set(n + 1);
+                    let candidate = Symbol::from(format!("route_segment_{n}"));
+                    if sig.taken_locals.borrow_mut().insert(candidate.clone()) {
+                        break candidate;
+                    }
+                };
                 let value_ty = value.ty.clone().unwrap_or(crate::ty::Ty::Untyped);
                 let typed = |node: ExprNode, ty: crate::ty::Ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
                 let read = || typed(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() }, value_ty.clone());

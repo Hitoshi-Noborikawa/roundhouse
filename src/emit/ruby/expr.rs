@@ -280,8 +280,10 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::BoolOp { op, surface, left, right } => {
             emit_bool_op(*op, *surface, left, right)
         }
+        // The value as an argument would be: `x = (a if c)`, not the
+        // trailing modifier `x = a if c`, which skips the assignment.
         ExprNode::Let { name, value, body, .. } => {
-            format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
+            format!("{name} = {}\n{}", emit_arg(value), emit_expr(body))
         }
         ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
             let mut ps = lambda_params(params, extra_params, rest_param.as_ref());
