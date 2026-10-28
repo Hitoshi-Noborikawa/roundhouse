@@ -244,7 +244,7 @@ end
 "#,
         )
         .write("lib/widget.rb", "class Widget\n  include Sharded\n  include Tracked\nend\n")
-        // A model includer, as `Shop` includes ShardedTable.
+        // A model includer.
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"shops\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
         .write("app/models/shop.rb", "class Shop < ApplicationRecord\n  include Sharded\n  include Tracked\nend\n")
