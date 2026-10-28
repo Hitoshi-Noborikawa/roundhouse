@@ -377,13 +377,12 @@ pub(super) fn push_schema_methods(
         });
     }
 
-    // def self.primary_key — emitted ONLY when the model or schema overrode
-    // Rails' default, so the runtime Base's `"id"` answers for everyone
-    // else and no target pays a per-model method for the common case.
+    // def self.primary_key — emitted for custom keys and keyless tables.
+    // The runtime Base's `"id"` still handles the common case.
     let primary_key = model.primary_key.as_ref().or_else(|| {
         table.columns.iter().find(|col| col.primary_key && col.name.as_str() != "id").map(|col| &col.name)
     });
-    if let Some(pk) = primary_key {
+    if primary_key.is_some() || !table.columns.iter().any(|col| col.primary_key) {
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
@@ -392,8 +391,8 @@ pub(super) fn push_schema_methods(
             name: Symbol::from("primary_key"),
             receiver: MethodReceiver::Class,
             params: Vec::new(),
-            body: lit_str(pk.as_str().to_string()),
-            signature: Some(fn_sig(vec![], Ty::Str)),
+            body: primary_key.map_or_else(nil_lit, |pk| lit_str(pk.as_str().to_string())),
+            signature: Some(fn_sig(vec![], if primary_key.is_some() { Ty::Str } else { Ty::Nil })),
             effects: EffectSet::default(),
             enclosing_class: Some(owner.0.clone()),
             kind: AccessorKind::Method,

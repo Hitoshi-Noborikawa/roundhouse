@@ -18261,6 +18261,38 @@ fn belongs_to_primary_key_option_names_the_key_the_foreign_key_holds() {
         .assert_passes();
 }
 
+#[test]
+fn generated_keyless_model_saves_without_assigning_an_id() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/tagging.rb", "class Tagging < ApplicationRecord\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :taggings, id: false do |t|\n    t.integer :tag_id\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"tagging = Tagging.new(tag_id: 7)
+def tagging.id=(_value)
+  raise "id= called for a keyless model"
+end
+raise "save failed" unless tagging.save
+raise "primary key" unless Tagging.primary_key.nil?
+raise "not persisted" unless tagging.persisted? && !tagging.new_record?
+rows = Tagging.connection.select_rows("SELECT tag_id FROM taggings")
+raise "inserted rows: #{rows.inspect}" unless rows == [[7]]
+"#,
+        )
+        .assert_passes();
+}
+
 /// A runtime façade's scalar constants (`Markly::SMART = 0` in
 /// runtime/ruby/gem_facades.rb) used to carry no type: the constant table
 /// typed Hash/Array/`.new` values only, so after the Rubydex integration an
