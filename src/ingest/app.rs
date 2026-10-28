@@ -1589,7 +1589,7 @@ end
             {
                 if let Some(controller) = maybe_controller {
                     // `helper_method :x` exposes controller methods to
-                    // templates. The ARG-PURE ones (no ivar reads)
+                    // templates. The ARG-PURE ones (no instance state)
                     // register like app-helper functions — the bare
                     // view call rewrites to `<Controller>.x(args)`
                     // against a class-side clone the controller
