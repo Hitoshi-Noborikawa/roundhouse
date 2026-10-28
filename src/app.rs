@@ -492,6 +492,20 @@ pub struct App {
     /// `ingest::database_yml`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub database_pragmas: Vec<(String, Vec<String>)>,
+    /// `config/database.yml`'s configurations, every environment's,
+    /// resolved at build time ([`crate::database`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub databases: Vec<crate::database::Database>,
+    /// Each model's database, read from source (`connects_to` through
+    /// its ancestry). Empty when every model runs on the primary.
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub model_databases: indexmap::IndexMap<ClassId, crate::database::ModelDatabase>,
+    /// Database-identity facts the emitted runtime does not carry (a
+    /// second database, unresolvable routing, and as warnings a
+    /// configuration build-time resolution cannot read), reported by
+    /// `analyze::database_identity`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub database_refusals: Vec<crate::database::DatabaseRefusal>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -1148,6 +1162,9 @@ impl App {
             app_requires: Vec::new(),
             sql_functions: Vec::new(),
             database_pragmas: Vec::new(),
+            databases: Vec::new(),
+            model_databases: indexmap::IndexMap::new(),
+            database_refusals: Vec::new(),
             rails_application: None,
             concern_filters: HashMap::default(),
             graphql_types: Vec::new(),

@@ -770,6 +770,11 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 {
             continue;
         }
+        // `connects_to` / `establish_connection`: the model's database,
+        // decided (or refused) by `ingest::database_ownership`.
+        if crate::ingest::database_ownership::claims_model_statement(expr) {
+            continue;
+        }
         // Claimed by `apply_inherited_visibility` and `analyze::private_calls`.
         if expr.decisions & crate::expr::INHERITED_VISIBILITY != 0 {
             continue;
