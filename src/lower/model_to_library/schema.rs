@@ -595,6 +595,9 @@ pub(super) fn push_schema_methods(
 
     // def []=(name, value); case name; when :col then @col = value; ...; end; end
     methods.push(synth_index_write(owner, table, model));
+    if runtime_relation == super::RuntimeRelation::Present {
+        methods.push(synth_mass_attribute_writer(model, table));
+    }
 
     // def update(attrs) / update!(attrs) — Rails-shaped: an attribute
     // Hash over the model's writable surface, saved.
@@ -4531,6 +4534,125 @@ fn virtual_writer_fields(model: &Model, table: &Table) -> std::collections::BTre
     }
     virtuals.retain(|field| !table.columns.iter().any(|c| c.name == *field));
     virtuals
+}
+
+fn synth_mass_attribute_writer(model: &Model, table: &Table) -> MethodDef {
+    let name = Symbol::from("name");
+    let value = Symbol::from("value");
+    let raw = || with_ty(var_ref(value.clone()), Ty::Untyped);
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: true,
+            },
+        )
+    };
+    let mut writes = Vec::new();
+    for col in &table.columns {
+        let setter = format!("{}=", col.name.as_str());
+        let source = model.body.iter().find_map(|item| match item {
+            crate::dialect::ModelBodyItem::Method { method, .. }
+                if method.receiver == MethodReceiver::Instance
+                    && method.name.as_str() == setter =>
+            {
+                Some(method)
+            }
+            _ => None,
+        });
+        if source
+            .is_some_and(|method| method.visibility != crate::dialect::MethodVisibility::Public)
+        {
+            continue;
+        }
+        let slot = ColumnSlot::classify(col, model);
+        let (writer, argument) = if source.is_some() || slot.is_json() {
+            (setter, raw())
+        } else if slot.is_temporal() {
+            (
+                col_storage_setter(col).as_str().to_string(),
+                slot.format_cast(raw()).expect("temporal column"),
+            )
+        } else if let Some(mapped) = enum_label_cast(model, col, raw()) {
+            (setter, mapped)
+        } else {
+            let cast = match ty_of_column(&col.col_type) {
+                Ty::Int => "cast_integer",
+                Ty::Float => "cast_float",
+                Ty::Bool => "cast_boolean",
+                _ => "cast_string",
+            };
+            let argument = with_ty(
+                send(
+                    class_const(&ClassId(Symbol::from("ActiveSupport"))),
+                    cast,
+                    vec![raw()],
+                ),
+                super::ty_of_column_slot(col),
+            );
+            (setter, argument)
+        };
+        writes.push((col.name.clone(), send(self_ref(), &writer, vec![argument])));
+    }
+    for field in virtual_writer_fields(model, table) {
+        let setter = format!("{}=", field.as_str());
+        let private = model.body.iter().any(|item| {
+            matches!(item,
+            crate::dialect::ModelBodyItem::Method { method, .. }
+                if method.receiver == MethodReceiver::Instance && method.name.as_str() == setter
+                    && method.visibility != crate::dialect::MethodVisibility::Public)
+        });
+        if !private {
+            writes.push((field, send(self_ref(), &setter, vec![raw()])));
+        }
+    }
+    let mut body = send(
+        self_ref(),
+        "_unknown_mass_attribute",
+        vec![var_ref(name.clone())],
+    );
+    for (field, write) in writes.into_iter().rev() {
+        let cond = with_ty(
+            send(
+                var_ref(name.clone()),
+                "==",
+                vec![lit_str(field.as_str().to_string())],
+            ),
+            Ty::Bool,
+        );
+        body = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond,
+                then_branch: write,
+                else_branch: body,
+            },
+        );
+    }
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("_assign_mass_attribute"),
+        receiver: MethodReceiver::Instance,
+        params: vec![
+            Param::positional(name.clone()),
+            Param::positional(value.clone()),
+        ],
+        body: seq(vec![body, nil_lit()]),
+        signature: Some(fn_sig(vec![(name, Ty::Str), (value, Ty::Untyped)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
 }
 
 fn synth_update_hash(

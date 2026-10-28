@@ -949,6 +949,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActiveRecord::ValueTooLong", None),
         ("ActiveRecord::SoleRecordExceeded", None),
         // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
+        ("ActiveModel::UnknownAttributeError", Some(("attribute", Ty::Str))),
         ("ActiveRecord::RecordInvalid", Some(("record", Ty::Untyped))),
         ("ActiveRecord::RecordNotSaved", Some(("record", Ty::Untyped))),
         ("ActiveRecord::RecordNotDestroyed", Some(("record", Ty::Untyped))),
@@ -975,6 +976,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let methods: Vec<(&str, Ty)> = methods;
         register_stdlib_class(classes, exc, &[], &methods);
     }
+    let unknown_attribute = classes.entry(ClassId(Symbol::from("ActiveModel::UnknownAttributeError"))).or_default();
+    unknown_attribute.parent = Some(ClassId(Symbol::from("NoMethodError")));
+    unknown_attribute.instance_methods.insert(Symbol::from("record"), Ty::Untyped);
     register_stdlib_class(classes, "ActiveRecord::StaleObjectError", &[], &[("attempted_action", Ty::Untyped)]);
     classes.entry(ClassId(Symbol::from("ActiveRecord::StaleObjectError"))).or_default().parent =
         Some(ClassId(Symbol::from("ActiveRecord::ActiveRecordError")));

@@ -1245,7 +1245,12 @@ fn every_runtime_method_body_concretely_typed() {
     // since Base?/String? would reject valid Rails constructor arguments.
     // Its parent initializer call and enclosing sequence remain gradual
     // (+2 in active_record/errors.rb, 888 -> 890).
-    const CEILING: usize = 890;
+    // MEASURED 893 on 2026-10-28 with the same counter on main fa0b92c6
+    // and this runtime (890 -> 893): assign_attributes passes its Hash's
+    // arbitrary value to the writer (+1 in connection.rb), and
+    // UnknownAttributeError preserves the arbitrary record (+2 in
+    // errors.rb). Existing methods' counts are unchanged.
+    const CEILING: usize = 893;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
