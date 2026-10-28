@@ -18,6 +18,19 @@ use std::process::Command;
 
 const ORACLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
 
+/// Whether the Rails oracle's activesupport is there; a run without it
+/// says so and passes, as `docs/development/testing.md` asks.
+fn oracle_available() -> bool {
+    let probe = Command::new("ruby")
+        .args(["-e", &format!("require {ORACLE:?}\nexit(RailsOracle.available?(\"activesupport\") ? 0 : 1)")])
+        .status()
+        .expect("ruby");
+    if !probe.success() {
+        eprintln!("skipping: the Rails oracle's activesupport is not available");
+    }
+    probe.success()
+}
+
 /// App code, written once and run both natively and emitted.
 const SURFACE: &str = r####"module ReporterSurface
   class ErrorSink
@@ -145,6 +158,9 @@ with.context payload=nil tags={} context={tenant: "t1"}
 
 #[test]
 fn native_rails_answers() {
+    if !oracle_available() {
+        return;
+    }
     let output = Command::new("ruby")
         .args(["-e"])
         .arg(format!(

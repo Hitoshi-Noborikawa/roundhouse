@@ -125,6 +125,24 @@ puts RailsOracle.env.empty?"#,
 }
 
 #[test]
+fn a_checkout_at_an_installed_release_s_version_still_supplies_the_components() {
+    // A stable-branch checkout carries the last release's version, which
+    // RubyGems would otherwise resolve to the installed copy.
+    if !release_installed() {
+        return;
+    }
+    let root = checkout("same-version", "8.1.4", &[]);
+    let output = oracle_ruby(
+        Some(root.to_str().unwrap()),
+        r#"RailsOracle.activate("activesupport")
+require "active_support/oracle_probe"
+puts ORACLE_PROBE.start_with?(File.expand_path(RailsOracle.source))"#,
+    );
+    remove(&root);
+    assert_eq!(stdout_of(&output), "true");
+}
+
+#[test]
 fn every_rails_framework_comes_from_a_checkout() {
     let root = checkout("frameworks", "8.0.0.alpha", &["actionmailer", "actioncable", "activestorage", "actiontext", "actionmailbox"]);
     let output = oracle_ruby(

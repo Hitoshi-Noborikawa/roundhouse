@@ -91,6 +91,10 @@ module RailsOracle
       spec = Dir.chdir(dir) { Gem::Specification.load(path) } or abort "cannot load #{path}"
       spec.loaded_from = path
       spec.full_gem_path = dir
+      # RubyGems treats an installed release of the same version as this
+      # spec and keeps it, so a stable-branch checkout at 8.1.4 would lose
+      # to an installed 8.1.4. The checkout replaces it.
+      Gem::Specification.stubs_for(name).select { |installed| installed.version == spec.version }.each { |installed| Gem::Specification.remove_spec(installed) }
       Gem::Specification.add_spec(spec)
       versions[name] = spec.version.to_s
     end
