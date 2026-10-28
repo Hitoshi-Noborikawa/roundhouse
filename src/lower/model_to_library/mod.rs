@@ -1101,18 +1101,21 @@ fn column_type_word(t: &crate::schema::ColumnType) -> String {
 /// each dropped name is ledgered as a `lower_residue` warning.
 fn writable_permit_fields(
     model: &Model,
-    table: &crate::schema::Table,
+    table: Option<&crate::schema::Table>,
     fields: &[crate::ident::Symbol],
 ) -> Vec<crate::ident::Symbol> {
     use crate::diagnostic::{Diagnostic, DiagnosticKind};
     use crate::ident::Symbol;
 
-    let writable = writable_field_set(model, table);
+    let writable = writable_field_set_for_table(model, table);
 
     fields
         .iter()
         .filter(|field| {
-            if writable.contains(*field) || model_defines_public_writer(model, field) {
+            let public_writer = model_defines_public_writer(model, field);
+            let private_override =
+                table.is_none() && model_defines_writer(model, field) && !public_writer;
+            if (writable.contains(*field) && !private_override) || public_writer {
                 return true;
             }
             let private = model_defines_writer(model, field);
@@ -1164,12 +1167,19 @@ pub fn writable_field_set(
     model: &Model,
     table: &crate::schema::Table,
 ) -> std::collections::BTreeSet<crate::ident::Symbol> {
+    writable_field_set_for_table(model, Some(table))
+}
+
+fn writable_field_set_for_table(
+    model: &Model,
+    table: Option<&crate::schema::Table>,
+) -> std::collections::BTreeSet<crate::ident::Symbol> {
     use crate::dialect::{Association, ModelBodyItem};
     use crate::expr::{ExprNode, Literal};
     use crate::ident::Symbol;
 
     let mut writable: std::collections::BTreeSet<Symbol> = std::collections::BTreeSet::new();
-    for col in &table.columns {
+    for col in table.into_iter().flat_map(|table| &table.columns) {
         writable.insert(col.name.clone());
     }
     for (_span, assoc) in model.spanned_associations() {
@@ -1372,7 +1382,7 @@ fn build_methods_with_finder_inputs(
         // every permitted field (registration above uses the unfiltered
         // spec); only the assignment synthesis narrows.
         let writable_fields =
-            permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
+            permitted_fields.map(|fields| writable_permit_fields(model, Some(table), fields));
         let permitted_fields = writable_fields.as_deref();
         push_schema_methods(&mut methods, model, models, table, &through_joins, runtime_relation);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
@@ -1399,7 +1409,7 @@ fn build_methods_with_finder_inputs(
         // controller.
         if let (Some(fields), Some(spec)) = (permitted_fields, canonical) {
             self::schema::push_from_params_method(
-                &mut methods, model, fields, table, &spec.class_id,
+                &mut methods, model, fields, Some(table), &spec.class_id,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
         }
@@ -1414,15 +1424,15 @@ fn build_methods_with_finder_inputs(
         // nothing else competes for it.
         for spec in params_specs.for_resource(&resource) {
             if spec.is_canonical {
-                let writable = writable_permit_fields(model, table, &spec.fields);
+                let writable = writable_permit_fields(model, Some(table), &spec.fields);
                 self::schema::push_update_typed_variants(
                     &mut methods, model, &writable, table, spec,
                 );
                 continue;
             }
-            let writable = writable_permit_fields(model, table, &spec.fields);
+            let writable = writable_permit_fields(model, Some(table), &spec.fields);
             self::schema::push_from_params_method(
-                &mut methods, model, &writable, table, &spec.class_id,
+                &mut methods, model, &writable, Some(table), &spec.class_id,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
             self::schema::push_update_typed_variants(
@@ -1452,6 +1462,23 @@ fn build_methods_with_finder_inputs(
                     bang,
                 );
             }
+        }
+    } else if self::validations::includes_active_model_model(model)
+        && !model_defines_instance_method(model, &Symbol::from("initialize"))
+    {
+        let resource = Symbol::from(crate::naming::snake_case(model.name.0.as_str()));
+        for spec in params_specs.for_resource(&resource) {
+            let factory = crate::lower::controller_to_library::params::model_from_params_name(spec);
+            if model.methods().any(|method| {
+                method.receiver == MethodReceiver::Class && method.name == factory
+            }) {
+                continue;
+            }
+            let writable = writable_permit_fields(model, None, &spec.fields);
+            self::schema::push_from_params_method(
+                &mut methods, model, &writable, None, &spec.class_id,
+                factory,
+            );
         }
     }
 
