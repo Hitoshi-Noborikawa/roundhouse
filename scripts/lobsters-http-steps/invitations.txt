@@ -1,0 +1,6 @@
+# invite someone, then look at the invitation and sign-up pages
+GET /invitations
+POST /invitations email=newcomer@example.com&memo=From+the+replay
+GET /invitations
+GET /signup
+GET /invitations/not-a-code

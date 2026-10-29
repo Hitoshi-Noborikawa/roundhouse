@@ -30,7 +30,9 @@
 #                     page fetched (its form field or csrf-token meta),
 #                     that page as Referer, and the session cookie. A
 #                     path visited again dumps as NAME~2, NAME~3, ….
-#                     scripts/lobsters-http-steps/ has examples. {story}, {story_path},
+#                     scripts/lobsters-http-steps/ has examples. A line
+#                     `#! login EMAIL` or `#! no-login` in the file sets
+#                     who the replay runs as. {story}, {story_path},
 #                     {comment} and {username} expand to ids scraped
 #                     after login; a step whose id was not scraped (no
 #                     {username} under --no-login) is skipped.
@@ -77,6 +79,15 @@ until args.empty?
   end
 end
 abort "usage: lobsters-http-replay --base URL --dump DIR [options]" unless opts[:base] && opts[:dump]
+# A step file says who it runs as (`#! login EMAIL`, `#! no-login`), over the command line: a moderator's flow and a logged-out one sit beside a user's.
+if opts[:steps]
+  File.foreach(opts[:steps]) do |line|
+    case line
+    when /\A#!\s*no-login\s*\z/ then opts[:login] = false
+    when /\A#!\s*login\s+(\S+)\s*\z/ then opts[:login] = true; opts[:email] = $1
+    end
+  end
+end
 if opts[:login] && !(opts[:email] && opts[:password])
   abort "lobsters-http-replay: --email and --password (or LOBSTERS_EMAIL / LOBSTERS_PASSWORD), or --no-login"
 end

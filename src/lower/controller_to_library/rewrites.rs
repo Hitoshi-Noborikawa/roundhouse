@@ -2559,10 +2559,36 @@ pub(super) fn rewrite_redirect_to(
                         },
                     )
                 }
-                _ => return None,
+                _ => first.clone(),
             };
             let mut new_args = vec![new_first];
-            new_args.extend(args.iter().skip(1).cloned());
+            let mut dropped = false;
+            for a in args.iter().skip(1) {
+                if let ExprNode::Hash { entries, kwargs: true } = &*a.node {
+                    // Not passed on: a key that is no flash type the app registered (lobsters' `success:` with no `add_flash_types`) is one Rails' redirect_to ignores, and the runtime's takes no such keyword.
+                    let kept: Vec<_> = entries
+                        .iter()
+                        .filter(|(k, _)| match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => {
+                                matches!(value.as_str(), "notice" | "alert" | "status" | "flash" | "allow_other_host")
+                            }
+                            _ => true,
+                        })
+                        .cloned()
+                        .collect();
+                    if kept.len() != entries.len() {
+                        dropped = true;
+                        if !kept.is_empty() {
+                            new_args.push(Expr::new(a.span, ExprNode::Hash { entries: kept, kwargs: true }));
+                        }
+                        continue;
+                    }
+                }
+                new_args.push(a.clone());
+            }
+            if !dropped && new_args[0] == args[0] {
+                return None;
+            }
             Some(Expr::new(
                 e.span,
                 ExprNode::Send {
