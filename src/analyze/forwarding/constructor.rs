@@ -660,13 +660,14 @@ pub(super) fn scan_constructor_mutations(
             // A send on the callback receiver mutates its lookup only when
             // the method is one that can (`mutates_lookup`) or one the app
             // defines, whose body may (`base.install_factory` after
-            // `base.extend(Factory)`): reading it (`base.methods`,
+            // `base.extend(Factory)`, or `base.send(:install_factory)`;
+            // see `sends_app_method`): reading it (`base.methods`,
             // `base.respond_to?`) or calling a framework macro on it
             // (`base.before_action`) does not, the same rule as for a named
             // receiver. A send that passes the receiver on as an argument
             // keeps today's handling.
             let mutates_callback_receiver = callback_receiver.is_some_and(|callback_receiver| {
-                ((mutates_lookup || context.app_methods.contains(method))
+                ((mutates_lookup || sends_app_method(method, args, context.app_methods))
                     && recv
                         .as_ref()
                         .is_some_and(|recv| receiver_uses_callback(recv, callback_receiver)))
@@ -857,6 +858,19 @@ fn literal_method_name(expr: &Expr) -> Option<&str> {
         } => Some(value.as_str()),
         _ => None,
     }
+}
+
+/// Whether `method(args)` runs a method the app defines: by name, or
+/// through `send` / `public_send` / `__send__` with a literal name. A
+/// dynamic send with any other name may run one, so it counts.
+fn sends_app_method(method: &Symbol, args: &[Expr], app_methods: &HashSet<Symbol>) -> bool {
+    if matches!(method.as_str(), "send" | "public_send" | "__send__") {
+        return match args.first().map(literal_method_name) {
+            Some(Some(name)) => app_methods.contains(&Symbol::from(name)),
+            _ => true,
+        };
+    }
+    app_methods.contains(method)
 }
 
 fn mutates_constructor_lookup_method(

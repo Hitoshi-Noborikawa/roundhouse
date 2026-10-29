@@ -1757,8 +1757,9 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
 }
 
 /// The names `body` calls on the controller itself: receiverless sends
-/// and sends on `self`, and the bound methods it takes the same way
-/// (`method(:name)`, `&method(:name)`).
+/// and sends on `self`, the dynamic sends of a literal name
+/// (`send(:name)`, `public_send`, `__send__`), and the bound methods it
+/// takes the same way (`method(:name)`, `&method(:name)`).
 fn collect_self_send_names(body: &Expr, out: &mut crate::det::HashSet<Symbol>) {
     let on_self = |recv: &Option<Expr>| {
         recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
@@ -1766,12 +1767,19 @@ fn collect_self_send_names(body: &Expr, out: &mut crate::det::HashSet<Symbol>) {
     match &*body.node {
         ExprNode::Send { recv, method, args, .. } if on_self(recv) => {
             out.insert(method.clone());
-            if method.as_str() == "method" {
-                if let [arg] = args.as_slice() {
-                    if let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*arg.node {
-                        out.insert(value.clone());
-                    }
+            let named = match (method.as_str(), args.as_slice()) {
+                ("method", [arg]) => Some(arg),
+                ("send" | "public_send" | "__send__", [arg, ..]) => Some(arg),
+                _ => None,
+            };
+            match named.map(|arg| &*arg.node) {
+                Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => {
+                    out.insert(value.clone());
                 }
+                Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => {
+                    out.insert(Symbol::from(value.as_str()));
+                }
+                _ => {}
             }
         }
         ExprNode::MethodRef { recv, name } if on_self(recv) => {

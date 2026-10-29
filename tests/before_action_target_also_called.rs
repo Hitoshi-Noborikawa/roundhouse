@@ -150,3 +150,28 @@ fn a_filter_target_the_action_passes_as_a_block_stays_defined() {
 end
 "#);
 }
+
+/// The action calls the target through `send` / `__send__` with a literal
+/// name.
+#[test]
+fn a_filter_target_the_action_sends_by_name_stays_defined() {
+    for call in ["send(:prepare)", "__send__(\"prepare\")"] {
+        run(&format!(
+            r#"class GadgetsController < ApplicationController
+  before_action :prepare, only: :create
+
+  def create
+    @gadget = Gadget.create!(name: {call})
+    render json: {{ name: @gadget.name }}
+  end
+
+  private
+
+  def prepare
+    @label = params[:gadget][:name]
+  end
+end
+"#
+        ));
+    }
+}

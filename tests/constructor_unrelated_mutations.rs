@@ -278,6 +278,10 @@ fn included_callback_calling_an_extended_constructor_installer_still_refuses() {
     for (hook, class_extends) in [
         ("base.extend(Factory)\n    base.install_factory", ""),
         ("base.install_factory", "  extend Factory\n"),
+        ("base.extend(Factory)\n    base.send(:install_factory)", ""),
+        ("base.extend(Factory)\n    base.public_send(\"install_factory\")", ""),
+        ("base.extend(Factory)\n    base.__send__(:install_factory)", ""),
+        ("base.extend(Factory)\n    base.send(installer)", ""),
     ] {
         let source = format!(
             r#"
@@ -288,6 +292,8 @@ module Factory
 end
 
 module Hooked
+  def self.installer = :install_factory
+
   def self.included(base)
     {hook}
   end
