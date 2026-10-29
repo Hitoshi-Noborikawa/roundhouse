@@ -871,10 +871,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
     }
-    // `rescue Psych::Exception` around `YAML.safe_load_file`: the errors a
-    // load raises, with Psych's own ancestry (psych/exception.rb,
-    // psych/syntax_error.rb), so a rescue of the base catches them all.
+    // Date's parsing error and `rescue Psych::Exception` around
+    // `YAML.safe_load_file`, with the libraries' own ancestry so a rescue
+    // of the base catches their subclasses.
     for (exc, parent) in [
+        ("Date::Error", "ArgumentError"),
         ("Psych::Exception", "RuntimeError"),
         ("Psych::SyntaxError", "Psych::Exception"),
         ("Psych::DisallowedClass", "Psych::Exception"),
