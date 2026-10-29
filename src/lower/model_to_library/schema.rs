@@ -4612,8 +4612,14 @@ fn synth_mass_attribute_writer(model: &Model, table: &Table) -> MethodDef {
             (setter, raw())
         } else if slot.is_temporal() {
             (
-                col_storage_setter(col).as_str().to_string(),
-                slot.format_cast(raw()).expect("temporal column"),
+                setter,
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Cast {
+                        value: raw(),
+                        target_ty: slot.temporal_writer_types().expect("temporal column").0,
+                    },
+                ),
             )
         } else if enum_setter_value(model, col, raw()).is_some() {
             (setter, raw())

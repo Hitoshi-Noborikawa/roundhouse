@@ -22,6 +22,37 @@ fn hash_assignment_uses_writers_in_order_without_saving() {
     app(MODEL).run_ruby(CONTRACT).assert_passes();
 }
 
+fn association_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/models/author.rb", "class Author < ApplicationRecord\nend\n")
+        .write("app/models/post.rb", "class Post < ApplicationRecord\n  belongs_to :author, optional: true\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :authors do |t|\n    t.string :name\n  end\n  create_table :posts do |t|\n    t.integer :author_id\n  end\nend\n")
+}
+
+const ASSOCIATION_CONTRACT: &str = r#"author = Author.create!(name: "a")
+post = Post.new
+post.assign_attributes(author: author)
+raise "association writer" unless post.author_id == author.id
+post.assign_attributes(author: nil)
+raise "association nil" unless post.author_id.nil?
+puts "association assignment passed"
+"#;
+
+#[test]
+fn hash_assignment_calls_belongs_to_writers() {
+    association_app().run_ruby(ASSOCIATION_CONTRACT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn belongs_to_assignment_runs_with_native_rbs() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{ASSOCIATION_CONTRACT}"
+    );
+    association_app().run_spinel_with_rbs(&script).assert_passes();
+}
+
 #[test]
 fn a_source_assignment_method_keeps_its_implementation() {
     let model = MODEL.replace("class AttributeRecord < ApplicationRecord", "class AttributeRecord < ApplicationRecord\n  def assign_attributes(attributes)\n    self.state = \"owned\"\n    :owned\n  end");

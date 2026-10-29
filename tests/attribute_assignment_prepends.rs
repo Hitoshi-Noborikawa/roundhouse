@@ -2,6 +2,7 @@
 mod emit_and_run;
 
 const CONTRACT: &str = include_str!("support/attribute_assignment_prepends/contract.rb");
+const TEMPORAL_CONTRACT: &str = include_str!("support/attribute_assignment_prepends/temporal_contract.rb");
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
@@ -33,6 +34,20 @@ fn app() -> emit_and_run::Overlay {
             "config/initializers/assignment_hooks.rb",
             "AttributeRecord.prepend AssignmentHooks\nPrivateRecord.prepend PrivateAssignmentHooks\n",
         )
+}
+
+#[test]
+fn initializer_temporal_prepend_receives_logical_values() {
+    app().run_ruby(TEMPORAL_CONTRACT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn initializer_temporal_prepend_runs_with_native_rbs() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{TEMPORAL_CONTRACT}"
+    );
+    app().run_spinel_with_rbs(&script).assert_passes();
 }
 
 #[test]
