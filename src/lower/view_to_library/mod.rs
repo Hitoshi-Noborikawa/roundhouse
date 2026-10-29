@@ -3427,6 +3427,7 @@ fn render_partial_key(rp: &crate::lower::view::RenderPartial<'_>, dir: &str) -> 
         RenderPartial::Named { partial, .. } | RenderPartial::CollectionNamed { partial, .. } => {
             partial_name_to_key(partial, dir)
         }
+        RenderPartial::TypedCollection { partial, .. } => partial_name_to_key(partial, dir),
         // A full-template render is a render-graph edge like any other:
         // the caller's closure must cover the action view's.
         RenderPartial::Template { name } => partial_name_to_key(name, dir),

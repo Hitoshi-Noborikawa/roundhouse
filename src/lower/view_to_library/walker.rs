@@ -20,7 +20,7 @@ use super::form_with::{
     rewrite_errors_each_body,
 };
 use super::helpers::{emit_inline_helper_block, emit_view_helper_call};
-use super::partial::{emit_render_partial, emit_yield};
+use super::partial::{emit_flagged_collection_render, emit_render_partial, emit_yield};
 use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
@@ -838,6 +838,51 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     }
                 }
             }
+        }
+    }
+
+    // `<%= render(@posts) || "No posts" %>` — Rails answers nil for a
+    // collection with no records (`CollectionRenderer`'s
+    // `EmptyCollection`), so the fallback shows exactly when the
+    // collection is empty. A collection render lowers to an `each` that
+    // appends as it goes and has no value, so nothing below could read
+    // the `||`, and the bare `render` reached the emit. Render the
+    // collection with a flag set per record, then append the fallback
+    // when none rendered: the collection is evaluated once, as Rails
+    // does, where asking it `empty?` afterwards ran a relation's query
+    // again. The flag is distinct per site and always a Boolean.
+    if let ExprNode::BoolOp { op: BoolOpKind::Or, left, right, .. } = &*inner.node
+        && let ExprNode::Send { recv, method, args: sa, block, .. } = &*left.node
+    {
+        let is_local = |n: &str| ctx.is_local(n);
+        let is_options_ivar = |n: &str| ctx.is_options_ivar(n);
+        let flag = Symbol::from(format!("__rendered_{}", inner.span.start));
+        if let Some(rp) = classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            sa,
+            block.as_ref(),
+            &is_local,
+            &is_options_ivar,
+        ) && let Some(render) = emit_flagged_collection_render(&rp, &flag, &ctx.for_render(sa))
+        {
+            let unset = Expr::new(
+                inner.span,
+                ExprNode::Assign {
+                    target: LValue::Var { id: VarId(0), name: flag.clone() },
+                    value: Expr::new(inner.span, ExprNode::Lit { value: Literal::Bool { value: false } }),
+                },
+            );
+            let fallback = send(Some(right.clone()), "to_s", Vec::new(), None, false);
+            let guarded = Expr::new(
+                inner.span,
+                ExprNode::If {
+                    cond: send(None, "!", vec![var_ref(flag.clone())], None, false),
+                    then_branch: seq(emit_io_append(&fallback, ctx)),
+                    else_branch: nil_lit(),
+                },
+            );
+            return vec![unset, render, guarded];
         }
     }
 

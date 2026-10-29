@@ -118,6 +118,7 @@ SPINEL_TESTS = [
     "typed_writer_cast_spinel",
     "pundit_source_spinel",
     "row_from_raw_hash_spinel",
+    "render_relation_chain",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.
