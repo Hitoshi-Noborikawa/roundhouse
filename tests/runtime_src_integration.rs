@@ -1250,7 +1250,9 @@ fn every_runtime_method_body_concretely_typed() {
     // `value.pluck(:term)` over a parslet node), so the list, its elements and
     // the Relation and model-class tests read it untyped (+13 in
     // active_support_ext.rb, 890 -> 903).
-    const CEILING: usize = 903;
+    // MEASURED 904 on 2026-10-29 (on 903): merge_seedable_scope reads a
+    // record value's id, and a where value is untyped (relation.rb).
+    const CEILING: usize = 904;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
