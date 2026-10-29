@@ -1425,10 +1425,15 @@ fn build_methods_with_finder_inputs(
         // still keeps the plain name for the canonical list, since
         // nothing else competes for it.
         for spec in params_specs.for_resource(&resource) {
+            let assocs = self::schema::permitted_assocs(model, &through_joins, spec);
+            let scalar: Vec<_> = spec.fields.iter()
+                .filter(|f| !assocs.iter().any(|a| &a.name == *f))
+                .cloned()
+                .collect();
             if spec.is_canonical {
-                let writable = writable_permit_fields(model, Some(table), &spec.fields);
+                let writable = writable_permit_fields(model, Some(table), &scalar);
                 self::schema::push_update_typed_variants(
-                    &mut methods, model, &writable, table, spec,
+                    &mut methods, model, &writable, &assocs, table, spec,
                 );
                 continue;
             }
@@ -1437,8 +1442,9 @@ fn build_methods_with_finder_inputs(
                 &mut methods, model, &writable, Some(table), &spec.class_id,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
+            let writable = writable_permit_fields(model, Some(table), &scalar);
             self::schema::push_update_typed_variants(
-                &mut methods, model, &writable, table, spec,
+                &mut methods, model, &writable, &assocs, table, spec,
             );
         }
         // `create_from_params(p)` / `create_from_params!(p)` — the typed

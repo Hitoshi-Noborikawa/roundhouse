@@ -141,6 +141,8 @@ pub struct ParamsSpec {
     /// The candidates carried as fields (ruby family): each a
     /// `Roundhouse::ParamValue` member read with `Params.nested`.
     pub nested_fields: BTreeMap<Symbol, NestedKey>,
+    pub written: BTreeMap<Symbol, Vec<Ty>>,
+    pub wants_assign: bool,
 }
 
 impl ParamsSpec {
@@ -372,6 +374,28 @@ impl ParamsSpec {
 /// field, the uploaded file a multipart part became (nil when the
 /// request carried none).
 pub(crate) fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
+    let base = request_field_ty(spec, field);
+    let written = match spec.written.get(field) {
+        Some(written) if spec.ruby_values => written,
+        _ => return base,
+    };
+    let mut variants: Vec<Ty> = match base {
+        Ty::Union { variants } => variants.iter().cloned().collect(),
+        other => vec![other],
+    };
+    for ty in written {
+        if !variants.contains(ty) {
+            variants.push(ty.clone());
+        }
+    }
+    if variants.len() == 1 {
+        variants.pop().unwrap()
+    } else {
+        Ty::Union { variants: variants.into() }
+    }
+}
+
+fn request_field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     if let Some(nested) = spec.nested_fields.get(field) {
         if nested.mode == "scalars" {
             Ty::Array { elem: Ty::Str.into() }
@@ -572,19 +596,99 @@ pub(crate) fn lower_value_reads(app: &mut crate::app::App) {
     }
 }
 
-// Not left to raise at run time: the synthesized record has a reader per permitted key and no `[]=`, and a key's value may change type (lobsters assigns a Tag relation over its `tags: []` Strings).
-fn report_params_write(span: Span, controller: &ClassId, class: &ClassId) {
-    crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
-        span,
-        None,
-        "params write",
-        format!("`[]=` on the permitted params of `{}` (a synthesized {}) has no runtime; Rails' Parameters accepts it", controller.0, class.0),
-    ));
+fn params_write(expr: &Expr) -> Option<(&Expr, &Expr, &Expr)> {
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Index { recv, index }, value } => Some((recv, index, value)),
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if method.as_str() == "[]=" && args.len() == 2 => Some((recv, &args[0], &args[1])),
+        _ => None,
+    }
+}
+
+fn literal_key(key: &Expr) -> Option<Symbol> {
+    match &*key.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+        _ => None,
+    }
+}
+
+// An unknown type is not widened into the field: its RBS would no longer say what the record holds.
+fn written_ty(value: &Expr) -> Option<Ty> {
+    value.ty.clone().filter(|ty| !ty.mentions_unknown())
+}
+
+fn report_params_write(span: Span, controller: &ClassId, class: &ClassId, why: &str, strict: bool) {
+    let detail = format!("`[]=` on the permitted params of `{}` (a synthesized {}) {why}; Rails' Parameters accepts it", controller.0, class.0);
+    let mut d = crate::diagnostic::Diagnostic::unsupported(span, None, "params write", detail.clone());
+    if strict {
+        d.message = format!("params write not supported (strict-typed targets): {detail}");
+    }
+    crate::emit::diagnostics::push(d);
+}
+
+pub(super) fn rewrite_params_writes(
+    body: &Expr,
+    helpers: &[crate::dialect::Action],
+    specs: &ParamsSpecs,
+    controller: &ClassId,
+) -> Expr {
+    let helpers = helper_spec_map(helpers, specs).into_iter()
+        .map(|(name, spec)| (name, spec.class_id.clone())).collect();
+    let sources = super::params_sources::ParamsSources::new(body, helpers, specs);
+    rewrite_params_writes_with(body, &sources, specs, controller)
+}
+
+fn rewrite_params_writes_with(
+    body: &Expr,
+    sources: &super::params_sources::ParamsSources,
+    specs: &ParamsSpecs,
+    controller: &ClassId,
+) -> Expr {
+    map_expr(body, &|expr| {
+        let (recv, key, value) = params_write(expr)?;
+        let class = sources.class(recv, specs)?;
+        let spec = specs.by_class(&class)?;
+        let field = literal_key(key).filter(|k| spec.fields.contains(k));
+        let why = if !spec.ruby_values {
+            Some("is not lowered on this target, whose record fields keep the type the request delivers (the Ruby, JRuby and Spinel trees assign it)")
+        } else if field.is_none() {
+            Some("names no permitted key, and the record has a slot only per permitted key")
+        } else if written_ty(value).is_none() {
+            Some("stores a value whose type is not known, and the record's field must carry it")
+        } else if !matches!(&*recv.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+            Some("writes through a receiver that is not a local or an instance variable")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            report_params_write(expr.span, controller, &class, why, !spec.ruby_values);
+            return None;
+        }
+        let field = field?;
+        let value = rewrite_params_writes_with(value, sources, specs, controller);
+        let setter = |name: String, arg: Expr| Expr::new(expr.span, ExprNode::Send {
+            recv: Some(recv.clone()),
+            method: Symbol::from(name),
+            args: vec![arg],
+            block: None,
+            parenthesized: false,
+        });
+        let provided = with_ty(
+            Expr::new(expr.span, ExprNode::Lit { value: Literal::Bool { value: true } }),
+            Ty::Bool,
+        );
+        Some(Expr::new(expr.span, ExprNode::Seq { exprs: vec![
+            setter(format!("{}=", provided_field(&field).as_str()), provided),
+            setter(format!("{}=", field.as_str()), value),
+        ] }))
+    })
 }
 
 fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut calls = Vec::new();
     let mut blocked = Vec::new();
+    let mut written: Vec<(ClassId, Symbol, Ty)> = Vec::new();
     for controller in controllers {
         let actions: Vec<_> = controller.actions().cloned().collect();
         let helpers: BTreeMap<Symbol, ClassId> = helper_spec_map(&actions, specs).into_iter()
@@ -594,15 +698,18 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 &action.body, helpers.clone(), specs,
             );
             walk_all(&action.body, &mut |expr| {
+                if let Some((recv, key, value)) = params_write(expr) {
+                    let class = sources.class(recv, specs);
+                    if let (Some(class), Some(key), Some(ty)) = (class, literal_key(key), written_ty(value)) {
+                        written.push((class, key, ty));
+                    }
+                }
                 if let ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } = &*expr.node {
                     let recv = match target {
                         LValue::Attr { recv, .. } | LValue::Index { recv, .. } => Some(recv),
                         _ => None,
                     };
                     if let Some(class) = recv.and_then(|recv| sources.class(recv, specs)) {
-                        if let LValue::Index { .. } = target {
-                            report_params_write(expr.span, &controller.name, &class);
-                        }
                         blocked.push(class);
                     }
                 }
@@ -630,7 +737,6 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                         && !matches!(method.as_str(), "==" | "===" | "!=" | "<=" | ">="))
                 {
                     if method.as_str() == "delete" { calls.push((class.clone(), method.clone())); }
-                    if method.as_str() == "[]=" { report_params_write(expr.span, &controller.name, &class); }
                     blocked.push(class);
                 }
             });
@@ -644,6 +750,14 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     for class in blocked {
         if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
             spec.lookup_blocked = true;
+        }
+    }
+    for (class, key, ty) in written {
+        if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
+            let tys = spec.written.entry(key).or_default();
+            if !tys.contains(&ty) {
+                tys.push(ty);
+            }
         }
     }
 }
@@ -661,6 +775,7 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut to_attrs: Vec<ClassId> = Vec::new();
     let mut as_json: Vec<ClassId> = Vec::new();
     let mut except: Vec<ClassId> = Vec::new();
+    let mut assign: Vec<ClassId> = Vec::new();
     // Read-only for the whole walk; the demand lists are applied
     // after it, which is what keeps this a shared borrow.
     let specs_ro: &ParamsSpecs = specs;
@@ -678,12 +793,24 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 &action.body, helper_classes.clone(), specs_ro,
             );
             walk_all(&action.body, &mut |e| {
+                if let ExprNode::Assign { .. } = &*e.node {
+                    if let Some((_, value)) = attributes_assignment(e) {
+                        if let Some(class) = assigned_params_class(value, &|v| sources.class(v, specs_ro)) {
+                            assign.push(class);
+                        }
+                    }
+                }
                 let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
                     return;
                 };
                 if method.as_str() == "except" {
                     if let Some(class) = sources.class(recv, specs_ro) {
                         except.push(class);
+                    }
+                }
+                if let Some((_, value)) = attributes_assignment(e) {
+                    if let Some(class) = assigned_params_class(value, &|v| sources.class(v, specs_ro)) {
+                        assign.push(class);
                     }
                 }
                 // `<params-source>.to_attrs` — the attribute-hash
@@ -752,6 +879,37 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
             spec.wants_except = true;
         }
     }
+    for class_id in assign {
+        if let Some(spec) = specs.specs.iter_mut().find(|s| s.class_id == class_id) {
+            spec.wants_assign = true;
+        }
+    }
+}
+
+pub(super) fn attributes_assignment(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Attr { recv, name }, value } if name.as_str() == "attributes" => {
+            Some((recv, value))
+        }
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if matches!(method.as_str(), "attributes=" | "assign_attributes") && args.len() == 1 =>
+        {
+            Some((recv, &args[0]))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn assigned_params_class(
+    value: &Expr,
+    class_of: &dyn Fn(&Expr) -> Option<ClassId>,
+) -> Option<ClassId> {
+    if let ExprNode::If { then_branch, else_branch, .. } = &*value.node {
+        let yes = assigned_params_class(then_branch, class_of)?;
+        let no = assigned_params_class(else_branch, class_of)?;
+        return (yes == no).then_some(yes);
+    }
+    class_of(value)
 }
 
 fn walk_all<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
@@ -786,6 +944,8 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 nested_signature: Vec::new(),
                 nested_candidates: Vec::new(),
                 nested_fields: BTreeMap::new(),
+                written: BTreeMap::new(),
+                wants_assign: false,
             })
             .collect(),
         model_resources: None,
@@ -844,6 +1004,8 @@ fn record(
                 nested_signature: signature_of(&candidates),
                 nested_candidates: candidates,
                 nested_fields: BTreeMap::new(),
+                written: BTreeMap::new(),
+                wants_assign: false,
             });
         }
     }
@@ -1039,6 +1201,10 @@ pub fn model_update_name(spec: &ParamsSpec, bang: bool) -> Symbol {
         "update_from_{}{bang}",
         crate::naming::snake_case(spec.class_id.0.as_str())
     ))
+}
+
+pub fn model_assign_name(spec: &ParamsSpec) -> Symbol {
+    Symbol::from(format!("assign_from_{}", crate::naming::snake_case(spec.class_id.0.as_str())))
 }
 
 /// First permit list in `expr`, in the same pre-order the collector

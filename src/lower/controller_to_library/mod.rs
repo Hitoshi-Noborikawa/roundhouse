@@ -3266,6 +3266,9 @@ fn lower_action_body(
     // call; downstream call sites see a typed value, not a Hash.
     let with_typed_params =
         self::params::rewrite_to_from_raw(&with_params, params_specs, format_breadth.raises_param_missing);
+    let with_typed_params = self::params::rewrite_params_writes(
+        &with_typed_params, params_privs, params_specs, &controller.name,
+    );
     let with_redirects = rewrite_redirect_to(&with_typed_params, route_id_segments);
     // Rewrite `<Model>.new(<resource>_params)` → `<Model>.from_params(<resource>_params)`
     // BEFORE the assoc-through-parent rewrite, so the build path picks
@@ -3277,6 +3280,8 @@ fn lower_action_body(
     // contract and no longer takes a params object.
     let with_from_params =
         rewrite_update_to_typed_variant(&with_from_params, params_privs, params_specs);
+    let with_from_params =
+        rewrites::rewrite_assign_to_typed_variant(&with_from_params, params_privs, params_specs);
     let with_assoc =
         rewrite_assoc_through_parent_typed(&with_from_params, params_privs, params_specs, assocs);
     // The legacy chain rewrites (`rewrite_drop_includes` +

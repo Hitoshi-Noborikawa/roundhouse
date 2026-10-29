@@ -2124,6 +2124,36 @@ pub(super) fn rewrite_update_to_typed_variant(
     })
 }
 
+pub(super) fn rewrite_assign_to_typed_variant(
+    expr: &Expr,
+    privs: &[Action],
+    params_specs: &ParamsSpecs,
+) -> Expr {
+    let helpers: BTreeMap<Symbol, crate::ident::ClassId> = super::params::helper_spec_map(privs, params_specs)
+        .into_iter()
+        .map(|(name, spec)| (name, spec.class_id.clone()))
+        .collect();
+    let sources = super::params_sources::ParamsSources::new(expr, helpers, params_specs);
+    map_expr(expr, &|e| {
+        let (recv, value) = super::params::attributes_assignment(e)?;
+        let class = super::params::assigned_params_class(value, &|v| sources.class(v, params_specs))?;
+        let spec = params_specs.by_class(&class)?;
+        if !spec.wants_assign || !super::typed_update::has_typed_update(params_specs, spec) {
+            return None;
+        }
+        Some(Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: Some(recv.clone()),
+                method: super::params::model_assign_name(spec),
+                args: vec![value.clone()],
+                block: None,
+                parenthesized: true,
+            },
+        ))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // `destroy!` → `destroy`. Spinel's runtime model exposes one destroy
 // method (raise-on-failure semantics); the bang form has no separate
