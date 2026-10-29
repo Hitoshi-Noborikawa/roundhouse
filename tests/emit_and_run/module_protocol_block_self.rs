@@ -109,7 +109,7 @@ fn class_mutation_is_refused_on_other_targets() {
         for method in ["new", "singleton_class"] {
             let count = errors.iter().filter(|e| e.contains("runtime class object")
                 && e.contains(&format!("`{method}` requires"))).count();
-            let expected = if method == "new" { 5 } else { 4 };
+            let expected = 5;
             assert!(count >= expected, "{target:?} {method}: {errors:#?}");
         }
     }

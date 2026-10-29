@@ -761,7 +761,8 @@ impl<'a> BodyTyper<'a> {
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) {
             expr.decisions |= crate::expr::CLASS_OBJECT_VALUE;
-            let runtime_class = matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "singleton_class")
+            let runtime_class = matches!(&*expr.node, ExprNode::Send { recv, method, .. } if method.as_str() == "singleton_class"
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)))
                 || (matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "new")
                     && !self.class_factories.is_some_and(|factories| factories.contains_key(&expr.span)));
             if runtime_class {
