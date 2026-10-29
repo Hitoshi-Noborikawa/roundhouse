@@ -63,6 +63,54 @@ fn other_receivers_and_uncertain_duration_locals_keep_their_arguments() {
     at + delay
   end
 
+  def self.captured
+    at = Time.utc(2026, 1, 2)
+    delay = 2.seconds
+    cb = -> { delay = 0.5 }
+    delay = 2.seconds
+    cb.call
+    at + delay
+  end
+
+  def self.indirect_capture
+    at = Time.utc(2026, 1, 2)
+    delay = 2.seconds
+    cb = -> { delay = 0.5 }
+    delay = 2.seconds
+    invoke(cb)
+    at - delay
+  end
+
+  def self.compound_capture
+    at = Time.utc(2026, 1, 2)
+    delay = 2.seconds
+    cb = -> { delay -= 1.5 }
+    delay = 2.seconds
+    cb.call
+    at + delay
+  end
+
+  def self.multiple_capture
+    at = Time.utc(2026, 1, 2)
+    delay = 2.seconds
+    cb = -> { delay, other = [0.5, 1] }
+    delay = 2.seconds
+    cb.call
+    at + delay
+  end
+
+  def self.invoke(callback)
+    callback.call
+  end
+
+  def self.block_capture
+    at = Time.utc(2026, 1, 2)
+    delay = 2.seconds
+    [0.5].each { |value| delay = value }
+    delay = 2.seconds
+    at + delay
+  end
+
   def self.shadowed
     at = Time.utc(2026, 1, 2)
     delay = 2.seconds
@@ -82,6 +130,17 @@ end
     assert!(errors.is_empty(), "{errors:#?}");
     let ruby = std::fs::read_to_string(emitted.join("app/models/duration_controls.rb")).unwrap();
     assert!(!ruby.contains("delay.to_i"), "{ruby}");
+    emit_and_run::empty_app()
+        .write("app/models/duration_controls.rb", controls)
+        .run_ruby(r#"
+at = Time.utc(2026, 1, 2)
+raise "captured fraction" unless DurationControls.captured == at + 0.5
+raise "indirect fraction" unless DurationControls.indirect_capture == at - 0.5
+raise "compound fraction" unless DurationControls.compound_capture == at + 0.5
+raise "multiple fraction" unless DurationControls.multiple_capture == at + 0.5
+raise "block reassignment" unless DurationControls.block_capture == at + 2
+"#)
+        .assert_passes();
 }
 
 #[test]

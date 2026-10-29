@@ -160,7 +160,9 @@ fn type_duration_constants(expr: &mut Expr, owner: Option<&ClassId>, constants: 
 /// `Time - Time` shape.
 pub(crate) fn apply_duration_rewrites(body: &mut Expr, temporal_predicates: bool) {
     rewrite_durations(body);
-    rewrite_local_time_durations(body, &mut BTreeSet::new());
+    let mut captured_assignments = BTreeSet::new();
+    collect_closure_assignments(body, false, &mut captured_assignments);
+    rewrite_local_time_durations(body, &mut BTreeSet::new(), &captured_assignments);
     if temporal_predicates {
         rewrite_temporal_predicates(body);
     }
@@ -182,11 +184,36 @@ fn integral_clock_duration(expr: &Expr, locals: &BTreeSet<Symbol>) -> bool {
                 && matches!(args.as_slice(), [value] if matches!(value.ty, Some(Ty::Int))))
 }
 
-fn rewrite_local_time_durations(expr: &mut Expr, locals: &mut BTreeSet<Symbol>) {
+fn collect_closure_assignments(expr: &Expr, in_closure: bool, assigned: &mut BTreeSet<Symbol>) {
+    let in_closure = in_closure || matches!(&*expr.node, ExprNode::Lambda { .. });
+    if in_closure {
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => {
+                assigned.insert(name.clone());
+            }
+            ExprNode::MultiAssign { targets, .. } => {
+                for target in targets {
+                    if let LValue::Var { name, .. } = target {
+                        assigned.insert(name.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    expr.node.for_each_child(&mut |child| collect_closure_assignments(child, in_closure, assigned));
+}
+
+fn rewrite_local_time_durations(
+    expr: &mut Expr,
+    locals: &mut BTreeSet<Symbol>,
+    captured_assignments: &BTreeSet<Symbol>,
+) {
     match &mut *expr.node {
         ExprNode::Seq { exprs } => {
             for child in exprs {
-                rewrite_local_time_durations(child, locals);
+                rewrite_local_time_durations(child, locals, captured_assignments);
             }
             return;
         }
@@ -194,8 +221,8 @@ fn rewrite_local_time_durations(expr: &mut Expr, locals: &mut BTreeSet<Symbol>) 
             target: LValue::Var { name, .. },
             value,
         } => {
-            rewrite_local_time_durations(value, locals);
-            if integral_clock_duration(value, locals) {
+            rewrite_local_time_durations(value, locals, captured_assignments);
+            if !captured_assignments.contains(name) && integral_clock_duration(value, locals) {
                 locals.insert(name.clone());
             } else {
                 locals.remove(name);
@@ -210,11 +237,11 @@ fn rewrite_local_time_durations(expr: &mut Expr, locals: &mut BTreeSet<Symbol>) 
         | ExprNode::Const { .. }
         | ExprNode::SelfRef => {
             expr.node
-                .for_each_child_mut(&mut |child| rewrite_local_time_durations(child, locals));
+                .for_each_child_mut(&mut |child| rewrite_local_time_durations(child, locals, captured_assignments));
         }
         _ => {
             expr.node.for_each_child_mut(&mut |child| {
-                rewrite_local_time_durations(child, &mut BTreeSet::new())
+                rewrite_local_time_durations(child, &mut BTreeSet::new(), captured_assignments)
             });
             locals.clear();
             return;
