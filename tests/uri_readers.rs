@@ -241,3 +241,56 @@ fn uri_union_exempts_only_the_app_defined_class_arms() {
         );
     }
 }
+
+fn uri_owned_host_app(param: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/uri_reader_probe.rb",
+            r#"class UriReaderProbe < ApplicationRecord
+  def self.read_host(uri)
+    uri.host
+  end
+
+  def self.read_port(uri)
+    uri.port
+  end
+end
+"#,
+        )
+        .write(
+            "sig/uri_reader_probe.rbs",
+            &format!(
+                "class UriReaderProbe\n  def self.read_host: ({param}) -> String?\n  def self.read_port: ({param}) -> Integer?\nend\n"
+            ),
+        )
+        .write(
+            "app/services/owned_http.rb",
+            "class URI::HTTP\n  def host\n    \"owned-http\"\n  end\nend\n",
+        )
+}
+
+#[test]
+fn an_app_defined_uri_class_exempts_only_the_readers_it_defines() {
+    // HTTPS defining `port` does not supply it to the HTTP arm.
+    let owned_https = "class URI::HTTPS\n  def host\n    \"owned-https\"\n  end\n\n  def port\n    8443\n  end\nend\n";
+    let mut wrong = Vec::new();
+    for target in unsupported_uri_targets() {
+        let single = uri_owned_host_app("URI::HTTP");
+        let union = uri_owned_host_app("URI::HTTP | URI::HTTPS")
+            .write("app/services/owned_https.rb", owned_https);
+        for (shape, app) in [("single", single), ("union", union)] {
+            let (_emitted, errors) = app.emit(target);
+            let refused = |reader: &str| {
+                let expected = format!("URI::Generic#{reader} not supported ({})", target.as_str());
+                errors.iter().any(|error| error.contains(&expected))
+            };
+            if refused("host") || !refused("port") {
+                wrong.push((target.as_str(), shape, refused("host"), refused("port")));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "(target, receiver, host refused, port refused); only host is the app's: {wrong:#?}"
+    );
+}

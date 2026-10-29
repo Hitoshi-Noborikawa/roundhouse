@@ -1844,21 +1844,22 @@ fn report_uri_reader_sends(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda) {
         return;
     }
-    fn has_unported_uri(ty: &crate::ty::Ty, app: &App) -> bool {
+    fn has_unported_uri(ty: &crate::ty::Ty, app: &App, reader: &str) -> bool {
         use crate::ty::Ty;
         match ty {
+            // Reopening a URI class supplies only the readers the app defines.
             Ty::Class { id, .. } => matches!(id.0.as_str(), "URI::Generic" | "URI::HTTP" | "URI::HTTPS")
-                && !app_defines_class(app, id),
-            Ty::Union { variants } => variants.iter().any(|ty| has_unported_uri(ty, app)),
+                && !crate::analyze::source_instance_method(app, id, reader),
+            Ty::Union { variants } => variants.iter().any(|ty| has_unported_uri(ty, app, reader)),
             _ => false,
         }
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: BuildTarget) {
         use crate::expr::ExprNode;
         if let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
-            && recv.ty.as_ref().is_some_and(|ty| has_unported_uri(ty, app))
             && matches!(method.as_str(), "scheme" | "host" | "port" | "path" | "query" | "fragment"
                 | "userinfo" | "user" | "password" | "to_s" | "request_uri")
+            && recv.ty.as_ref().is_some_and(|ty| has_unported_uri(ty, app, method.as_str()))
         {
             let owner = if method.as_str() == "request_uri" { "URI::HTTP" } else { "URI::Generic" };
             emit::diagnostics::report_unsupported(
