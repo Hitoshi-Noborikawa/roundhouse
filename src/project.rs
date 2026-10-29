@@ -9926,10 +9926,12 @@ fn names_constant(src: &str, konst: &str) -> bool {
                 let start = if rooted { at - 2 } else { at };
                 let before = line[..start].trim_end();
                 let words = ["%w[", "%W[", "%i[", "%I["].iter().any(|w| before.ends_with(w));
+                // `[ RestClient ]` — the BracketsSpaced array style.
+                let after = line[tail..].trim_start().as_bytes().first();
                 ((before.ends_with('=') || before.ends_with('(') || before.ends_with(',') || before.ends_with('['))
                     && !words
-                    && matches!(b.get(tail), None | Some(b')' | b',' | b']' | b'\r')))
-                    || (before.ends_with("#{") && b.get(tail) == Some(&b'}'))
+                    && matches!(after, None | Some(b')' | b',' | b']')))
+                    || (before.ends_with("#{") && after == Some(&b'}'))
             };
             let tail_ok = value
                 || matches!(b.get(tail), Some(b'.' | b'[' | b'('))
@@ -11694,6 +11696,8 @@ mod tests {
         assert!(names_constant("msg = \"a #{h.fetch(:x) { RestClient.get(u) }} b\"\n", "RestClient"));
         assert!(!names_constant("msg = \"#{x} RestClient.get\"\n", "RestClient"));
         assert!(names_constant("CLIENTS = [RestClient]\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [ RestClient ]\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [ RestClient , Net::HTTP ]\n", "RestClient"));
         assert!(names_constant("CLIENTS = [Net::HTTP, ::RestClient]\n", "RestClient"));
         assert!(names_constant("msg = \"via #{RestClient}\"\n", "RestClient"));
         assert!(!names_constant("NAMES = %w[RestClient]\n", "RestClient"));
