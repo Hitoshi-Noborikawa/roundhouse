@@ -1,7 +1,7 @@
 # rails 8.1.4: a before_action target that the controller also calls: from
 # the action, from a public helper, from a parameter default, and as a bound
 # method (`method(:prepare)`, `&method(:prepare)`), and through `send` /
-# `__send__` with a literal name.
+# `__send__` with a literal name or a computed one.
 #
 # Run it outside a Rails app's tree:
 #
@@ -100,6 +100,16 @@ variants = {
     before_action :prepare, only: :create
     def create
       @gadget = Gadget.create!(name: __send__("prepare"))
+      render json: { name: @gadget.name }
+    end
+    private
+    def prepare = @label = params[:gadget][:name]
+  },
+  "send(step), a computed name" => proc {
+    before_action :prepare, only: :create
+    def create
+      step = "prep" + "are"
+      @gadget = Gadget.create!(name: send(step))
       render json: { name: @gadget.name }
     end
     private

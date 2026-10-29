@@ -175,3 +175,25 @@ end
         ));
     }
 }
+
+/// The action calls the target through `send` with a name it computes:
+/// every filter target stays.
+#[test]
+fn a_filter_target_a_computed_send_may_reach_stays_defined() {
+    run(r#"class GadgetsController < ApplicationController
+  before_action :prepare, only: :create
+
+  def create
+    step = "prep" + "are"
+    @gadget = Gadget.create!(name: send(step))
+    render json: { name: @gadget.name }
+  end
+
+  private
+
+  def prepare
+    @label = params[:gadget][:name]
+  end
+end
+"#);
+}
