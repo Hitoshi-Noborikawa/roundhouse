@@ -111,6 +111,7 @@ SPINEL_TESTS = [
     "jbuilder_extract_attributes_spinel",
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
+    "app_reopens_runtime_class",
     "filter_block_params_spinel",
     "sidekiq_push",
     "sidekiq_worker",
@@ -272,6 +273,13 @@ NET_HTTP_INPUTS = {
     "runtime/spinel/http_stub.rbs",
     "runtime/spinel/tcp_socket_stub.rb",
     "runtime/spinel/tcp_socket_stub.rbs",
+}
+# Inputs of the reopen gate (tests/app_reopens_runtime_class.rs): the
+# pass, and the runtime job whose override it builds natively.
+APP_REOPENS_INPUTS = {
+    "src/emit/ruby/reopen.rs",
+    "runtime/ruby/active_storage.rb",
+    "runtime/ruby/active_storage.rbs",
 }
 JSON_TYPES_SPINEL_INPUTS = {
     "src/schema.rs",
@@ -508,6 +516,8 @@ def native_coverage(path):
         suites.add("generated_columns_spinel")
     if path in JSON_TYPES_SPINEL_INPUTS:
         suites.add("postgres_json_types_spinel")
+    if path in APP_REOPENS_INPUTS:
+        suites.add("app_reopens_runtime_class")
     if path in ARRAY_COLUMN_SPINEL_INPUTS or path.startswith("src/lower/model_to_library/adapter_emit/"):
         suites.add("array_column_storage_spinel")
     # Gate drivers stay flat beside their Rust harness. Match the most

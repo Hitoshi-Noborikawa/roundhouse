@@ -706,136 +706,11 @@ pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<()
 /// A conflict the rule cannot decide fails the emit, rather than leaving
 /// it to readdir.
 fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), String> {
-    use ruby_rbs::node::{MethodDefinitionKind, Node, parse};
     use crate::det::HashMap;
     struct Decl {
         file: usize,
         span: std::ops::Range<usize>,
         sig: String,
-    }
-    // Compare the complete signature, ignoring layout and comments but keeping
-    // token boundaries and the contents of quoted literal types intact.
-    fn signature_key(source: &str) -> String {
-        let mut chars = source.chars().peekable();
-        let mut tokens = Vec::new();
-        while let Some(c) = chars.next() {
-            if c.is_whitespace() {
-                continue;
-            }
-            if c == '#' {
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            let mut token = c.to_string();
-            if c == '\'' || c == '"' {
-                while let Some(next) = chars.next() {
-                    token.push(next);
-                    if next == '\\' {
-                        if let Some(escaped) = chars.next() {
-                            token.push(escaped);
-                        }
-                    } else if next == c {
-                        break;
-                    }
-                }
-            } else if c.is_alphanumeric() || c == '_' {
-                while chars
-                    .peek()
-                    .is_some_and(|c| c.is_alphanumeric() || *c == '_')
-                {
-                    token.push(chars.next().unwrap());
-                }
-            }
-            tokens.push(token);
-        }
-        tokens.join(" ")
-    }
-    fn collect<'a>(
-        nodes: impl Iterator<Item = Node<'a>>,
-        parent: &str,
-        fi: usize,
-        text: &str,
-        decls: &mut HashMap<(String, &'static str, String), Vec<Decl>>,
-    ) -> Result<(), String> {
-        for node in nodes {
-            let (name, members) = match node {
-                Node::Class(c) => (c.name(), c.members()),
-                Node::Module(m) => (m.name(), m.members()),
-                Node::Interface(i) => (i.name(), i.members()),
-                Node::MethodDefinition(method) => {
-                    let prefix = match method.kind() {
-                        MethodDefinitionKind::Instance => "",
-                        MethodDefinitionKind::Singleton => "self.",
-                        MethodDefinitionKind::SingletonInstance => "self?.",
-                    };
-                    let loc = method.location();
-                    let mut start = loc.start() as usize;
-                    let mut end = loc.end() as usize;
-                    // ruby-rbs 0.3 leaves name_location unset for a backtick
-                    // identifier. The name symbol's own location is populated
-                    // for every spelling, including quoted names and operators.
-                    let sig_start = method.name().location().end() as usize;
-                    let invalid_location = || {
-                        format!(
-                            "invalid source location for {parent}#{prefix}{}",
-                            method.name()
-                        )
-                    };
-                    let source = text
-                        .get(sig_start..end)
-                        .filter(|_| text.get(start..sig_start).is_some())
-                        .ok_or_else(invalid_location)?;
-                    let sig = signature_key(source);
-                    for annotation in method.annotations().iter() {
-                        start = start.min(annotation.location().start() as usize);
-                    }
-                    // Remove indentation/newline only when the declaration owns
-                    // that part of the line; same-line neighbors must survive.
-                    let before = text.get(..start).ok_or_else(invalid_location)?;
-                    let line_start = before.rfind('\n').map_or(0, |n| n + 1);
-                    if text[line_start..start].trim().is_empty() {
-                        start = line_start;
-                    }
-                    let line_end = text[end..].find('\n').map_or(text.len(), |n| end + n + 1);
-                    let suffix = text[end..line_end].trim();
-                    if suffix.is_empty() || suffix.starts_with('#') {
-                        end = line_end;
-                    }
-                    // A quoted instance name can itself start with `self.`.
-                    // Keep the receiver separate from the decoded name.
-                    decls
-                        .entry((
-                            parent.to_string(),
-                            prefix,
-                            method.name().as_str().to_string(),
-                        ))
-                        .or_default()
-                        .push(Decl {
-                            file: fi,
-                            span: start..end,
-                            sig,
-                        });
-                    continue;
-                }
-                _ => continue,
-            };
-            let namespace = name.namespace();
-            let mut parts = Vec::new();
-            if !namespace.absolute() && !parent.is_empty() {
-                parts.push(parent.to_string());
-            }
-            parts.extend(namespace.path().iter().filter_map(|part| match part {
-                Node::Symbol(s) => Some(s.as_str().to_string()),
-                _ => None,
-            }));
-            parts.push(name.name().as_str().to_string());
-            collect(members.iter(), &parts.join("::"), fi, text, decls)?;
-        }
-        Ok(())
     }
     // (qualified class, receiver, method) -> declarations from every runtime .rbs.
     let mut decls: HashMap<(String, &'static str, String), Vec<Decl>> = HashMap::default();
@@ -845,10 +720,14 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         {
             continue;
         }
-        let signature =
-            parse(text).map_err(|e| format!("resolve_runtime_sig_conflicts: {path}: {e}"))?;
-        collect(signature.declarations().iter(), "", fi, text, &mut decls)
+        let found = rbs_method_declarations(text)
             .map_err(|e| format!("resolve_runtime_sig_conflicts: {path}: {e}"))?;
+        for d in found {
+            decls
+                .entry((d.owner, d.receiver, d.name))
+                .or_default()
+                .push(Decl { file: fi, span: d.span, sig: d.sig });
+        }
     }
     // Rank of the file a declaration sits in: higher wins.
     let rank = |fi: usize, class: &str| -> u8 {
@@ -893,21 +772,170 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
             undecided.join("\n  ")
         ));
     }
-    for (fi, mut spans) in drop {
-        let text = &mut files[fi].1;
-        let mut kept = String::with_capacity(text.len());
-        spans.sort_by_key(|span| span.start);
-        let mut cursor = 0;
-        for span in spans {
-            if cursor < span.start {
-                kept.push_str(&text[cursor..span.start]);
-            }
-            cursor = cursor.max(span.end);
-        }
-        kept.push_str(&text[cursor..]);
-        *text = kept;
+    for (fi, spans) in drop {
+        files[fi].1 = remove_rbs_spans(&files[fi].1, spans);
     }
     Ok(())
+}
+
+/// One method declaration in an RBS file, as the passes that drop one
+/// see it: `resolve_runtime_sig_conflicts`, and `emit::ruby::reopen` for
+/// a method an app's reopen redefines.
+pub(crate) struct RbsMethodDecl {
+    /// The qualified class, module or interface that declares it.
+    pub(crate) owner: String,
+    /// `""`, `"self."` or `"self?."`.
+    pub(crate) receiver: &'static str,
+    pub(crate) name: String,
+    /// What removing it takes: every overload and annotation, plus the
+    /// indentation and line end when no neighbor shares that line.
+    pub(crate) span: std::ops::Range<usize>,
+    /// The signature, compared without layout or comments.
+    pub(crate) sig: String,
+}
+
+/// Every method declaration in `text`, nested owners included.
+pub(crate) fn rbs_method_declarations(text: &str) -> Result<Vec<RbsMethodDecl>, String> {
+    let signature = ruby_rbs::node::parse(text).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    collect_rbs_methods(signature.declarations().iter(), "", text, &mut out)?;
+    Ok(out)
+}
+
+// Compare the complete signature, ignoring layout and comments but keeping
+// token boundaries and the contents of quoted literal types intact.
+fn signature_key(source: &str) -> String {
+    let mut chars = source.chars().peekable();
+    let mut tokens = Vec::new();
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            continue;
+        }
+        if c == '#' {
+            for c in chars.by_ref() {
+                if c == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+        let mut token = c.to_string();
+        if c == '\'' || c == '"' {
+            while let Some(next) = chars.next() {
+                token.push(next);
+                if next == '\\' {
+                    if let Some(escaped) = chars.next() {
+                        token.push(escaped);
+                    }
+                } else if next == c {
+                    break;
+                }
+            }
+        } else if c.is_alphanumeric() || c == '_' {
+            while chars
+                .peek()
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+            {
+                token.push(chars.next().unwrap());
+            }
+        }
+        tokens.push(token);
+    }
+    tokens.join(" ")
+}
+
+fn collect_rbs_methods<'a>(
+    nodes: impl Iterator<Item = ruby_rbs::node::Node<'a>>,
+    parent: &str,
+    text: &str,
+    out: &mut Vec<RbsMethodDecl>,
+) -> Result<(), String> {
+    use ruby_rbs::node::{MethodDefinitionKind, Node};
+    for node in nodes {
+        let (name, members) = match node {
+            Node::Class(c) => (c.name(), c.members()),
+            Node::Module(m) => (m.name(), m.members()),
+            Node::Interface(i) => (i.name(), i.members()),
+            Node::MethodDefinition(method) => {
+                let prefix = match method.kind() {
+                    MethodDefinitionKind::Instance => "",
+                    MethodDefinitionKind::Singleton => "self.",
+                    MethodDefinitionKind::SingletonInstance => "self?.",
+                };
+                let loc = method.location();
+                let mut start = loc.start() as usize;
+                let mut end = loc.end() as usize;
+                // ruby-rbs 0.3 leaves name_location unset for a backtick
+                // identifier. The name symbol's own location is populated
+                // for every spelling, including quoted names and operators.
+                let sig_start = method.name().location().end() as usize;
+                let invalid_location = || {
+                    format!(
+                        "invalid source location for {parent}#{prefix}{}",
+                        method.name()
+                    )
+                };
+                let source = text
+                    .get(sig_start..end)
+                    .filter(|_| text.get(start..sig_start).is_some())
+                    .ok_or_else(invalid_location)?;
+                let sig = signature_key(source);
+                for annotation in method.annotations().iter() {
+                    start = start.min(annotation.location().start() as usize);
+                }
+                // Remove indentation/newline only when the declaration owns
+                // that part of the line; same-line neighbors must survive.
+                let before = text.get(..start).ok_or_else(invalid_location)?;
+                let line_start = before.rfind('\n').map_or(0, |n| n + 1);
+                if text[line_start..start].trim().is_empty() {
+                    start = line_start;
+                }
+                let line_end = text[end..].find('\n').map_or(text.len(), |n| end + n + 1);
+                let suffix = text[end..line_end].trim();
+                if suffix.is_empty() || suffix.starts_with('#') {
+                    end = line_end;
+                }
+                // A quoted instance name can itself start with `self.`.
+                // Keep the receiver separate from the decoded name.
+                out.push(RbsMethodDecl {
+                    owner: parent.to_string(),
+                    receiver: prefix,
+                    name: method.name().as_str().to_string(),
+                    span: start..end,
+                    sig,
+                });
+                continue;
+            }
+            _ => continue,
+        };
+        let namespace = name.namespace();
+        let mut parts = Vec::new();
+        if !namespace.absolute() && !parent.is_empty() {
+            parts.push(parent.to_string());
+        }
+        parts.extend(namespace.path().iter().filter_map(|part| match part {
+            Node::Symbol(s) => Some(s.as_str().to_string()),
+            _ => None,
+        }));
+        parts.push(name.name().as_str().to_string());
+        collect_rbs_methods(members.iter(), &parts.join("::"), text, out)?;
+    }
+    Ok(())
+}
+
+/// `text` without `spans`, overlapping ones included.
+pub(crate) fn remove_rbs_spans(text: &str, mut spans: Vec<std::ops::Range<usize>>) -> String {
+    let mut kept = String::with_capacity(text.len());
+    spans.sort_by_key(|span| span.start);
+    let mut cursor = 0;
+    for span in spans {
+        if cursor < span.start {
+            kept.push_str(&text[cursor..span.start]);
+        }
+        cursor = cursor.max(span.end);
+    }
+    kept.push_str(&text[cursor..]);
+    kept
 }
 
 /// A plain class the app declares outside the Rails base classes
@@ -2945,6 +2973,11 @@ fn target_files_inner(
             }
         }
         let mut files = files;
+        // The app's reopens of runtime classes first, on the same
+        // finished set: an override retires the runtime's def, and the
+        // shake then reads the tree that ships (see emit::ruby::reopen).
+        let models = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+        emit::ruby::reopen::apply_runtime_reopens(&mut files, &models);
         if target == BuildTarget::Spinel {
             emit::ruby::shake::drop_shadowed_base_defs(&mut files);
         }
