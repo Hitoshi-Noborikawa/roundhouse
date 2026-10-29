@@ -20128,5 +20128,8 @@ mod bare_save_without_validation;
 #[path = "emit_and_run/route_param_recall.rs"]
 mod route_param_recall;
 
+#[path = "emit_and_run/reopened_class_constructor.rs"]
+mod reopened_class_constructor;
+
 #[path = "emit_and_run/params_write_assign.rs"]
 mod params_write_assign;
