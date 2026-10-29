@@ -8775,7 +8775,12 @@ fn emit_library_class_decl_inner(
             .filter(|call| !is_preserved_external_include(call) && !in_body(call))
             .collect()
     } else {
-        let own = app_extension_calls(lc, app, classes);
+        let mut picked = app_extension_calls(lc, app, classes);
+        picked.extend(gem_include_macro_calls(lc));
+        // Source order, each call once: `span_method` prepends its wrapper,
+        // and an app macro written after it may read the ancestors.
+        let own: Vec<&Expr> =
+            lc.unknown_calls.iter().filter(|call| picked.iter().any(|p| std::ptr::eq(*p, *call))).collect();
         let mut replayed = own.clone();
         replayed.retain(|call| !in_body(call));
         for call in &lc.unknown_calls {
@@ -9656,6 +9661,25 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
         }
     }
     out
+}
+
+/// Class-body macros a module of a gem the Ruby family ships gives its
+/// includer (`include ElasticAPM::SpanHelpers`, then `span_method :call`).
+/// The gem is loaded on this tree, so the call is what Ruby runs. A target
+/// that refuses the gem drops the include first, so nothing replays there.
+const GEM_INCLUDE_MACROS: &[(&str, &[&str])] =
+    &[("ElasticAPM::SpanHelpers", &["span_method", "span_class_method"])];
+
+fn gem_include_macro_calls(lc: &LibraryClass) -> Vec<&Expr> {
+    let macros: Vec<&str> = GEM_INCLUDE_MACROS
+        .iter()
+        .filter(|(module, _)| lc.includes.iter().any(|id| id.0.as_str() == *module))
+        .flat_map(|(_, macros)| macros.iter().copied())
+        .collect();
+    lc.unknown_calls
+        .iter()
+        .filter(|call| matches!(&*call.node, ExprNode::Send { recv: None, method, .. } if macros.contains(&method.as_str())))
+        .collect()
 }
 
 /// A receiverless class-body call that assigns a constant inside its block,

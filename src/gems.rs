@@ -90,6 +90,7 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     // Not the gem's entry file: it loads the Railtie whenever `Rails::VERSION` is defined, which this tree's is, with no `Rails::Railtie` under it.
     "mini_profiler",
     "rest-client",
+    "elastic_apm",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -221,7 +222,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
             Marker::AnyText(&["Faraday::Retry", "request :retry", "request(:retry"]),
             "faraday-retry",
         ),
-        // Retryable and JWT, as Faraday: the real gems on this lane,
+        // Retryable, JWT and ElasticAPM, as Faraday: the real gems on this lane,
         // refused on the strict targets (`lower::ruby_family_gems`).
         (Marker::Constant("Retryable"), "retryable"),
         (Marker::Constant("JWT"), "jwt"),
@@ -231,6 +232,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         (Marker::Constant("Rack::MiniProfiler"), "rack-mini-profiler"),
         // RestClient, the same way.
         (Marker::Constant("RestClient"), "rest-client"),
+        (Marker::Constant("ElasticAPM"), "elastic-apm"),
     ];
     &RUNTIME_GEMS
 }
@@ -679,7 +681,8 @@ const FATES: &[(&str, GemFate)] = &[
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
     ("commonmarker", GemFate::Modeled), // catalog/gems: Commonmarker, Commonmarker::Node
     ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
-    ("discard", GemFate::Modeled),     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
+    ("discard", GemFate::Modeled),
+    ("elastic-apm", GemFate::Modeled), // catalog/gems: ElasticAPM, SpanHelpers; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("friendly_id", GemFate::Modeled), // lower/friendly_id + registry: friendly_id/friendly/to_param, Relation#friendly_find (slugged [+history] finder only; slug generation on save, :scoped/:finders/:simple_i18n unmodeled)
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
@@ -912,6 +915,7 @@ pub fn namespace_of(gem: &str) -> String {
         ("caxlsx", "Axlsx"),
         ("combine_pdf", "CombinePDF"),
         ("duckdb", "DuckDB"),
+        ("elastic-apm", "ElasticAPM"),
         ("fast_excel", "FastExcel"),
         ("graphql", "GraphQL"),
         ("htmlentities", "HTMLEntities"),

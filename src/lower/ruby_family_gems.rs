@@ -15,6 +15,7 @@ const GEMS: &[(&str, &str, &str)] = &[
     ("Retryable", "retryable", "a missing retry helper"),
     ("JWT", "jwt", "a missing token codec"),
     ("RestClient", "rest-client", "a missing HTTP client"),
+    ("ElasticAPM", "elastic-apm", "a missing APM agent"),
 ];
 
 /// Targets that run the real gem: Ruby and JRuby load it via

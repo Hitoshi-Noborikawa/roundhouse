@@ -4675,6 +4675,173 @@ fn jwt_is_refused_off_ruby_and_jruby() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const ELASTIC_APM_LIB: &str = "module Traced
+  include ElasticAPM::SpanHelpers
+
+  def double(x)
+    x * 2
+  end
+  span_method :double, 'traced:double'
+end
+
+class Pricer
+  include Traced
+  include ElasticAPM::SpanHelpers
+
+  def call(x, scale: 2)
+    ElasticAPM.set_custom_context(x: x)
+    ElasticAPM.set_label(:pricer, \"on\")
+    block_given? ? yield(x * scale) : x * scale
+  end
+  span_method :call, 'pricer:call'
+
+  def self.quote(x)
+    new.call(x, scale: 3)
+  end
+
+  def self.rate
+    3
+  end
+  span_class_method :rate, 'pricer:rate'
+
+  def traced
+    current = ElasticAPM.current_transaction
+    ElasticAPM.with_span(\"traced\", \"app\") { current.nil? ? :none : :some }
+  end
+
+  def report(error)
+    ElasticAPM.report(error)
+  end
+end
+";
+
+/// ElasticAPM runs as the real gem on Ruby. With no agent started, as an
+/// app that never configures one: `span_method` / `span_class_method` wrap
+/// the method and pass its arguments, keywords and block through, in a
+/// class and in a module; `with_span` answers its block and there is no
+/// transaction.
+#[test]
+fn elastic_apm_runs_as_the_real_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("lib/pricer.rb", ELASTIC_APM_LIB)
+        .run_ruby(
+            r#"pricer = Pricer.new
+raise "call" unless Pricer.quote(5) == 15
+raise "block" unless pricer.call(5) { |v| v + 1 } == 11
+raise "module" unless pricer.double(4) == 8
+raise "class side" unless Pricer.rate == 3
+raise "not wrapped" if Pricer.ancestors.first == Pricer
+raise "not wrapped in the module" if Traced.ancestors.first == Traced
+raise "singleton not wrapped" if Pricer.singleton_class.ancestors.first == Pricer.singleton_class
+raise "span" unless pricer.traced == :none
+pricer.report(RuntimeError.new("boom"))"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"elastic-apm\""), "Gemfile does not declare elastic-apm:\n{gemfile}");
+}
+
+/// `span_method` and an app module's class-body macro replay in source
+/// order: a macro written after `span_method` sees the method wrapped.
+#[test]
+fn span_method_replays_in_source_order_with_app_macros() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/worker.rb",
+            "module Audit
+  def audited(name)
+    raise \"span_method must run first\" if ancestors.first == self
+    name
+  end
+end
+
+class Worker
+  include ElasticAPM::SpanHelpers
+
+  def work
+    1
+  end
+  span_method :work, 'worker:work'
+
+  extend Audit
+  audited :work
+end
+",
+        )
+        .run_ruby(r#"raise "work" unless Worker.new.work == 1"#)
+        .assert_passes();
+}
+
+/// Off Ruby and JRuby, each ElasticAPM reference and the `SpanHelpers`
+/// include are refused.
+#[test]
+fn elastic_apm_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-elastic-apm-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/pricer.rb", ELASTIC_APM_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: Pricer.new.call(1).inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            !errors.iter().any(|e| e.contains("ElasticAPM")),
+            "{target:?} refused a gem it ships:\n{}",
+            errors.join("\n")
+        );
+        let gemfile = files.get("Gemfile").map(String::as_str).unwrap_or("");
+        assert!(gemfile.contains("gem \"elastic-apm\""), "{target:?} Gemfile:\n{gemfile}");
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`ElasticAPM.set_label`", "`ElasticAPM.with_span`", "`ElasticAPM::SpanHelpers`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("pricer") && text.contains("ElasticAPM"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted an ElasticAPM reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ActiveSupport's `Digest::UUID.uuid_v4` runs as `SecureRandom.uuid`: a
 /// fresh random (version 4) uuid on each call.
 #[test]
