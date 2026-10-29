@@ -277,6 +277,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("new", pathname()), ("pwd", pathname()), ("getwd", pathname()),
     ], &[
         ("relative_path_from", pathname()), ("join", pathname()),
+        // `Pathname(a) + Pathname(b)`: a path join (`/` is its alias), in CRuby and spinel's package.
+        ("+", pathname()), ("/", pathname()),
         ("basename", pathname()), ("dirname", pathname()), ("expand_path", pathname()),
         ("parent", pathname()), ("realpath", pathname()),
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("extname", Ty::Str),

@@ -1782,6 +1782,10 @@ impl<'a> BodyTyper<'a> {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
                 }
                 expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
+                // Not on a receiver's call: lowering's `Pathname.new(x)` keeps the mark analysis gave `Pathname(x)`.
+                if recv.is_none() {
+                    expr.decisions &= !crate::expr::KERNEL_CONVERSION;
+                }
                 if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
                     // Only admitted declarations establish a Data class identity.
                     expr.decisions |= crate::expr::RESOLVED_DATA_FACTORY;
@@ -2382,6 +2386,23 @@ impl<'a> BodyTyper<'a> {
                     && !self.app_defines(ctx.self_ty.as_ref(), method)
                 {
                     return if method.as_str() == "Integer" { Ty::Int } else { Ty::Float };
+                }
+                // Kernel's other conversions, never nil under the same rule. `Rational(...)` and
+                // `URI(str)` stay gradual, like `to_r` and `URI.parse`: the registry models neither
+                // result. Only a String makes `Pathname(path)` the `Pathname.new(path)` lowering
+                // writes: given a Pathname, Kernel's answers that same object, frozen or not.
+                if recv.is_none() && block.is_none()
+                    && matches!((method.as_str(), args.len()), ("Pathname" | "URI", 1) | ("Rational", 1 | 2))
+                    && !args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { .. }))
+                    && (method.as_str() != "Pathname" || matches!(args[0].ty, Some(Ty::Str)))
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                {
+                    expr.decisions |= crate::expr::KERNEL_CONVERSION;
+                    return match method.as_str() {
+                        "Pathname" => Ty::Class { id: ClassId(Symbol::from("Pathname")), args: vec![].into() },
+                        _ => Ty::Untyped,
+                    };
                 }
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
