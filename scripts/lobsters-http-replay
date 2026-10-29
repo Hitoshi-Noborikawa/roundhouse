@@ -27,8 +27,10 @@
 #                       GET /path [-> STATUS]
 #                       POST /path key=value&key2=value2 [-> STATUS]
 #                     A POST carries the authenticity_token of the last
-#                     page fetched (its form field or csrf-token meta) and
-#                     the session cookie. {story}, {story_path},
+#                     page fetched (its form field or csrf-token meta),
+#                     that page as Referer, and the session cookie. A
+#                     path visited again dumps as NAME~2, NAME~3, ….
+#                     scripts/lobsters-http-steps/ has examples. {story}, {story_path},
 #                     {comment} and {username} expand to ids scraped
 #                     after login.
 #   --email E         login email    (default $LOBSTERS_EMAIL)
@@ -135,6 +137,7 @@ end
 # ── HTTP with a cookie jar ───────────────────────────────────────────
 $jar = {}
 $last_body = ""
+$last_url = nil
 
 def http
   @http ||= Net::HTTP.start(BASE.host, BASE.port, use_ssl: BASE.scheme == "https").tap { |h| h.read_timeout = 60 }
@@ -149,6 +152,7 @@ end
 
 def request(method, path, form: nil)
   req = method == "POST" ? Net::HTTP::Post.new(path) : Net::HTTP::Get.new(path)
+  req["Referer"] = $last_url if method == "POST" && $last_url
   req["Cookie"] = $jar.map { |k, v| "#{k}=#{v}" }.join("; ") unless $jar.empty?
   req["Accept"] = "text/html"
   req["Host"] = HOST if HOST
@@ -161,7 +165,10 @@ def request(method, path, form: nil)
   ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000).round(1)
   absorb_cookies(res)
   body = res.body.to_s
-  $last_body = body if method == "GET"
+  if method == "GET"
+    $last_body = body
+    $last_url = "#{BASE.scheme}://#{HOST || "#{BASE.host}:#{BASE.port}"}#{path}"
+  end
   [res.code.to_i, body, res["location"], ms]
 rescue StandardError => e
   [:EXC, "#{e.class}: #{e.message}", nil, 0]
@@ -220,6 +227,7 @@ steps.each do |step|
   end
   st, body, location, ms = request(step.method, path, form: form)
   name = (step.method == "POST" ? "POST_" : "") + body_name(path)
+  name = "#{name}~#{(2..).find { |i| !statuses.key?("#{name}~#{i}") }}" if statuses.key?(name)
   statuses[name] = st
   locations[name] = location if location
   File.write(File.join(opts[:dump], name), body) unless st == :EXC
