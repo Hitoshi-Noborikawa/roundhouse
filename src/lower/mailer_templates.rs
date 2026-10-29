@@ -84,6 +84,8 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
                 closures: &closures,
                 views: &views,
                 defaults: &defaults,
+                helper: m.visibility != crate::dialect::MethodVisibility::Public
+                    && crate::ingest::mailer_callbacks::action_of(m.name.as_str()) == m.name.as_str(),
             };
             rewrite(&mut m.body, &site, &mut diags);
         }
@@ -105,6 +107,7 @@ struct Site<'a> {
     closures: &'a HashMap<ViewKey, Vec<Symbol>>,
     views: &'a [(String, String, bool)],
     defaults: &'a [(Expr, Expr)],
+    helper: bool,
 }
 
 /// The mailer and its mailer ancestors, nearest first.
@@ -197,6 +200,10 @@ fn rewrite(expr: &mut Expr, site: &Site<'_>, diags: &mut Vec<Diagnostic>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, site, diags));
     let ExprNode::Send { recv: None, method, args, block, parenthesized } = &mut *expr.node else { return };
     if method.as_str() != "mail" || args.len() > 1 {
+        return;
+    }
+    // Not a template render in a private helper: a bare `mail` there is an after_action reading the mail the action built, which the runtime answers.
+    if site.helper && args.is_empty() && block.is_none() {
         return;
     }
     let span = expr.span;

@@ -25,6 +25,7 @@ module ActionMailer
     @headers: Hash[String, String]
     @mailer: Base?
     @null: bool
+    @perform_deliveries: bool
     @to: Array[String]?
     @from: Array[String]?
     @cc: Array[String]?
@@ -54,6 +55,8 @@ module ActionMailer
     def deliver_now: () -> Message?
     def deliver_later: () -> Message?
     def __push: () -> Message?
+    def perform_deliveries: () -> bool
+    def perform_deliveries=: (bool value) -> bool
     def __link: (Base mailer) -> Message
     def __nullify: () -> Message
   end
@@ -68,7 +71,7 @@ module ActionMailer
 
     def self.default: (?Hash[Symbol, untyped]? opts) -> nil
     def self.deliveries: () -> Array[Message]
-    def mail: (Hash[Symbol, untyped] opts, ?String? text_body, ?String? html_body) -> Message
+    def mail: (?Hash[Symbol, untyped]? opts, ?String? text_body, ?String? html_body) -> Message
     def params: () -> Hash[Symbol, untyped]
     def _with_params: (Hash[Symbol, untyped] params) -> self
     def message: () -> Message?
