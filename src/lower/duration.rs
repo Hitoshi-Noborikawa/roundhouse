@@ -173,6 +173,9 @@ fn integral_clock_duration(expr: &Expr, locals: &BTreeSet<Symbol>) -> bool {
     if let ExprNode::Var { name, .. } = &*expr.node {
         return locals.contains(name);
     }
+    if let ExprNode::Assign { value, .. } = &*expr.node {
+        return integral_clock_duration(value, locals);
+    }
     is_duration_const_call(expr)
         && matches!(&*expr.node, ExprNode::Send { method, args, .. }
             if matches!(method.as_str(), "seconds" | "second" | "minutes" | "minute" | "hours" | "hour")

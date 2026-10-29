@@ -8,6 +8,8 @@ const SCRIPT: &str = r#"
 raise "local seconds" unless LocalDurationClock.added.iso8601(6) == "2026-01-02T03:04:07.123456Z"
 raise "aliased minutes" unless LocalDurationClock.subtracted.iso8601(6) == "2026-01-02T03:02:05.123456Z"
 raise "retained duration" unless LocalDurationClock.retained_duration.iso8601 == "2026-01-02T02:00:00Z"
+raise "outer chained seconds" unless LocalDurationClock.chained_added.iso8601(6) == "2026-01-02T03:04:07.123456Z"
+raise "inner chained minutes" unless LocalDurationClock.chained_subtracted.iso8601(6) == "2026-01-02T03:02:05.123456Z"
 puts "local duration time arithmetic passed"
 "#;
 
@@ -23,6 +25,8 @@ fn integral_duration_locals_and_aliases_are_unwrapped_at_time_arithmetic() {
     assert!(ruby.contains("at + delay.to_i"), "{ruby}");
     assert!(ruby.contains("at - copy.to_i"), "{ruby}");
     assert!(ruby.contains("delay.to_i == 7200"), "{ruby}");
+    assert_eq!(ruby.matches("at + delay.to_i").count(), 3, "{ruby}");
+    assert_eq!(ruby.matches("at - copy.to_i").count(), 2, "{ruby}");
 }
 
 #[test]

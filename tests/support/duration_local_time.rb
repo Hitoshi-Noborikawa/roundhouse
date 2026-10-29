@@ -19,4 +19,16 @@ class LocalDurationClock
     raise "duration changed" unless delay.to_i == 7200
     later
   end
+
+  def self.chained_added
+    at = Time.utc(2026, 1, 2, 3, 4, 5, 123456)
+    delay = copy = 2.seconds
+    at + delay
+  end
+
+  def self.chained_subtracted
+    at = Time.utc(2026, 1, 2, 3, 4, 5, 123456)
+    delay = copy = 2.minutes
+    at - copy
+  end
 end
