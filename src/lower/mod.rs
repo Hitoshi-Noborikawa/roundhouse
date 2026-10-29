@@ -123,6 +123,7 @@ pub mod presence_in;
 pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
 pub mod save_without_validation;
+pub mod route_param_recall;
 pub mod defined_ivar_memo;
 pub mod defined_const_fold;
 pub mod controller_class_render;
@@ -395,6 +396,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // calls `where_range_split` later consumes. Empty runs_after of its
     // own — the dependent is the later pass.
     ("time_calendar", &[]),
+    ("route_param_recall", &[]),
     ("blank", &[]),
     ("as_json_super", &[]),
     // `super` in a model's own `password=` → the `has_secure_password`
@@ -894,6 +896,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("errors_full_messages");
     ran!("each_with_index");
     ran!("time_calendar");
+    route_param_recall::apply_route_param_recall(app);
+    ran!("route_param_recall");
     diags.extend(crate::timings::phase("post-analyze: blank", || {
         blank::apply_blank_lowering(app)
     }));

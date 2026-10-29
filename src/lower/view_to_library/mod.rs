@@ -2918,12 +2918,13 @@ pub(crate) fn view_uses_dynamic_url_hash(body: &Expr) -> bool {
 }
 
 /// The views that need the request's controller, action and path
-/// parameters for a [`dynamic_url_hash`] URL: those linking to one, and
-/// those rendering a partial that does, so the values reach the partial.
+/// parameters for a [`dynamic_url_hash`] URL or a recalled route segment
+/// (`route_param_recall`): those reading one, and those rendering a
+/// partial that does, so the values reach the partial.
 pub(crate) fn request_context_views(views: &[View]) -> crate::det::HashSet<String> {
     let mut out: crate::det::HashSet<String> = views
         .iter()
-        .filter(|v| view_uses_dynamic_url_hash(&v.body))
+        .filter(|v| view_uses_dynamic_url_hash(&v.body) || view_uses_bare_name(&v.body, "path_parameters"))
         .map(|v| v.name.as_str().to_string())
         .collect();
     let pools = crate::det::HashMap::default();
