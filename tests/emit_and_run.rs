@@ -20159,3 +20159,6 @@ mod namespaced_controller_symbol;
 
 #[path = "emit_and_run/params_write_assign.rs"]
 mod params_write_assign;
+
+#[path = "emit_and_run/find_each_mailer.rs"]
+mod find_each_mailer;
