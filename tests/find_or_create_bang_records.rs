@@ -86,6 +86,48 @@ end
     );
 }
 
+fn reviewed_app() -> emit_and_run::Overlay {
+    let oracle = std::process::Command::new("ruby")
+        .arg("tests/find_or_create_bang_records/review_oracle.rb")
+        .output()
+        .expect("run Rails review oracle");
+    assert!(oracle.status.success(), "{}", String::from_utf8_lossy(&oracle.stderr));
+    assert_eq!(String::from_utf8_lossy(&oracle.stdout), concat!(
+        "conflicting_keys | false | 1 | 1\n",
+        "reversed_keys | false | 1 | 3\n",
+        "shared_key | false | 1 | 1\n",
+        "block | 3:1 | 3:1\n",
+        "existing | true | existing body\n",
+        "repair | true | 3:2\n",
+        "literal | 2:1\n",
+    ));
+    app().write("app/models/follow.rb", include_str!("find_or_create_bang_records/review_follow.rb"))
+}
+
+#[test]
+fn colliding_association_predicates_are_refused_instead_of_collapsed() {
+    for method in ["find_or_create_by!", "find_or_create_by"] {
+        for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Spinel] {
+            let model = include_str!("find_or_create_bang_records/review_follow.rb")
+                .replace("find_or_create_by!", method);
+            let (_, errors) = reviewed_app().write("app/models/follow.rb", &model).emit(target);
+            assert_eq!(errors.iter().filter(|e| e.contains("conditions resolve to `follower_id`")).count(), 3,
+                "association/foreign-key collisions in either order and shared keys must be refused: {errors:?}");
+        }
+    }
+}
+
+#[test]
+fn creation_blocks_cannot_run_after_initialization_callbacks() {
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Spinel] {
+        let (_, errors) = reviewed_app().emit(target);
+        assert_eq!(errors.iter().filter(|e| e.contains("variable-condition calls must be blockless")).count(), 2,
+            "variable blocks must remain unsupported: {errors:?}");
+        assert_eq!(errors.iter().filter(|e| e.contains("creation block must run inside initialize")).count(), 1,
+            "literal blocks cannot overtake callbacks either: {errors:?}");
+    }
+}
+
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn bang_record_conditions_run_natively() {

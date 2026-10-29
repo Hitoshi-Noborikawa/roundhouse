@@ -20,6 +20,14 @@ favorite = Favorite.add(article, alice)
 raise "favorite attributes" unless favorite.article_id == article.id && favorite.user_id == alice.id
 raise "favorite duplicated" unless Favorite.add(article, alice).id == favorite.id
 
+other_article = Article.create!(title: "Another title")
+prior = Favorite.add(other_article, alice)
+count_before = Favorite.count
+conflict = Favorite.contradictory_scope
+raise "lookup dropped a scope predicate" if conflict.id == prior.id
+raise "scope conflict did not insert" unless Favorite.count == count_before + 1
+raise "creation did not prefer explicit attributes" unless conflict.article_id == other_article.id
+
 begin
   Follow.invalid(alice)
   raise "bang did not raise"
