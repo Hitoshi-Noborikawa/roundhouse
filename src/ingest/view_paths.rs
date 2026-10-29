@@ -1533,6 +1533,7 @@ fn template_renders(body: &Expr, dir: &str) -> Vec<(String, Span)> {
                 RenderPartial::Association { method, .. } => {
                     Some(format!("{method}/_{}", crate::naming::singularize(method)))
                 }
+                RenderPartial::TypedCollection { partial, .. } => Some(partial_name(&partial, dir)),
                 RenderPartial::DynamicNamed { .. } => None,
             };
             if let Some(name) = name {

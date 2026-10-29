@@ -392,7 +392,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             .collect();
         app.library_classes
             .iter()
-            .filter(|lc| ancestors(app, &parents, &lc.name).iter().chain(std::iter::once(&lc.name)).any(|a| defining.contains(&a)))
+            .filter(|lc| ancestors(&named, &parents, &lc.name).iter().chain(std::iter::once(&lc.name)).any(|a| defining.contains(&a)))
             .map(|lc| lc.name.0.as_str().to_string())
             .collect()
     };
