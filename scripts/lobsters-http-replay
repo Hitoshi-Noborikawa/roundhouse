@@ -32,7 +32,8 @@
 #                     path visited again dumps as NAME~2, NAME~3, ….
 #                     scripts/lobsters-http-steps/ has examples. {story}, {story_path},
 #                     {comment} and {username} expand to ids scraped
-#                     after login.
+#                     after login; a step whose id was not scraped (no
+#                     {username} under --no-login) is skipped.
 #   --email E         login email    (default $LOBSTERS_EMAIL)
 #   --password P      login password (default $LOBSTERS_PASSWORD)
 #   --username U      for {username} (default $LOBSTERS_USERNAME, else
@@ -183,8 +184,10 @@ end
 def enc(s) = URI.encode_www_form_component(s.to_s)
 
 def body_name(path)
-  name = path.delete_prefix("/").gsub(/[^\w.-]/, "_")
-  name.empty? ? "root" : name
+  name = path.delete_prefix("/").gsub("~", "tilde-").gsub(/[^\w.-]/, "_")
+  return "root" if name.empty?
+  # Not a leading `_`: lobsters-content-diff skips those files as metadata.
+  name.start_with?("_") ? "x#{name}" : name
 end
 
 # ── login, then the ids the steps name ──────────────────────────────
@@ -208,17 +211,28 @@ _, settings, = request("GET", "/settings") if opts[:login]
 ids["username"] = opts[:username] || settings.to_s[%r{href="/(?:~|u/)(\w+)"}, 1]
 
 steps = parse_steps(opts[:steps] ? File.read(opts[:steps]) : DEFAULT_STEPS)
-expand = lambda do |s|
-  s.gsub(/\{(\w+)\}/) { ids[$1] || abort("lobsters-http-replay: no #{$1} to put in #{s.inspect} (none scraped)") }
-end
+missing = ->(s) { s.scan(/\{(\w+)\}/).flatten.find { |k| ids[k].nil? } }
+expand = ->(s) { s.gsub(/\{(\w+)\}/) { ids[$1] } }
 
 # ── the visits ───────────────────────────────────────────────────────
 FileUtils.mkdir_p(opts[:dump])
+# Not left in place: lobsters-content-diff compares every body in the directory, so a previous run's extra steps would be compared too.
+previous = File.join(opts[:dump], "_status.json")
+if File.exist?(previous)
+  JSON.parse(File.read(previous)).each_key { |name| FileUtils.rm_f(File.join(opts[:dump], name)) }
+  FileUtils.rm_f([previous, File.join(opts[:dump], "_location.json")])
+end
 THIN_BYTES = 200
 statuses = {}
 locations = {}
 failures = 0
+skipped = 0
 steps.each do |step|
+  if (key = missing.("#{step.path} #{step.form}"))
+    skipped += 1
+    $stderr.puts format("%-4s %-5s %-36s (no {%s}: none scraped)", "skip", "-", "#{step.method} #{step.path}", key) unless opts[:quiet]
+    next
+  end
   path = expand.(step.path)
   form = step.form && expand.(step.form)
   if step.method == "POST"
@@ -243,5 +257,6 @@ steps.each do |step|
 end
 File.write(File.join(opts[:dump], "_status.json"), JSON.pretty_generate(statuses))
 File.write(File.join(opts[:dump], "_location.json"), JSON.pretty_generate(locations))
-$stderr.puts "#{steps.size - failures}/#{steps.size} steps ok; bodies -> #{opts[:dump]}"
+run = steps.size - skipped
+$stderr.puts "#{run - failures}/#{run} steps ok#{", #{skipped} skipped" if skipped > 0}; bodies -> #{opts[:dump]}"
 exit failures

@@ -1612,6 +1612,16 @@ pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path
 mod tests {
     use super::*;
 
+    /// rotp's façade only raises, so the gem is compiled from source; WebPush's
+    /// also raises in gem_facades.rb, but the Spinel tree ports it, and a
+    /// sourced gem would drop the port's stub slots with the façade.
+    #[test]
+    fn a_ported_namespace_is_not_a_stub_facade() {
+        let stubs = stub_facade_namespaces();
+        assert!(stubs.contains("ROTP"), "{stubs:?}");
+        assert!(!stubs.contains("WebPush"), "{stubs:?}");
+    }
+
     #[test]
     fn gemfile_requires_reads_each_spelling() {
         let found = gemfile_requires(
@@ -1986,6 +1996,11 @@ pub(crate) fn spinel_runtime_constants() -> &'static crate::det::HashSet<String>
 /// The same over the shared ports too (`runtime/ruby/typeid.rb`'s `TypeID`),
 /// which every Ruby-family tree and the Spinel one carry. Not a façade: its
 /// raising stand-in is what a gem compiled from source replaces.
+pub(crate) fn ported_runtime_constants() -> &'static crate::det::HashSet<String> {
+    static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| declared_runtime_constants(&["runtime/spinel", "runtime/ruby"]))
+}
+
 /// Top-level namespaces whose façade in `runtime/ruby/gem_facades.rb`
 /// answers a call by `GemFacade.fail!` (rotp's `ROTP`): the Spinel tree
 /// has no working body for them.
@@ -2005,13 +2020,10 @@ pub(crate) fn stub_facade_namespaces() -> &'static crate::det::HashSet<String> {
                 out.insert(name.clone());
             }
         }
+        // Not one the Spinel tree ports (`runtime/spinel/web_push.rb`): the sourced gem would drop the whole façade, and the port's stub slots with it.
+        out.retain(|name| !spinel_runtime_constants().contains(name));
         out
     })
-}
-
-pub(crate) fn ported_runtime_constants() -> &'static crate::det::HashSet<String> {
-    static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
-    NAMES.get_or_init(|| declared_runtime_constants(&["runtime/spinel", "runtime/ruby"]))
 }
 
 fn declared_runtime_constants(dirs: &[&str]) -> crate::det::HashSet<String> {

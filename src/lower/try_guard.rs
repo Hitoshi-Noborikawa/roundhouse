@@ -160,9 +160,9 @@ pub(crate) fn rewrite_node(
     );
     call.ty = try_ty.clone();
 
-    // Not narrowed to the app's definers when Ruby's own classes define the name too: every object answers `to_s`, and lobsters' `current_vote.try(:[], :vote)` holds `{vote: 1}`, which `is_a?(CommentVoteHydrator)` answered nil for.
+    // Not narrowed to the definers this pass can see when Ruby's own classes define the name too: lobsters' `current_vote.try(:[], :vote)` holds `{vote: 1}` or a `Vote` (whose `[]` is the runtime's), and `is_a?(CommentVoteHydrator)` answered nil for both.
     let core_receiver = super::core_method_names::defined_by_every_object(name.as_str())
-        || (super::core_method_names::defined_by_a_core_value(name.as_str())
+        || (!super::core_method_names::core_value_definers(name.as_str()).is_empty()
             && recv.ty.as_ref().is_none_or(may_hold_a_core_value));
     let arms = if bang || core_receiver { None } else { narrowing(&name, definers, parents) };
     let mut replaced = match arms {

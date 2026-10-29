@@ -1019,10 +1019,11 @@ module ActiveRecord
     # where appending both made SQLite reject every column of the joined
     # table as ambiguous.
     def joins(*specs)
-      spawn.joins_specs!(specs)
+      spawn.joins_specs!("joins", specs)
     end
 
-    def joins_specs!(specs)
+    def joins_specs!(method, specs)
+      raise ArgumentError, "The method .#{method}() must contain arguments." if specs.empty?
       specs.each { |spec| joins!(spec) }
       self
     end
@@ -1036,7 +1037,7 @@ module ActiveRecord
     end
 
     def left_outer_joins(*specs)
-      spawn.joins_specs!(specs)
+      spawn.joins_specs!("left_outer_joins", specs)
     end
 
     def join_fragment(spec)
@@ -1050,7 +1051,7 @@ module ActiveRecord
 
     # `left_joins` — Rails alias for `left_outer_joins`.
     def left_joins(*specs)
-      spawn.joins_specs!(specs)
+      spawn.joins_specs!("left_joins", specs)
     end
 
     # `select(:id, :username, "raw AS x")` — the PROJECTION, and the

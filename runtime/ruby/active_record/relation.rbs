@@ -169,7 +169,7 @@ module ActiveRecord
     def having: (String condition, *untyped args) -> Relation
     def having_args!: (String condition, Array[untyped] args) -> Relation
     def joins: (*(String | Symbol) specs) -> Relation
-    def joins_specs!: (Array[String | Symbol] specs) -> Relation
+    def joins_specs!: (String method, Array[String | Symbol] specs) -> Relation
     def joins!: (String | Symbol spec) -> Relation
     def join_fragment: (String | Symbol spec) -> String
     def left_outer_joins: (*(String | Symbol) specs) -> Relation

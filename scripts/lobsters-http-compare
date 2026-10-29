@@ -40,9 +40,9 @@ echo "== candidate: $cand" >&2
 echo "== status and redirects" >&2
 ruby -rjson -e '
   ref, cand = ARGV.map { |d| [JSON.parse(File.read("#{d}/_status.json")), JSON.parse(File.read("#{d}/_location.json"))] }
-  bad = (ref[0].keys | cand[0].keys).reject { |k| ref[0][k] == cand[0][k] && ref[1][k] == cand[1][k] }
-  bad.each { |k| warn format("  %-32s ref %s %s  cand %s %s", k, ref[0][k], ref[1][k], cand[0][k], cand[1][k]) }
-  warn "  #{ref[0].size - bad.size}/#{ref[0].size} steps answer the same status (and Location)"
+  same = ->(k) { ref[0][k] == cand[0][k] && ref[1][k] == cand[1][k] }
+  (ref[0].keys | cand[0].keys).reject(&same).each { |k| warn format("  %-32s ref %s %s  cand %s %s", k, ref[0][k], ref[1][k], cand[0][k], cand[1][k]) }
+  warn "  #{ref[0].keys.count(&same)}/#{ref[0].size} steps answer the same status (and Location)"
 ' "$out/ref" "$out/cand"
 echo "== content" >&2
 exec "$here/lobsters-content-diff" "$out/ref" "$out/cand" --md "$out/report.md" --json "$out/report.json"

@@ -1,7 +1,8 @@
 //! `left_outer_joins(:post, :author)` joins both, as Rails' variadic
 //! `joins` family does. lobsters' `Moderation.for_story` is
 //! `left_outer_joins(:story, :comment)`; the runtime took one spec, so
-//! every story page a moderator opened raised ArgumentError (500).
+//! every story page a moderator opened raised ArgumentError (500). With
+//! no association at all each raises ArgumentError, as Rails does.
 
 use super::emit_and_run;
 
@@ -18,6 +19,16 @@ got = [
   Comment.inner_both("other", "bob").count,
 ]
 raise "joins: #{got.inspect}" unless got == [2, 1]
+messages = %w[joins left_outer_joins left_joins].map do |m|
+  begin
+    Comment.all.public_send(m)
+    "no error"
+  rescue ArgumentError => e
+    e.message
+  end
+end
+want = ["The method .joins() must contain arguments.", "The method .left_outer_joins() must contain arguments.", "The method .left_joins() must contain arguments."]
+raise "empty joins: #{messages.inspect}" unless messages == want
 puts "joins passed"
 "#;
 
