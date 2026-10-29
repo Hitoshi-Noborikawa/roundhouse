@@ -358,7 +358,18 @@ module Main
   # included. They sit behind ActionDispatch::Static, so a file sent
   # from static/ or public/ carries neither, and the /cable upgrade is
   # left as Action Cable answers it.
+  #
+  # A gem's middleware (runtime/request_hooks.rb) sits outside all of it,
+  # where its Railtie inserts it: at position 0.
   def self.dispatch(req, res)
+    unless RequestHooks.request_begin(req, res)
+      Main.dispatch_app(req, res)
+    end
+    RequestHooks.request_end(req, res)
+    nil
+  end
+
+  def self.dispatch_app(req, res)
     started = ActionDispatch::Runtime.clock_time
     Main.dispatch_request(req, res)
     return nil if res.file_path.length > 0 || res.upgrading_ws
