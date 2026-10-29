@@ -12825,6 +12825,17 @@ mod tests {
         assert!(!names_constant("msg = \"[RestClient]\"\n", "RestClient"));
     }
 
+    /// An app body that names ElasticAPM only as a value still declares
+    /// elastic-apm: its marker is a constant, read by `names_constant`.
+    #[test]
+    fn elastic_apm_as_a_value_declares_the_gem() {
+        assert!(compiler_runtime_gems().iter().any(|(m, gem)| {
+            *gem == "elastic-apm" && matches!(m, Marker::Constant("ElasticAPM"))
+        }));
+        assert!(names_constant("APM = ElasticAPM\n", "ElasticAPM"));
+        assert!(names_constant("instrument(ElasticAPM)\n", "ElasticAPM"));
+    }
+
     /// A test body that alone names a `lower::ruby_family_gems` gem declares
     /// and requires it.
     #[test]
