@@ -75,6 +75,7 @@ JRUBY_BIND_INPUTS = {
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
     "date_columns_spinel",
+    "temporal_initialize_spinel",
     "framework_tests_spinel",
     "spinel_web_push_crypto",
     "sponge_random",

@@ -2741,25 +2741,24 @@ fn synth_initialize(
         }
 
         if column.is_temporal() {
-            // Temporal columns: callers pass native Date or Time values
-            // (`Username.create!(created_at: user.created_at)` in
-            // lobsters), so the attrs value can't be stuffed into the
-            // raw ISO-text slot directly. First the STANDARD
-            // `attrs[:col] || <default>` raw-slot assignment — the
-            // exact pre-existing shape every target compiles (a Time
-            // value transiently lands in the raw slot; nothing reads
-            // between the two statements) — then a nil-guarded
-            // normalize through the selected format intrinsic, the
-            // same funnel `synth_temporal_writer` uses, called
-            // directly because several emitters render the public
-            // `<col>=` MethodDef without a property-setter
-            // counterpart for the computed getter (tsc TS2540). On
-            // the lenient ruby-family runtime the intrinsic passes
-            // stored-text strings through unchanged. rust strips the
-            // guard (let-binding constructor can't express it —
-            // honest not-normalized subset); hydration is unaffected
-            // (`from_row`/`from_stmt` write `<col>_raw=` directly).
-            let standard = if nullable {
+            // The Ruby-family runtime calls the typed raw writer before
+            // normalizing a supplied Date/Time below. Seed only its stored
+            // default, so a native value never transiently enters String.
+            // Strict constructors drop the guarded normalization and still
+            // need their flat attrs lookup until they can express that route.
+            let standard = if runtime_relation == super::RuntimeRelation::Present {
+                let seed = if nullable { nil_lit() } else { default };
+                // Keep the old fallback's shared frozen String: a bare
+                // constructor must not allocate one String per timestamp.
+                if matches!(&*seed.node, ExprNode::Lit { value: Literal::Str { .. } }) {
+                    with_ty(Expr::new(Span::synthetic(), ExprNode::Send {
+                        recv: Some(seed), method: Symbol::from("freeze"), args: vec![],
+                        block: None, parenthesized: false,
+                    }), Ty::Str)
+                } else {
+                    seed
+                }
+            } else if nullable {
                 lookup.clone()
             } else {
                 Expr::new(
