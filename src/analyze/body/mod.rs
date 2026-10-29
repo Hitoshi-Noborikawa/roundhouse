@@ -2229,6 +2229,9 @@ impl<'a> BodyTyper<'a> {
                 ) {
                     return t;
                 }
+                if let Some(t) = recv.as_ref().and_then(|recv| send::literal_array_extreme_ty(recv, method, args, block.is_some())) {
+                    return t;
+                }
                 if let Some(t) = self.relation_extreme_ty(
                     recv.as_ref(),
                     recv_ty.as_ref(),
