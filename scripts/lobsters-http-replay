@@ -40,6 +40,8 @@
 #                     latest POST's redirect named (a new comment's
 #                     `#c_…`, a new story's `/s/…`); {last_location} is
 #                     the path that redirect named, whatever the record.
+#                     {input:NAME} is the value of the last page's form
+#                     field NAME.
 #   --email E         login email    (default $LOBSTERS_EMAIL)
 #   --password P      login password (default $LOBSTERS_PASSWORD)
 #   --username U      for {username} (default $LOBSTERS_USERNAME, else
@@ -236,7 +238,15 @@ steps.each do |step|
   end
 end
 missing = ->(s) { s.scan(/\{(\w+)\}/).flatten.find { |k| ids[k].nil? } }
-expand = ->(s) { s.gsub(/\{(\w+)\}/) { ids[$1] } }
+# `{input:NAME}`: the value of the last page's form field NAME (a record's database id a form carries, which no URL names).
+input_value = lambda do |name|
+  body = $last_body.to_s
+  q = Regexp.escape(name)
+  v = body[/<input[^>]*name="#{q}"[^>]*value="([^"]*)"/, 1] || body[/<input[^>]*value="([^"]*)"[^>]*name="#{q}"/, 1]
+  abort "lobsters-http-replay: no form field #{name.inspect} on the last page" unless v
+  enc(v.gsub("&amp;", "&").gsub("&quot;", '"').gsub("&#39;", "'").gsub("&lt;", "<").gsub("&gt;", ">"))
+end
+expand = ->(s) { s.gsub(/\{(\w+)\}/) { ids[$1] }.gsub(/\{input:([^}]+)\}/) { input_value.($1) } }
 
 # ── the visits ───────────────────────────────────────────────────────
 FileUtils.mkdir_p(opts[:dump])

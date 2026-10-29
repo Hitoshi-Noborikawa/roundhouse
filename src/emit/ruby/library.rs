@@ -3006,6 +3006,21 @@ fn resolve_through_chain(
                 "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
             )]
         }
+        // A polymorphic source named by `source_type:` (lobsters'
+        // `ModMail#comment_references`): the same join, restricted to the
+        // rows of that type. Without the type the reader fell back to a
+        // direct has_many and read a `comments.mod_mail_id` column.
+        Association::BelongsTo { foreign_key: src_fk, polymorphic: true, .. } if thr_through.is_none() => {
+            let crate::lower::model_to_library::ThroughWriterJoin::ResolvedPolymorphic(_, _, _, _, type_col) =
+                crate::lower::model_to_library::through_writer_join(model, models, name)
+            else {
+                return None;
+            };
+            let type_name = target.0.as_str().trim_start_matches("::").replace('\'', "''");
+            vec![format!(
+                "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id AND {thr_table}.{type_col} = '{type_name}'{owner_type}"
+            )]
+        }
         // The source is a plain `has_many` on the join model, so the
         // foreign key is on the TARGET table and the join points the
         // other way (campfire: `has_many :reachable_messages, through:
@@ -6247,6 +6262,7 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
                 (_, ExprNode::Var { name, .. }) if all_models.contains(&crate::naming::camelize(name.as_str())) => {
                     Some(crate::naming::camelize(name.as_str()))
                 }
+                (_, ExprNode::Var { name, .. }) => sig.local_records.get(name.as_str()).cloned(),
                 _ => None,
             };
             let owned = recv_model

@@ -945,7 +945,13 @@ impl<'a> SourceContractIndex<'a> {
             index.add_methods(&class.name, class.methods.iter(), false);
             index.virtual_owners.push(&class.name);
         }
+        // Not verified when two kinds of source declare one owner (a model and a library class): which file the emit writes last decides the constructor.
+        let mut kinds: HashMap<ClassId, usize> = HashMap::default();
+        for name in &class_owners {
+            *kinds.entry(name.clone()).or_default() += 1;
+        }
         for model in &app.models {
+            *kinds.entry(model.name.clone()).or_default() += 1;
             index.add_fragment(
                 &model.name,
                 model.parent.as_ref(),
@@ -957,6 +963,7 @@ impl<'a> SourceContractIndex<'a> {
             index.virtual_owners.push(&model.name);
         }
         for module in &app.test_modules {
+            *kinds.entry(module.name.clone()).or_default() += 1;
             index.add_fragment(
                 &module.name,
                 module.parent.as_ref(),
@@ -971,7 +978,13 @@ impl<'a> SourceContractIndex<'a> {
         // Controllers' spliced concern methods are already among their
         // actions, so the includes add nothing a lookup could find.
         for controller in &app.controllers {
+            *kinds.entry(controller.name.clone()).or_default() += 1;
             index.add_fragment(&controller.name, controller.parent.as_ref(), std::iter::empty());
+        }
+        for (owner, n) in kinds {
+            if n > 1 {
+                index.redefined.insert(owner);
+            }
         }
         for (owner, method) in actions {
             index.add_methods(owner, std::iter::once(method), false);

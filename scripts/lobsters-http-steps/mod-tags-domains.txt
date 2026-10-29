@@ -6,7 +6,7 @@ GET /t/replay
 GET /mod/tags/replay/edit
 POST /mod/tags/replay _method=patch&tag[description]=Edited+by+the+replay&tag[category_name]=general
 GET /tags
-GET /domains/example.com
-GET /mod/domains/example.com/edit
-POST /mod/domains_ban/example.com _method=patch&domain[banned_reason]=Replay+ban
-GET /domains/example.com
+GET /domains/example.com -> 404
+GET /mod/domains/example.com/edit -> 404
+POST /mod/domains_ban/example.com _method=patch&domain[banned_reason]=Replay+ban -> 404
+GET /domains/example.com -> 404

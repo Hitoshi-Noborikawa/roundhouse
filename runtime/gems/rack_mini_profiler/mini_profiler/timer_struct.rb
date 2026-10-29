@@ -117,7 +117,10 @@ module Rack
         end
 
         def self.viewed(json, client_timings)
-          json.sub(UNVIEWED, "\"has_user_viewed\":true,\"client_timings\":" + client_timings)
+          # Not `sub` with a String: it reads the replacement's backslashes as references, and the client timings are request data.
+          at = json.index(UNVIEWED)
+          return json if at.nil?
+          json[0, at] + "\"has_user_viewed\":true,\"client_timings\":" + client_timings + json[at + UNVIEWED.length, json.length - at - UNVIEWED.length]
         end
 
         # Page#duration_ms and #name read back from the stored JSON, for the share page.

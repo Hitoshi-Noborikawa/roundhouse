@@ -710,6 +710,7 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut blocked = Vec::new();
     let mut written: Vec<(ClassId, Symbol, Ty)> = Vec::new();
     let mut merged: Vec<(ClassId, Symbol)> = Vec::new();
+    let mut direct: Vec<(ClassId, Symbol)> = Vec::new();
     for controller in controllers {
         let actions: Vec<_> = controller.actions().cloned().collect();
         let helpers: BTreeMap<Symbol, ClassId> = helper_spec_map(&actions, specs).into_iter()
@@ -724,6 +725,14 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                     if let (Some(class), Some(key), Some(ty)) = (class, literal_key(key), written_ty(value)) {
                         written.push((class, key, ty));
                     }
+                }
+                // A permit that names the key itself makes it a request key for the spec every call shares.
+                if let ExprNode::Send { method, .. } = &*expr.node
+                    && method.as_str() != "merge"
+                    && let Some((resource, fields, _)) = match_permit_call_full(expr)
+                    && let Some(spec) = specs.find(&resource, &fields, &nested_signature(expr))
+                {
+                    direct.extend(fields.into_iter().map(|f| (spec.class_id.clone(), f)));
                 }
                 if let ExprNode::Send { recv: Some(chain), method, args, block: None, .. } = &*expr.node
                     && method.as_str() == "merge"
@@ -791,7 +800,7 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
             spec.lookup_blocked = true;
         }
     }
-    for (class, key) in merged {
+    for (class, key) in merged.into_iter().filter(|m| !direct.contains(m)) {
         if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
             spec.merged_only.insert(key);
         }
