@@ -196,10 +196,15 @@ fn prepare_phase(stmt: &Node<'_>) -> Phase {
     if super::util::constant_id_str(&call.name()) != "to_prepare" || call.block().is_none() {
         return Phase::Boot;
     }
-    let on_config = call
-        .receiver()
-        .and_then(|r| r.as_call_node())
-        .is_some_and(|r| super::util::constant_id_str(&r.name()) == "config");
+    // Every railtie's `config` shares one `to_prepare` list, and
+    // `Rails.configuration` is the application's `config`.
+    let on_config = call.receiver().and_then(|r| r.as_call_node()).is_some_and(|r| {
+        match super::util::constant_id_str(&r.name()) {
+            "config" => true,
+            "configuration" => r.receiver().and_then(|rr| super::util::constant_path_of(&rr)).is_some_and(|p| p == ["Rails"]),
+            _ => false,
+        }
+    });
     if on_config { Phase::ConfigPrepare } else { Phase::ReloaderPrepare }
 }
 

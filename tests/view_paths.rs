@@ -118,6 +118,38 @@ fn initializer_files_run_before_reloader_then_config_to_prepare_blocks_and_on_lo
 }
 
 #[test]
+fn rails_configuration_to_prepare_runs_with_the_config_to_prepare_blocks() {
+    // `Rails.configuration` is `Rails.application.config`, so this boots
+    // to the same `[themes/next, themes/edge, themes/beta, app/views]`.
+    let pages = "class PagesController < ApplicationController\n  def index\n  end\n\n  def show\n  end\n\n  def edit\n  end\nend\n";
+    let (app, errors) = ingest(&[
+        (
+            "config/initializers/a_view_paths.rb",
+            "Rails.configuration.to_prepare do\n  ActionController::Base.prepend_view_path Rails.root.join(\"app\", \"views\", \"themes\", \"next\")\nend\n",
+        ),
+        (
+            "config/initializers/b_view_paths.rb",
+            "ActiveSupport.on_load(:action_controller) do\n  prepend_view_path \"#{Rails.root}/app/views/themes/beta\"\nend\n",
+        ),
+        (
+            "config/initializers/c_view_paths.rb",
+            "ActiveSupport::Reloader.to_prepare do\n  ActionController::Base.prepend_view_path \"app/views/themes/edge\"\nend\n",
+        ),
+        ("app/controllers/pages_controller.rb", pages),
+        ("app/views/themes/next/pages/index.html.erb", "next\n"),
+        ("app/views/themes/beta/pages/index.html.erb", "beta\n"),
+        ("app/views/themes/beta/pages/show.html.erb", "beta\n"),
+        ("app/views/themes/beta/pages/edit.html.erb", "beta\n"),
+        ("app/views/themes/edge/pages/index.html.erb", "edge\n"),
+        ("app/views/themes/edge/pages/show.html.erb", "edge\n"),
+    ]);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(origin(&app, "pages/index", "html").as_deref(), Some("themes/next/pages/index.html.erb"));
+    assert_eq!(origin(&app, "pages/show", "html").as_deref(), Some("themes/edge/pages/show.html.erb"));
+    assert_eq!(origin(&app, "pages/edit", "html").as_deref(), Some("themes/beta/pages/edit.html.erb"));
+}
+
+#[test]
 fn class_body_prepend_append_and_assignment_change_only_their_own_class() {
     let first = controller("FirstController", "ApplicationController", "  prepend_view_path(\"app/views/alt\") { nil }\n");
     let last = controller("LastController", "ApplicationController", "  append_view_path Rails.root.join(\"app/views/alt\")\n");
