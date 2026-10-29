@@ -23,7 +23,7 @@ fn a_chained_terminal_keys_its_condition_hash_off_the_association() {
         .edit(
             "app/models/comment.rb",
             "  validates :commenter, presence: true\n",
-            "  validates :commenter, presence: true\n\n  def self.recent_on(a)\n    Comment.where(\"created_at >= ?\", 1.day.ago).find_by(article: a, commenter: \"x\")\n  end\n\n  def self.any_recent_on?(a)\n    Comment.where(\"created_at >= ?\", 1.day.ago).exists?(article: a)\n  end\n\n  def self.in_window(a)\n    Comment.where(article: a).find_by(created_at: 1.day.ago..)\n  end\n\n  def self.by_id_list(a)\n    ids = [a.id]\n    Comment.where(commenter: \"x\").find_by(article: ids)\n  end\n",
+            "  validates :commenter, presence: true\n\n  def self.recent_on(a)\n    Comment.where(\"created_at >= ?\", 1.day.ago).find_by(article: a, commenter: \"x\")\n  end\n\n  def self.any_recent_on?(a)\n    Comment.where(\"created_at >= ?\", 1.day.ago).exists?(article: a)\n  end\n\n  def self.in_window(a)\n    Comment.where(article: a).find_by(created_at: 1.day.ago..)\n  end\n\n  def self.by_id_list(a)\n    ids = [a.id.to_i]\n    Comment.where(commenter: \"x\").find_by(article: ids)\n  end\n",
         )
         .run_ruby(ASSERTIONS);
     run.assert_passes();
