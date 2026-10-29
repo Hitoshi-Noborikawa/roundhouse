@@ -155,6 +155,13 @@ pub const SINGLETON_BODY: u64 = 1 << 28;
 /// read it as `X.singleton_class::NAME`, where it lives.
 pub const SINGLETON_CONSTANT_REF: u64 = 1 << 29;
 
+/// Analysis admitted this receiverless send as Kernel's `Rational(...)`,
+/// `Pathname(...)` or `URI(...)`: its own class, on its own side, defines
+/// no method of that name. Only the ruby family and spinel have the
+/// libraries, so `project::report_ruby_only_sends` refuses it elsewhere.
+/// The mark stays when lowering spells `Pathname(x)` as `Pathname.new(x)`.
+pub const KERNEL_CONVERSION: u64 = 1 << 30;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

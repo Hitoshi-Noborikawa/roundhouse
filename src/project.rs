@@ -1772,8 +1772,10 @@ fn report_self_bindings(app: &App, target: BuildTarget) {
 /// `Array.try_convert` (what a nested splat desugars to), `include?` on
 /// a `Class`/`Module` value (Module's ancestry query, which the other
 /// targets' `include?` is not), Kernel's `Rational(...)`, which a
-/// rational literal ingests as, Kernel's `Integer(...)` and
-/// `Float(...)`, and the ActiveRecord methods only connection.rb defines.
+/// rational literal ingests as, Kernel's `Integer(...)` and `Float(...)`,
+/// the `Pathname(...)` and `URI(...)` conversions analysis admitted as
+/// Kernel's (`expr::KERNEL_CONVERSION`, decided for the call's own class),
+/// and the ActiveRecord methods only connection.rb defines.
 /// The other emitters render them as the method name on
 /// the receiver, which nothing there defines, so they refuse each by name.
 /// `alias read_attribute_for_serialization send`: the alias delegates to a
@@ -1881,9 +1883,10 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
         | BuildTarget::Spinel | BuildTarget::Roda) {
         return;
     }
-    // Not per call site: a receiverless send in a model or library body
-    // carries no mark of the method it dispatched to, so an app method of
-    // the same name anywhere keeps its calls out of the refusal.
+    // Not per call site, except for the conversions analysis marked
+    // (`expr::KERNEL_CONVERSION`): a receiverless send in a model or library
+    // body carries no mark of the method it dispatched to, so an app method
+    // of the same name anywhere keeps its calls out of the refusal.
     let defines = |name: &str| {
         app.models.iter().any(|model| model.methods().any(|method| method.name.as_str() == name))
             || app.library_classes.iter().any(|class| class.methods.iter().any(|method| method.name.as_str() == name))
@@ -1898,10 +1901,14 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
         use crate::ty::Ty;
         if let ExprNode::Send { recv, method, .. } = &*expr.node {
             let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
+            let admitted = expr.decisions & crate::expr::KERNEL_CONVERSION != 0;
             let construct = match (recv, method.as_str()) {
-                (None, "Rational") if kernel.contains(&"Rational") => Some("Kernel#Rational"),
+                (None, "Rational") if kernel.contains(&"Rational") || admitted => Some("Kernel#Rational"),
                 (None, "Integer") if kernel.contains(&"Integer") => Some("Kernel#Integer"),
                 (None, "Float") if kernel.contains(&"Float") => Some("Kernel#Float"),
+                (None, "URI") if admitted => Some("Kernel#URI"),
+                // Lowering's spelling of an admitted `Pathname(path)`.
+                (Some(_), "new") if admitted => Some("Kernel#Pathname"),
                 (None, "throw") if kernel.contains(&"throw") => Some("Kernel#throw"),
                 (None, "catch") if kernel.contains(&"catch") => Some("Kernel#catch"),
                 (_, "update_attribute") if kernel.contains(&"update_attribute") => Some("ActiveRecord::Base#update_attribute"),
