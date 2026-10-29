@@ -16,6 +16,44 @@ use super::{
     var_ref, view_helpers_call, ViewCtx, ViewKind,
 };
 
+/// A collection render whose `each` sets `flag` before each record
+/// renders, so `render(x) || fallback` can tell whether anything
+/// rendered without evaluating the collection a second time. `None`
+/// for the renders of one partial and for the cached collections,
+/// whose records render through several loops, hits from the store.
+pub(super) fn emit_flagged_collection_render(
+    rp: &RenderPartial<'_>,
+    flag: &Symbol,
+    ctx: &ViewCtx,
+) -> Option<Expr> {
+    match rp {
+        RenderPartial::Collection { .. }
+        | RenderPartial::Association { .. }
+        | RenderPartial::TypedCollection { .. }
+        | RenderPartial::CollectionNamed { cached: false, cached_key: None, .. } => {}
+        _ => return None,
+    }
+    let mut each = emit_render_partial(rp, ctx)?;
+    let ExprNode::Send { method, block: Some(block), .. } = &mut *each.node else {
+        return None;
+    };
+    if method.as_str() != "each" {
+        return None;
+    }
+    let ExprNode::Lambda { body, .. } = &mut *block.node else {
+        return None;
+    };
+    let set = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: flag.clone() },
+            value: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: true } }),
+        },
+    );
+    *body = seq(vec![set, body.clone()]);
+    Some(each)
+}
+
 pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Option<Expr> {
     match rp {
         // `render articles` (collection) — iterate, rendering one
@@ -89,6 +127,13 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 false,
             );
             Some(emit_partial_each(&assoc_recv, method, ctx))
+        }
+        // `render @author.posts.order(:title)` — the chain itself is the
+        // each receiver, and the element class's partial renders each
+        // record, exactly as `render partial: "posts/post", collection:
+        // <chain>` does.
+        RenderPartial::TypedCollection { collection, partial } => {
+            emit_named_collection_each(collection, partial, None, None, ctx)
         }
         // `render partial: "stories/listdetail", collection: stories, as:
         // :story` — iterate `collection`, calling the explicitly-named
