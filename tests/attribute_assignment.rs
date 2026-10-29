@@ -73,3 +73,54 @@ fn declared_json_assignment_runs_with_native_rbs() {
     );
     has_json_app().run_spinel_with_rbs(&script).assert_passes();
 }
+
+fn array_app() -> emit_and_run::Overlay {
+    app("class AttributeRecord < ApplicationRecord\nend\n").write(
+        "db/schema.rb",
+        "ActiveRecord::Schema.define do\n  create_table :attribute_records do |t|\n    t.string :tags, array: true\n    t.bigint :numbers, array: true\n  end\nend\n",
+    )
+}
+
+#[test]
+fn hash_assignment_preserves_stored_arrays() {
+    array_app()
+        .run_ruby(include_str!(
+            "support/attribute_assignment/array_contract.rb"
+        ))
+        .assert_passes();
+}
+
+#[test]
+fn a_temporal_array_reaches_the_public_writer() {
+    array_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :attribute_records do |t|\n    t.date :days, array: true\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"require "date"
+spy = Module.new do
+  attr_reader :received_days
+  def days=(value)
+    @received_days = value
+  end
+end
+AttributeRecord.prepend(spy)
+record = AttributeRecord.new
+days = [Date.new(2024, 2, 3)]
+record.assign_attributes(days: days)
+raise "date array did not reach public writer" unless record.received_days.equal?(days)
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn stored_array_assignment_runs_with_native_rbs() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        include_str!("support/attribute_assignment/array_contract.rb")
+    );
+    array_app().run_spinel_with_rbs(&script).assert_passes();
+}

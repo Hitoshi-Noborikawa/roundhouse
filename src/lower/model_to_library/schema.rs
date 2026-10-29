@@ -4570,7 +4570,7 @@ fn synth_mass_attribute_writer(model: &Model, table: &Table) -> MethodDef {
             continue;
         }
         let slot = ColumnSlot::classify(col, model);
-        let (writer, argument) = if source.is_some() || slot.is_json() {
+        let (writer, argument) = if source.is_some() || slot.is_json() || col.array {
             (setter, raw())
         } else if let Some(argument) = crate::lower::has_json::column_assign(
             model,
