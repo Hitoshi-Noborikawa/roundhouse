@@ -66,6 +66,49 @@ const TEMPLATES: &[(&str, &str)] = &[
         "set_block_param",
         "json.count @widgets.size\njson.set!(:gadget) do |g|\n  g.name \"g\"\nend\n",
     ),
+    // An inline partial whose `cached:` is a call: jbuilder evaluates
+    // it (and raises `RuntimeError: bad` here); the lowered call to the
+    // partial would not. Both spellings.
+    (
+        "partial_cached_call",
+        "json.count @widgets.size\njson.gadget @widgets.first, partial: \"widgets/widget\", as: :widget, cached: raise(\"bad\")\n",
+    ),
+    (
+        "set_partial_cached_call",
+        "json.count @widgets.size\njson.set! :gadget, @widgets.first, partial: \"widgets/widget\", as: :widget, cached: raise(\"bad\")\n",
+    ),
+    // Any other key is a local jbuilder hands the partial; the lowered
+    // call passes only the record.
+    (
+        "partial_local",
+        "json.count @widgets.size\njson.gadget @widgets.first, partial: \"widgets/widget\", as: :widget, label: @widgets.size\n",
+    ),
+];
+
+/// An inline partial on one record or on a collection, in both
+/// spellings, and what jbuilder renders for each: an object for the
+/// record, one object per element for the collection.
+const INLINE_PARTIAL: &[(&str, &str, &str)] = &[
+    (
+        "partial_record",
+        "json.count @widgets.size\njson.gadget @widgets.first, partial: \"widgets/widget\", as: :widget\n",
+        r#"{"count":2,"gadget":{"id":1,"name":"a"}}"#,
+    ),
+    (
+        "set_partial_record",
+        "json.count @widgets.size\njson.set! :gadget, @widgets.first, partial: \"widgets/widget\", as: :widget\n",
+        r#"{"count":2,"gadget":{"id":1,"name":"a"}}"#,
+    ),
+    (
+        "partial_collection",
+        "json.count @widgets.size\njson.gadgets @widgets, partial: \"widgets/widget\", as: :widget\n",
+        r#"{"count":2,"gadgets":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}"#,
+    ),
+    (
+        "set_partial_collection",
+        "json.count @widgets.size\njson.set! :gadgets, @widgets, partial: \"widgets/widget\", as: :widget\n",
+        r#"{"count":2,"gadgets":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}"#,
+    ),
 ];
 
 /// `json.set!` with a literal key, which lowers as `json.<key>` does,
@@ -101,7 +144,10 @@ fn app() -> roundhouse::App {
     let mut controller = String::from("class WidgetsController < ApplicationController\n");
     let mut routes = String::from("Rails.application.routes.draw do\n");
     let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
-    let all = TEMPLATES.iter().copied().chain(SET_BANG.iter().map(|(n, t, _)| (*n, *t)));
+    let all = TEMPLATES
+        .iter()
+        .copied()
+        .chain(SET_BANG.iter().chain(INLINE_PARTIAL).map(|(n, t, _)| (*n, *t)));
     for (name, template) in all {
         controller.push_str(&format!("  def {name}\n    @widgets = Widget.all\n    render :{name}\n  end\n\n"));
         routes.push_str(&format!(
@@ -163,7 +209,7 @@ fn render_all(tag: &str, files: &[(String, String)]) -> HashMap<String, String> 
         dir.join("app/views/widgets/_widget_json.rb").display().to_string()
     ));
     script.push_str("Widget = Struct.new(:id, :name)\nwidgets = [Widget.new(1, \"a\"), Widget.new(2, \"b\")]\n");
-    for name in TEMPLATES.iter().map(|(n, _)| *n).chain(SET_BANG.iter().map(|(n, _, _)| *n)) {
+    for name in TEMPLATES.iter().map(|(n, _)| *n).chain(SET_BANG.iter().chain(INLINE_PARTIAL).map(|(n, _, _)| *n)) {
         let file = dir.join(format!("app/views/widgets/{name}_json.rb"));
         script.push_str(&format!(
             "require {file:?}\nout = begin\n  Views::Widgets.{name}_json(widgets)\nrescue => e\n  \"raises #{{e.class}}: #{{e.message}}\"\nend\nputs \"{name}\\t#{{out}}\"\n",
@@ -223,7 +269,8 @@ fn an_unrecognised_json_call_is_refused_where_it_stands() {
 }
 
 /// On CRuby each template raises the refusal. Jbuilder raises
-/// `RuntimeError: bad` on `options_raise` and renders the others; before
+/// `RuntimeError: bad` on `options_raise` and the two `cached:` calls
+/// and renders the others; before
 /// the fix the first four rendered `{"count":2}` and `set_block_param`
 /// raised `NoMethodError` mapping over the Symbol `:gadget`.
 #[test]
@@ -265,6 +312,27 @@ fn set_bang_with_a_literal_key_lowers_as_the_key() {
 fn set_bang_with_a_literal_key_renders_what_jbuilder_renders() {
     let out = render_all("set_bang", &emitted());
     for (name, _, expected) in SET_BANG {
+        assert_eq!(&out[*name], expected, "{name}");
+    }
+}
+
+/// `json.<key> col, partial: P, as: V` and its `set!` spelling render
+/// the partial once per element when the positional is a collection,
+/// and once when it is a record. Before, the collection was passed to
+/// one call of the partial, which raised `NoMethodError` reading `id`
+/// on the Array.
+#[test]
+fn an_inline_partial_pair_renders_what_jbuilder_renders() {
+    let files = emitted();
+    for name in ["partial_collection", "set_partial_collection"] {
+        let src = view(&files, name);
+        assert!(
+            src.contains("widgets.map { |widget| Views::Widgets.widget_json(widget) }.join(\",\")"),
+            "{name}: one partial call per element:\n{src}"
+        );
+    }
+    let out = render_all("inline_partial", &files);
+    for (name, _, expected) in INLINE_PARTIAL {
         assert_eq!(&out[*name], expected, "{name}");
     }
 }

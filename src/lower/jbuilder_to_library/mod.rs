@@ -1284,8 +1284,15 @@ fn emit_pairs(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
                 ));
+                let arg_ty = ctx.span_types.get(&arg.span);
                 let arg = rewrite_h_escape(&rewrite_route_helpers(arg, ctx));
-                out.extend(emit_partial_call(partial_path, vec![(as_name.clone(), arg)], ctx));
+                if arg_ty.is_some_and(is_collection_ty) {
+                    // A collection: Jbuilder renders the partial once
+                    // per element, into an array.
+                    out.extend(emit_array_partial(&arg, partial_path, as_name, ctx));
+                } else {
+                    out.extend(emit_partial_call(partial_path, vec![(as_name.clone(), arg)], ctx));
+                }
                 sep = Sep::After;
             }
             JbStmt::Nested { key, body } => {
@@ -2135,13 +2142,29 @@ fn classify_key<'a>(key: &str, args: &'a [Expr], block: &'a Option<Expr>) -> JbS
         // `json.<key> obj, partial: P, as: V` — one pair rendered
         // through a partial. Shares its options with `array!` and takes
         // the same two out; what differs is that the positional is ONE
-        // record, not a collection, so it emits an object where
-        // `array!` emits an array.
+        // record, so it emits an object where `array!` emits an array.
+        // A positional that is a collection renders one partial per
+        // element (jbuilder 2.15.1 `_set_inline_partial`); the walker
+        // picks that by the positional's type.
+        //
+        // The call passes the partial only its record. Any other key is
+        // a local Jbuilder hands the partial, which the call has no way
+        // to pass, and `cached:` is evaluated before Jbuilder renders:
+        // the shape is taken only with `partial:`, `as:` and `cached:`,
+        // all literals, and is refused otherwise.
         key if args.len() == 2 => {
             let arg = &args[0];
             let Some(opts) = extract_hash(&args[1]) else {
                 return JbStmt::Unknown;
             };
+            let options_ok = opts.iter().all(|(k, v)| {
+                matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                    if matches!(value.as_str(), "partial" | "as" | "cached"))
+                    && is_literal_value(v)
+            });
+            if !options_ok {
+                return JbStmt::Unknown;
+            }
             let (Some(partial_path), Some(as_name)) = (
                 hash_get_string(opts, "partial"),
                 hash_get_symbol(opts, "as"),
@@ -2399,6 +2422,17 @@ fn is_json_receiver(recv: &Expr) -> bool {
             ..
         } if method.as_str() == "json" && args.is_empty()
     )
+}
+
+/// Whether a value of type `ty` is always a collection: an Array, a
+/// Relation or an association collection, never nil.
+fn is_collection_ty(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Array { .. } | Ty::Relation { .. } => true,
+        Ty::Class { id, .. } => id.0.as_str().ends_with("Relation") || id.0.as_str().ends_with("CollectionProxy"),
+        _ => false,
+    }
 }
 
 /// Whether `stmt` is a call on the template's builder, `json.<m>(…)`.
