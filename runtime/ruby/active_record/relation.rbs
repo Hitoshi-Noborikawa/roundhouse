@@ -217,6 +217,7 @@ module ActiveRecord
     # array. Same over-claim as `map`/`collect` below.
     def preloaded: (untyped records, bool loaded) -> Relation
     def klass: () -> Class
+    def model: () -> Class
     def primary_key: () -> String
 
     # Collection cache key (see relation.rb for why it is not Rails'

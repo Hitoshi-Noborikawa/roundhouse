@@ -2535,6 +2535,7 @@ end
     super::discard::expand_discard_models(&mut app)?;
     // Before the macros: a macro's `extend Owner::ClassMethods` names the module this surfaces.
     super::referenced_carriers::surface_referenced_carriers(&mut app, &sources);
+    super::conditional_permit::apply(&mut app);
     let hook_macros_called = super::class_macros::hook_macro_calls(&app);
     super::model_macros::expand_model_macros(&mut app, &sources)?;
     // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
@@ -2584,6 +2585,8 @@ end
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
     expand_class_body_macros(&mut app)?;
+    // After the splice and the macros: a concern's action, or one a macro synthesizes, gates its permit too.
+    super::conditional_permit::apply(&mut app);
     // The same idea one base over: `const` / `prop` under a class
     // whose ancestry a sidecar says reaches `T::Props` IS the
     // `T::Struct` macro, and gets expanded rather than replayed. It

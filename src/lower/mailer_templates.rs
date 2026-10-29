@@ -54,6 +54,7 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
         .collect();
     let has_view = |name: &str, format: &str| views.iter().any(|(n, f, _)| n == name && f == format);
 
+    let callbacks = callback_names(app, &mailers);
     for lc in app.library_classes.iter_mut() {
         let class = lc.name.0.as_str().to_string();
         if !mailers.contains(&class) {
@@ -84,6 +85,7 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
                 closures: &closures,
                 views: &views,
                 defaults: &defaults,
+                callback: callbacks.contains(&action),
             };
             rewrite(&mut m.body, &site, &mut diags);
         }
@@ -105,6 +107,36 @@ struct Site<'a> {
     closures: &'a HashMap<ViewKey, Vec<Symbol>>,
     views: &'a [(String, String, bool)],
     defaults: &'a [(Expr, Expr)],
+    callback: bool,
+}
+
+/// The methods a mailer's callback chain calls (`ingest::mailer_callbacks`
+/// gives each action a body that starts with `__start_action` and calls
+/// them on `self`), the parents' included: an after_action of
+/// ApplicationMailer runs in its subclasses' actions.
+fn callback_names(app: &App, mailers: &BTreeSet<String>) -> crate::det::HashSet<String> {
+    fn calls(e: &Expr, starts: &mut bool, out: &mut Vec<String>) {
+        if let ExprNode::Send { recv, method, args, .. } = &*e.node {
+            if method.as_str() == "__start_action" {
+                *starts = true;
+            }
+            if matches!(recv.as_ref().map(|r| &*r.node), Some(ExprNode::SelfRef)) && args.is_empty() {
+                out.push(method.as_str().to_string());
+            }
+        }
+        e.node.for_each_child(&mut |c| calls(c, starts, out));
+    }
+    let mut out = crate::det::HashSet::default();
+    for lc in app.library_classes.iter().filter(|lc| mailers.contains(lc.name.0.as_str())) {
+        for m in &lc.methods {
+            let (mut starts, mut called) = (false, Vec::new());
+            calls(&m.body, &mut starts, &mut called);
+            if starts {
+                out.extend(called.into_iter().filter(|n| crate::ingest::mailer_callbacks::action_of(n) == n.as_str()));
+            }
+        }
+    }
+    out
 }
 
 /// The mailer and its mailer ancestors, nearest first.
@@ -197,6 +229,10 @@ fn rewrite(expr: &mut Expr, site: &Site<'_>, diags: &mut Vec<Diagnostic>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, site, diags));
     let ExprNode::Send { recv: None, method, args, block, parenthesized } = &mut *expr.node else { return };
     if method.as_str() != "mail" || args.len() > 1 {
+        return;
+    }
+    // Not a template render in a callback: a bare `mail` there reads the mail the action built (an after_action's), which the runtime answers.
+    if site.callback && args.is_empty() && block.is_none() {
         return;
     }
     let span = expr.span;

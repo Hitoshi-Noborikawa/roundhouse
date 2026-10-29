@@ -86,7 +86,7 @@ fn a_form_the_runtime_does_not_take_is_left_alone() {
 fn all_month_is_a_literal_range_for_where_to_render() {
     assert_eq!(
         emit("Event.where(starts_at: starts_at.all_month).count"),
-        "ActiveRecord::Relation.new(Event).where(\"(events.starts_at >= ? AND events.starts_at <= ?)\", ActiveSupport.beginning_of_month(self.starts_at), ActiveSupport.end_of_month(self.starts_at)).count"
+        "ActiveRecord::Relation.new(Event).where(\"(\\\"events\\\".\\\"starts_at\\\" >= ? AND \\\"events\\\".\\\"starts_at\\\" <= ?)\", ActiveSupport.beginning_of_month(self.starts_at), ActiveSupport.end_of_month(self.starts_at)).count"
     );
 }
 
@@ -95,11 +95,11 @@ fn all_month_is_a_literal_range_for_where_to_render() {
 fn a_range_beside_other_keys_splits_into_its_own_where() {
     assert_eq!(
         emit("Event.where(name: name, starts_at: starts_at.all_day).count"),
-        "ActiveRecord::Relation.new(Event).where(\"(events.starts_at >= ? AND events.starts_at <= ?)\", ActiveSupport.beginning_of_day(self.starts_at), ActiveSupport.end_of_day(self.starts_at)).where(name: self.name).count"
+        "ActiveRecord::Relation.new(Event).where(\"(\\\"events\\\".\\\"starts_at\\\" >= ? AND \\\"events\\\".\\\"starts_at\\\" <= ?)\", ActiveSupport.beginning_of_day(self.starts_at), ActiveSupport.end_of_day(self.starts_at)).where(name: self.name).count"
     );
     assert_eq!(
         emit("Event.find_by(name: name, starts_at: starts_at.all_week)"),
-        "ActiveRecord::Relation.new(Event).where(\"(events.starts_at >= ? AND events.starts_at <= ?)\", ActiveSupport.beginning_of_week(self.starts_at), ActiveSupport.end_of_week(self.starts_at)).find_by(name: self.name)"
+        "ActiveRecord::Relation.new(Event).where(\"(\\\"events\\\".\\\"starts_at\\\" >= ? AND \\\"events\\\".\\\"starts_at\\\" <= ?)\", ActiveSupport.beginning_of_week(self.starts_at), ActiveSupport.end_of_week(self.starts_at)).find_by(name: self.name)"
     );
     assert_eq!(emit("Event.where(name: name).count"), "ActiveRecord::Relation.new(Event).where({ name: self.name }).count");
 }
@@ -141,7 +141,7 @@ fn a_controller_where_on_all_month_renders_sql_bounds() {
         .expect("controller emitted");
     assert!(
         emitted.contains(
-            "where(\"(articles.created_at >= ? AND articles.created_at <= ?)\", \
+            "where(\"(\\\"articles\\\".\\\"created_at\\\" >= ? AND \\\"articles\\\".\\\"created_at\\\" <= ?)\", \
              ActiveSupport.beginning_of_month(ActiveSupport.now), ActiveSupport.end_of_month(ActiveSupport.now))\
              .where(title: \"x\")"
         ),

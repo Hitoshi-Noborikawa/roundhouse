@@ -1268,6 +1268,11 @@ module ActiveRecord
       @model
     end
 
+    # Rails' `alias model klass`; lobsters' moderator pages read the table name off whichever relation they filter.
+    def model
+      @model
+    end
+
     # Rails' relation answers its model's class methods; ancestry reads
     # `scope.primary_key` off the relation it is handed.
     def primary_key
@@ -3051,7 +3056,7 @@ module ActiveRecord
         ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
         if ids.empty?
           "1=0"
-        elsif ids.any? { |x| x.is_a?(Range) || x.is_a?(Bounds) }
+        elsif ids.any? { |x| x.nil? || x.is_a?(Range) || x.is_a?(Bounds) }
           array_with_ranges_predicate(qcol, ids)
         else
           "#{qcol} IN (#{escape_list(ids)})"
@@ -3105,10 +3110,10 @@ module ActiveRecord
       bind_literal(bound)
     end
 
-    # Rails' Array value holding a Range (`where(score: [3, 6..9])`):
-    # the scalars as one IN list, a `nil` as IS NULL, and each Range as
-    # its own comparison, ORed. An Array with no Range keeps the IN
-    # list above.
+    # Rails' Array value holding a Range or a nil (`where(score: [3,
+    # 6..9])`, `where(user_id: [1, nil])`): the scalars as one IN list, a
+    # `nil` as IS NULL, and each Range as its own comparison, ORed. An
+    # Array of scalars alone keeps the IN list above.
     def array_with_ranges_predicate(qcol, vals)
       scalars = []
       arms = []

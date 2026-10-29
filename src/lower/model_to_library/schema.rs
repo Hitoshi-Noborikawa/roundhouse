@@ -1789,19 +1789,45 @@ pub(super) fn push_update_typed_variants(
     methods: &mut Vec<MethodDef>,
     model: &crate::dialect::Model,
     fields: &[Symbol],
+    assocs: &[PermittedAssoc],
     table: &Table,
     spec: &crate::lower::controller_to_library::params::ParamsSpec,
 ) {
-    use crate::lower::controller_to_library::params::model_update_name;
+    use crate::lower::controller_to_library::params::{model_assign_name, model_update_name};
     for bang in [false, true] {
         methods.push(synth_update_typed(
             model,
             fields,
+            assocs,
             table,
             &spec.class_id,
             model_update_name(spec, bang),
+            TypedWrite::Update { bang },
         ));
     }
+    if spec.wants_assign {
+        methods.push(synth_update_typed(
+            model,
+            fields,
+            assocs,
+            table,
+            &spec.class_id,
+            model_assign_name(spec),
+            TypedWrite::Assign,
+        ));
+    }
+}
+
+pub(super) struct PermittedAssoc {
+    pub name: Symbol,
+    pub target: ClassId,
+    pub field_ty: Ty,
+}
+
+#[derive(Clone, Copy)]
+enum TypedWrite {
+    Update { bang: bool },
+    Assign,
 }
 
 /// `def self.create_from_params(p); instance = <Model>.from_params(p);
@@ -4361,13 +4387,14 @@ fn multiparameter_refusal(owner: &ClassId, doing: &str) -> Expr {
 fn synth_update_typed(
     model: &crate::dialect::Model,
     fields: &[Symbol],
+    assocs: &[PermittedAssoc],
     table: &Table,
     params_class_id: &ClassId,
     name: Symbol,
+    write: TypedWrite,
 ) -> MethodDef {
     let owner = &model.name;
     let p = Symbol::from("p");
-    let bang = name.as_str().ends_with('!');
 
     let mut stmts: Vec<Expr> = Vec::new();
     for field in fields {
@@ -4428,27 +4455,42 @@ fn synth_update_typed(
         ));
     }
 
-    stmts.insert(0, multiparameter_guard(model, Some(table), fields, &p, "updating"));
-
-    stmts.push(Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: None,
-            method: Symbol::from(if bang { "save!" } else { "save" }),
-            args: Vec::new(),
-            block: None,
-            parenthesized: false,
-        },
-    ));
-    if bang {
-        // update! returns the record — an explicit self read, not
-        // save!'s Base-typed return (strict targets type the
-        // difference).
-        stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
+    for assoc in assocs {
+        stmts.push(assoc_write(owner, assoc, &p));
     }
 
+    let doing = if matches!(write, TypedWrite::Assign) { "assigning" } else { "updating" };
+    stmts.insert(0, multiparameter_guard(model, Some(table), fields, &p, doing));
+
     let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![].into() };
-    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![].into() } } else { Ty::Bool };
+    let ret_ty = match write {
+        TypedWrite::Update { bang } => {
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from(if bang { "save!" } else { "save" }),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            ));
+            if bang {
+                // update! returns the record — an explicit self read, not
+                // save!'s Base-typed return (strict targets type the
+                // difference).
+                stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
+                Ty::Class { id: owner.clone(), args: vec![].into() }
+            } else {
+                Ty::Bool
+            }
+        }
+        // Answers `p`, not the record: `record.attributes = x` evaluates to `x`.
+        TypedWrite::Assign => {
+            stmts.push(var_ref(p.clone()));
+            params_ty.clone()
+        }
+    };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -4466,6 +4508,106 @@ fn synth_update_typed(
             mutates_self: false,
             block_param: None,
     }
+}
+
+fn assoc_write(owner: &ClassId, assoc: &PermittedAssoc, p: &Symbol) -> Expr {
+    let send = |recv: Option<Expr>, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv, method: Symbol::from(method), args, block: None, parenthesized: false },
+        )
+    };
+    let read = || send(Some(var_ref(p.clone())), assoc.name.as_str(), Vec::new());
+    let assign = send(
+        Some(self_ref()),
+        &format!("{}=", assoc.name.as_str()),
+        vec![send(Some(read()), "to_a", Vec::new())],
+    );
+    let holds_strings = match &assoc.field_ty {
+        Ty::Union { variants } => variants.iter().any(|v| !is_records_of(v, &assoc.target)),
+        other => !is_records_of(other, &assoc.target),
+    };
+    // Raised rather than skipped: Rails' writer raises AssociationTypeMismatch on the request's Strings.
+    let write = if holds_strings {
+        let relation = Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("Relation")] },
+        );
+        let mismatch = format!(
+            "{}#{}= takes {} records (ActiveRecord::AssociationTypeMismatch): the permitted `{}` still holds the request's values",
+            owner.0.as_str(),
+            assoc.name.as_str(),
+            assoc.target.0.as_str(),
+            assoc.name.as_str(),
+        );
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: send(Some(read()), "is_a?", vec![relation]),
+                then_branch: assign,
+                else_branch: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: None,
+                        method: Symbol::from("raise"),
+                        args: vec![with_ty(lit_str(mismatch), Ty::Str)],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+            },
+        )
+    } else {
+        assign
+    };
+    let provided = send(
+        Some(var_ref(p.clone())),
+        crate::lower::controller_to_library::params::provided_field(&assoc.name).as_str(),
+        Vec::new(),
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If { cond: send(Some(provided), "!", Vec::new()), then_branch: nil_lit(), else_branch: write },
+    )
+}
+
+fn is_records_of(ty: &Ty, target: &ClassId) -> bool {
+    match ty {
+        Ty::Relation { of } => of == target,
+        Ty::Array { elem } => matches!(&**elem, Ty::Class { id, .. } if id == target),
+        _ => false,
+    }
+}
+
+// A field that can hold only the request's Strings is left out: Rails would raise on every value it could carry.
+pub(super) fn permitted_assocs(
+    model: &Model,
+    through_joins: &super::associations::ThroughJoins,
+    spec: &crate::lower::controller_to_library::params::ParamsSpec,
+) -> Vec<PermittedAssoc> {
+    use crate::lower::controller_to_library::params::field_ty;
+    let mut out = Vec::new();
+    for assoc in model.associations() {
+        let Association::HasMany { name, target, through: Some(_), .. } = assoc else { continue };
+        if !spec.fields.contains(name)
+            || !through_joins.writer(name)
+            || super::model_defines_writer(model, name)
+        {
+            continue;
+        }
+        let field_ty = field_ty(spec, name);
+        let variants: Vec<Ty> = match &field_ty {
+            Ty::Union { variants } => variants.iter().cloned().collect(),
+            other => vec![other.clone()],
+        };
+        let relation = variants.iter().any(|v| matches!(v, Ty::Relation { of } if of == target));
+        let record_array = variants.iter().any(|v| is_records_of(v, target) && matches!(v, Ty::Array { .. }));
+        let only_records = variants.iter().all(|v| is_records_of(v, target));
+        if only_records || (relation && !record_array) {
+            out.push(PermittedAssoc { name: name.clone(), target: target.clone(), field_ty });
+        }
+    }
+    out
 }
 
 /// Rails-shaped `update(attrs)` / `update!(attrs)` — an attribute Hash

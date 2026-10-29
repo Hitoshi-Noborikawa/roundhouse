@@ -26,7 +26,13 @@ if defined?(CGI) && CGI.respond_to?(:escapeURIComponent) && CGI.respond_to?(:une
     end
 
     def self.url_decode(s)
-      return s unless s.include?("%") || s.include?("+")
+      # Not the input as-is: a request body is read as binary, and Rails hands every decoded param over as UTF-8 (commonmarker refuses ASCII-8BIT).
+      unless s.include?("%") || s.include?("+")
+        return s if s.encoding == Encoding::UTF_8
+        utf8 = s.dup.force_encoding(Encoding::UTF_8)
+        # Not retagged when the bytes are not UTF-8: a cookie name so tagged would raise at `to_sym`.
+        return utf8.valid_encoding? ? utf8 : s
+      end
       CGI.unescape(s, Encoding::UTF_8)
     end
   end

@@ -20118,3 +20118,15 @@ mod where_record_seed_redirect_back;
 
 #[path = "emit_and_run/joins_several_associations.rs"]
 mod joins_several_associations;
+
+#[path = "emit_and_run/chained_find_by_association_key.rs"]
+mod chained_find_by_association_key;
+
+#[path = "emit_and_run/bare_save_without_validation.rs"]
+mod bare_save_without_validation;
+
+#[path = "emit_and_run/route_param_recall.rs"]
+mod route_param_recall;
+
+#[path = "emit_and_run/params_write_assign.rs"]
+mod params_write_assign;

@@ -269,3 +269,24 @@ end
 "#;
     name_for(src, "/admin/widgets/:widget_id/suggest", "admin_widget_suggest");
 }
+
+/// A namespaced route Rails cannot name from its path (an optional or
+/// dynamic segment, no `as:`) is named for the namespace itself, the first
+/// such route taking it — Rails 8.1 names lobsters'
+/// `namespace :mod { get "notes(/:period)", to: redirect("/mod/") }` `mod`,
+/// and the moderator subnav links `mod_path`.
+#[test]
+fn an_unnameable_namespaced_route_takes_the_namespace_name() {
+    let routes = r#"Rails.application.routes.draw do
+  namespace :mod do
+    get "/" => "activities#index", :as => "mod_activity"
+    get "notes(/:period)", to: redirect("/mod/")
+    get "flagged/:period" => "flagged#index"
+  end
+end
+"#;
+    let all = helpers(routes);
+    let mods: Vec<&(String, String)> = all.iter().filter(|(n, _)| n == "mod").collect();
+    assert_eq!(mods.first().map(|(_, p)| p.as_str()), Some("/mod/notes/:period"), "{all:?}");
+    name_for(routes, "/mod", "mod_mod_activity");
+}
