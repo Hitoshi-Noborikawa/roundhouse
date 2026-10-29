@@ -20140,5 +20140,8 @@ mod route_arg_column_named_like_association;
 #[path = "emit_and_run/params_merged_key_type.rs"]
 mod params_merged_key_type;
 
+#[path = "emit_and_run/view_nil_seeded_loop_local.rs"]
+mod view_nil_seeded_loop_local;
+
 #[path = "emit_and_run/params_write_assign.rs"]
 mod params_write_assign;

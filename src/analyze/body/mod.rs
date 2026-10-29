@@ -3185,6 +3185,7 @@ impl<'a> BodyTyper<'a> {
                     if !nil_seed.is_empty() {
                         let mut writes: Vec<(Symbol, Ty)> = Vec::new();
                         collect_local_assignment_tys(&exprs[i], &mut writes);
+                        let mut widened = false;
                         for (name, ty) in writes {
                             let Some((si, acc)) = nil_seed.get(&name) else {
                                 continue;
@@ -3202,6 +3203,11 @@ impl<'a> BodyTyper<'a> {
                                 value.ty = Some(merged.clone());
                             }
                             seed.ty = Some(merged);
+                            widened = true;
+                        }
+                        // Not left as first typed: a read earlier in the same loop body (`if prev … prev = x`) saw the bare nil seed, and a body typed only once (a view) keeps that.
+                        if widened && si_is_not(i, &nil_seed) {
+                            last = self.analyze_expr(&mut exprs[i], &local_ctx);
                         }
                     }
                     let e = &exprs[i];
@@ -3983,8 +3989,22 @@ fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
 /// good type. `Untyped` is deliberately NOT skipped: it is an
 /// author-signed "no constraint here", and a hash value flowing into
 /// the accumulator must widen the seed rather than leave it narrow.
+/// Whether statement `i` is not itself one of the nil seeds (only a later
+/// statement's writes can have been typed against the seed).
+fn si_is_not(i: usize, nil_seed: &HashMap<Symbol, (usize, Ty)>) -> bool {
+    nil_seed.values().all(|(si, _)| *si != i)
+}
+
 fn collect_local_assignment_tys(expr: &Expr, out: &mut Vec<(Symbol, Ty)>) {
     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*expr.node {
+        if let Some(t) = value.ty.clone() {
+            if !t.is_open() {
+                out.push((name.clone(), t));
+            }
+        }
+    }
+    // `x ||= v` writes v where x was nil, the seed's own case (lobsters' `top_comment_depth ||= comment.depth`).
+    if let ExprNode::OpAssign { target: LValue::Var { name, .. }, op: crate::expr::OpAssignOp::OrOr, value } = &*expr.node {
         if let Some(t) = value.ty.clone() {
             if !t.is_open() {
                 out.push((name.clone(), t));
