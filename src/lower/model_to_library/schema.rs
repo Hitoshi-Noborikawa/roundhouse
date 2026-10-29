@@ -4572,6 +4572,13 @@ fn synth_mass_attribute_writer(model: &Model, table: &Table) -> MethodDef {
         let slot = ColumnSlot::classify(col, model);
         let (writer, argument) = if source.is_some() || slot.is_json() {
             (setter, raw())
+        } else if let Some(argument) = crate::lower::has_json::column_assign(
+            model,
+            &col.name,
+            raw(),
+            super::ty_of_column_slot(col),
+        ) {
+            (col_storage_setter(col).as_str().to_string(), argument)
         } else if slot.is_temporal() {
             (
                 col_storage_setter(col).as_str().to_string(),

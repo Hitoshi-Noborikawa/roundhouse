@@ -47,3 +47,29 @@ fn hash_assignment_runs_with_native_rbs() {
     );
     app(MODEL).run_spinel_with_rbs(&script).assert_passes();
 }
+
+fn has_json_app() -> emit_and_run::Overlay {
+    app(include_str!("support/attribute_assignment/has_json_model.rb")).write(
+        "db/schema.rb",
+        "ActiveRecord::Schema.define do\n  create_table :attribute_records do |t|\n    t.json :settings\n  end\nend\n",
+    )
+}
+
+#[test]
+fn hash_assignment_casts_and_merges_declared_json_keys() {
+    has_json_app()
+        .run_ruby(include_str!(
+            "support/attribute_assignment/has_json_contract.rb"
+        ))
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn declared_json_assignment_runs_with_native_rbs() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        include_str!("support/attribute_assignment/has_json_contract.rb")
+    );
+    has_json_app().run_spinel_with_rbs(&script).assert_passes();
+}
