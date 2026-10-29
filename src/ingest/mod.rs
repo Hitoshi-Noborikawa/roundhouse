@@ -21,6 +21,7 @@ mod unreachable_views;
 mod uncalled_helper_copies;
 mod written_names;
 mod pagy;
+pub(crate) mod gem_package_settings;
 mod graphql_ruby;
 mod guarded_include;
 mod lock_versions;

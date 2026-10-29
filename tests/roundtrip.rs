@@ -155,6 +155,7 @@ fn tiny_blog_round_trips() {
         current_attribute_classes: vec![],
         initializer_filters: Vec::new(),
         initializer_defs: Vec::new(),
+        gem_package_settings: Vec::new(),
         auto_source_gems: Vec::new(),
         initializer_response_headers: Vec::new(),
         collection_cache_store: None,

@@ -8207,6 +8207,7 @@ fn spinel_files_with_source_markers(
 ) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     let (mut files, stems) =
         emit::ruby::source_markers::with_source_markers(app, || spinel_files(app, fixture, param_binds))?;
+    apply_gem_packages(&mut files, app)?;
     for (path, content) in files.iter_mut() {
         if path.ends_with(".rb") {
             *content = emit::ruby::source_markers::finish(content);
@@ -8217,6 +8218,41 @@ fn spinel_files_with_source_markers(
     // directly and keeps `ConfigurationFile`.
     drop_yaml_configuration_file(&mut files);
     Ok((files, stems))
+}
+
+fn apply_gem_packages(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
+    const ANCHOR: &str = "require_relative \"runtime/request_hooks\"\n";
+    let Some(lock) = app.gem_lock.as_ref() else { return Ok(()) };
+    let mut boot_lines = String::new();
+    for package in crate::gems::GEM_PACKAGES.iter().filter(|p| lock.has(p.gem)) {
+        let dir = format!("runtime/gems/{}", package.dir);
+        // Not `walk_partitioned`'s sig/ split: spin_shape moves sidecars beside their .rb anyway, and the assets must ship too.
+        crate::runtime_files::walk_into(&dir, &format!("{dir}/"), files)?;
+        boot_lines.push_str(&format!("require_relative \"{dir}/{}\"\n", package.entry));
+        let settings: Vec<&str> = app
+            .gem_package_settings
+            .iter()
+            .filter(|s| s.gem == package.gem)
+            .map(|s| s.statement.as_str())
+            .collect();
+        if !settings.is_empty() {
+            boot_lines.push_str(&format!("# {}'s settings from config/initializers.\n", package.gem));
+            for statement in settings {
+                boot_lines.push_str(statement);
+                boot_lines.push('\n');
+            }
+        }
+    }
+    if boot_lines.is_empty() {
+        return Ok(());
+    }
+    let (_, boot) = files
+        .iter_mut()
+        .find(|(p, _)| p == "boot.rb")
+        .ok_or("apply_gem_packages: no boot.rb")?;
+    let at = boot.find(ANCHOR).ok_or("apply_gem_packages: boot.rb lost its runtime/request_hooks require")? + ANCHOR.len();
+    boot.insert_str(at, &boot_lines);
+    Ok(())
 }
 
 fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {

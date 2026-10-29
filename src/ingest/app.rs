@@ -1612,6 +1612,7 @@ end
                 app.module_mixins.extend(mixins);
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
                 app.initializer_defs.extend(extract_initializer_defs(&bytes, &path_str));
+                app.gem_package_settings.extend(super::gem_package_settings::extract(&bytes, &path_str));
                 app.initializer_response_headers
                     .extend(extract_initializer_response_headers(&bytes, &path_str));
                 if let Some(store) = extract_collection_cache_store(&bytes, &path_str) {
