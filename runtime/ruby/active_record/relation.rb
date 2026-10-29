@@ -1018,8 +1018,13 @@ module ActiveRecord
     # `on_stories_not_authored_by.above_average` — render one INNER JOIN,
     # where appending both made SQLite reject every column of the joined
     # table as ambiguous.
-    def joins(spec)
-      spawn.joins!(spec)
+    def joins(*specs)
+      spawn.joins_specs!(specs)
+    end
+
+    def joins_specs!(specs)
+      specs.each { |spec| joins!(spec) }
+      self
     end
 
     def joins!(spec)
@@ -1030,8 +1035,8 @@ module ActiveRecord
       self
     end
 
-    def left_outer_joins(spec)
-      spawn.joins!(spec)
+    def left_outer_joins(*specs)
+      spawn.joins_specs!(specs)
     end
 
     def join_fragment(spec)
@@ -1044,8 +1049,8 @@ module ActiveRecord
     end
 
     # `left_joins` — Rails alias for `left_outer_joins`.
-    def left_joins(spec)
-      left_outer_joins(spec)
+    def left_joins(*specs)
+      spawn.joins_specs!(specs)
     end
 
     # `select(:id, :username, "raw AS x")` — the PROJECTION, and the

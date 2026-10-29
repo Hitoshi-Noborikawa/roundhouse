@@ -1376,16 +1376,16 @@ module ActiveRecord
       all.includes(*names)
     end
 
-    def self.joins(spec)
-      all.joins(spec)
+    def self.joins(*specs)
+      all.joins(*specs)
     end
 
-    def self.left_joins(spec)
-      all.left_joins(spec)
+    def self.left_joins(*specs)
+      all.left_joins(*specs)
     end
 
-    def self.left_outer_joins(spec)
-      all.left_outer_joins(spec)
+    def self.left_outer_joins(*specs)
+      all.left_outer_joins(*specs)
     end
 
     def self.limit(n)
