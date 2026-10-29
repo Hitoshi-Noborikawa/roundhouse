@@ -20134,5 +20134,11 @@ mod reopened_class_constructor;
 #[path = "emit_and_run/flash_any_key.rs"]
 mod flash_any_key;
 
+#[path = "emit_and_run/route_arg_column_named_like_association.rs"]
+mod route_arg_column_named_like_association;
+
+#[path = "emit_and_run/params_merged_key_type.rs"]
+mod params_merged_key_type;
+
 #[path = "emit_and_run/params_write_assign.rs"]
 mod params_write_assign;
