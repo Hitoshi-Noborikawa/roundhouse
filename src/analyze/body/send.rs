@@ -35,7 +35,7 @@ pub(super) fn literal_array_extreme_ty(recv: &Expr, method: &Symbol, args: &[Exp
         return None;
     }
     let Some(Ty::Array { elem }) = recv.ty.as_ref() else { return None };
-    Some(if compact { (**elem).clone().strip_nil() } else { (**elem).clone() })
+    Some((**elem).clone().strip_nil())
 }
 
 fn definitely_present(ty: &Ty) -> bool {

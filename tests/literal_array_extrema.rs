@@ -90,6 +90,17 @@ end
     assert_ne!(inferred_from(source, "counted"), Ty::Int);
 }
 
+#[test]
+fn direct_nullable_literal_extrema_preserve_existing_inference() {
+    let source = r#"class LiteralExtrema
+  def self.maximum
+    [3, nil].max
+  end
+end
+"#;
+    assert_eq!(inferred_from(source, "maximum"), Ty::Int);
+}
+
 const SCRIPT: &str = r#"
 raise "time maximum changed" unless LiteralExtrema.time.iso8601 == "2026-01-02T00:00:00Z"
 raise "string minimum changed" unless LiteralExtrema.string == "a"
