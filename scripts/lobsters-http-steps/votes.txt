@@ -1,0 +1,11 @@
+# unvote and upvote a story and a comment, reading the listing after each
+GET /newest
+POST /stories/{story}/unvote -> 200
+GET /newest
+POST /stories/{story}/upvote -> 200
+GET /newest
+GET /comments
+POST /comments/{comment}/unvote -> 200
+GET /comments
+POST /comments/{comment}/upvote -> 200
+GET /comments

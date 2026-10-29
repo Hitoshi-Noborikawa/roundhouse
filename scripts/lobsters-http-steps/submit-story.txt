@@ -1,0 +1,5 @@
+# submit a story, then find it on /newest and /recent
+GET /stories/new
+POST /stories story[title]=A+story+from+the+replay&story[url]=https://example.com/replay&story[description]=&story[user_is_author]=0&story[tags][]=ruby
+GET /newest
+GET /recent
