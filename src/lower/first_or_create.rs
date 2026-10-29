@@ -37,18 +37,45 @@ use crate::ty::Ty;
 
 // A model remains in the map for the unsupported-call diagnostic even
 // when its constructor declares an initialization callback not yet lowered.
-type ModelColumns = crate::det::HashMap<ClassId, Option<crate::det::HashMap<Symbol, Ty>>>;
+type ModelColumns = crate::det::HashMap<ClassId, CreationModel>;
+
+struct CreationModel {
+    fields: Option<crate::det::HashMap<Symbol, Ty>>,
+    foreign_keys: crate::det::HashMap<Symbol, Symbol>,
+    initialization_hook: bool,
+}
 
 pub fn apply_first_or_create_lowering(app: &mut App) -> Vec<crate::diagnostic::Diagnostic> {
     let models = app.models.iter().map(|model| {
         let primary_key = model.primary_key.clone().unwrap_or_else(|| Symbol::from("id"));
-        let fields = model.attributes.fields.iter().filter(|(key, _)| **key != primary_key)
+        let mut fields: crate::det::HashMap<_, _> = model.attributes.fields.iter().filter(|(key, _)| **key != primary_key)
             .map(|(key, ty)| (key.clone(), ty.clone())).collect();
+        let mut foreign_keys = crate::det::HashMap::default();
+        for assoc in model.associations() {
+            if let crate::dialect::Association::BelongsTo { name, target, foreign_key, polymorphic: false, .. } = assoc {
+                fields.insert(name.clone(), Ty::Class { id: target.clone(), args: vec![].into() });
+                foreign_keys.insert(name.clone(), foreign_key.clone());
+            }
+        }
         let unsupported_initializer = model.body.iter().any(|item| matches!(item,
             crate::dialect::ModelBodyItem::Unknown { expr, .. }
                 if matches!(&*expr.node, ExprNode::Send { recv: None, method, block: None, .. }
                     if method.as_str() == "after_initialize")));
-        (model.name.clone(), (!unsupported_initializer).then_some(fields))
+        let initialization_hook = std::iter::successors(Some(model), |model| {
+            model.parent.as_ref().and_then(|parent| app.models.iter().find(|m| &m.name == parent))
+        }).take(app.models.len()).any(|model| model.body.iter().any(|item| match item {
+            crate::dialect::ModelBodyItem::Method { method, .. } =>
+                method.receiver == crate::dialect::MethodReceiver::Instance
+                    && matches!(method.name.as_str(), "initialize" | "after_initialize"),
+            crate::dialect::ModelBodyItem::Callback { callback, .. } =>
+                callback.hook == crate::dialect::CallbackHook::AfterInitialize,
+            crate::dialect::ModelBodyItem::Unknown { expr, .. } => matches!(&*expr.node,
+                ExprNode::Send { recv: None, method, .. } if method.as_str() == "after_initialize"),
+            _ => false,
+        }));
+        (model.name.clone(), CreationModel {
+            fields: (!unsupported_initializer).then_some(fields), foreign_keys, initialization_hook,
+        })
     }).collect();
     let mut diagnostics = Vec::new();
     super::for_each_hook_body(app, &mut |body| {
@@ -75,6 +102,27 @@ fn is_claimable_stmt(e: &Expr) -> bool {
 }
 
 fn rewrite(expr: &mut Expr, models: &ModelColumns) {
+    // A one-statement branch is a statement position too. Give the inline
+    // statements a Seq just as a one-statement method body gets above.
+    let wrap = |body: &mut Expr| {
+        if is_claimable_stmt(body) || scoped_statement_model(body, models).is_some() {
+            let stmt = body.clone();
+            *body = Expr::new(stmt.span, ExprNode::Seq { exprs: vec![stmt] });
+        }
+    };
+    match &mut *expr.node {
+        ExprNode::If { then_branch, else_branch, .. } => {
+            wrap(then_branch);
+            wrap(else_branch);
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            for body in std::iter::once(body).chain(rescues.iter_mut().map(|r| &mut r.body))
+                .chain(else_branch.iter_mut()).chain(ensure.iter_mut()) {
+                wrap(body);
+            }
+        }
+        _ => {}
+    }
     expr.node.for_each_child_mut(&mut |child| rewrite(child, models));
     let ExprNode::Seq { exprs } = &mut *expr.node else { return };
     for e in exprs {
@@ -83,13 +131,22 @@ fn rewrite(expr: &mut Expr, models: &ModelColumns) {
                 ExprNode::Assign { target, value } => (value, Some(target.clone())),
                 _ => (&*e, None),
             };
-            let mut statements = inline_scoped_creation(send, model);
+            let mut statements = inline_scoped_creation(send, model.clone(), &models[&model].foreign_keys);
             if let Some(target) = target {
                 let record = statements.pop().expect("record result");
                 statements.push(Expr::new(e.span, ExprNode::Assign { target, value: record }));
             }
             *e.node = ExprNode::Seq { exprs: statements };
             e.ty = None;
+            continue;
+        }
+        // A refused non-bang call must not reach the older first_or_create
+        // expansion through as_where_first and lose the same predicates.
+        let send = match &*e.node {
+            ExprNode::Assign { value, .. } => value,
+            _ => &*e,
+        };
+        if scoped_creation_refusal(send, models).is_some() {
             continue;
         }
         // A bare call keeps its value via a trailing `_rec` read; an
@@ -310,14 +367,15 @@ fn inline(e: &Expr, save: bool) -> Vec<Expr> {
 
 /// Find-or-create blocks follow the same concrete call-site rule as
 /// `create_block`: a generic inherited yield would erase the model's type.
-/// Query once with literal conditions, initialize only the miss branch,
+/// Query with literal or blockless variable conditions, initialize only the miss branch,
 /// and return the record independently of the block's result.
 fn scoped_creation_model(e: &Expr, models: &ModelColumns) -> Option<ClassId> {
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*e.node else {
         return None;
     };
     if !matches!(method.as_str(), "find_or_create_by" | "find_or_create_by!")
-        || args.len() != 1 || scalar_pairs(&args[0]).is_none()
+        || args.len() != 1 || creation_pairs(&args[0]).is_none()
+        || scoped_creation_refusal(e, models).is_some()
         || !match block.as_ref().map(|block| &*block.node) {
             None => true,
             Some(ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }) =>
@@ -328,9 +386,57 @@ fn scoped_creation_model(e: &Expr, models: &ModelColumns) -> Option<ClassId> {
         return None;
     }
     let (id, scope) = scope_literals(recv)?;
-    let columns = models.get(&id)?.as_ref()?;
-    scope.iter().chain(scalar_pairs(&args[0])?.iter())
-        .all(|(key, value)| columns.get(key).is_some_and(|ty| literal_fits(value, ty))).then_some(id)
+    let columns = models.get(&id)?.fields.as_ref()?;
+    let scope_fits = scope.iter()
+        .all(|(key, value)| columns.get(key).is_some_and(|ty| literal_fits(value, ty)));
+    let conditions_fit = creation_pairs(&args[0])?.iter().all(|(key, value)| {
+        columns.get(key).is_some_and(|ty| match &*value.node {
+            ExprNode::Lit { .. } => literal_fits(value, ty),
+            _ => true, // creation_pairs admits only variable reads here
+        })
+    });
+    (scope_fits && conditions_fit).then_some(id)
+}
+
+/// Renaming two keys to one Hash key would lose a lookup predicate. Keeping
+/// both attributes also needs Rails' ordered assignment during construction.
+/// A block must run inside initialize, before its callbacks, rather than
+/// after the fully initialized record returned by this factory's `new`.
+fn scoped_creation_refusal(e: &Expr, models: &ModelColumns) -> Option<String> {
+    let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*e.node else { return None; };
+    if !matches!(method.as_str(), "find_or_create_by" | "find_or_create_by!") { return None; }
+    let (id, _) = scope_literals(recv)?;
+    let model = models.get(&id)?;
+    let conditions = creation_pairs(args.first()?)?;
+    let mut columns = crate::det::HashSet::default();
+    for (key, _) in conditions {
+        let column = model.foreign_keys.get(&key).unwrap_or(&key);
+        if !columns.insert(column.clone()) {
+            return Some(format!("multiple conditions resolve to `{column}`; lookup predicates and constructor assignment order cannot be preserved by this factory"));
+        }
+    }
+    if block.is_some() {
+        if scalar_pairs(&args[0]).is_none() {
+            return Some("variable-condition calls must be blockless; the factory cannot yield inside initialize before its callbacks".to_string());
+        }
+        if model.initialization_hook {
+            return Some("creation block must run inside initialize before initialization callbacks; this factory calls new before the block".to_string());
+        }
+    }
+    None
+}
+
+/// A method call can have side effects even with no arguments. Only literals
+/// and variable reads can be reused for the lookup and constructor. The
+/// literal-only scope gate stays separate: arrays, ranges and arbitrary
+/// relation predicates cannot become constructor attributes.
+fn creation_pairs(hash: &Expr) -> Option<Vec<(Symbol, Expr)>> {
+    let ExprNode::Hash { entries, .. } = &*hash.node else { return None; };
+    entries.iter().map(|(key, value)| {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*key.node else { return None; };
+        matches!(&*value.node, ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. })
+            .then(|| (key.clone(), value.clone()))
+    }).collect()
 }
 
 fn scalar_pairs(hash: &Expr) -> Option<Vec<(Symbol, Expr)>> {
@@ -374,7 +480,11 @@ fn has_model_root(e: &Expr, models: &ModelColumns) -> bool {
     }
 }
 
-fn inline_scoped_creation(e: &Expr, model_id: ClassId) -> Vec<Expr> {
+fn inline_scoped_creation(
+    e: &Expr,
+    model_id: ClassId,
+    foreign_keys: &crate::det::HashMap<Symbol, Symbol>,
+) -> Vec<Expr> {
     let span = e.span;
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*e.node else { unreachable!() };
     let record_ty = Ty::Class { id: model_id.clone(), args: vec![].into() };
@@ -401,11 +511,22 @@ fn inline_scoped_creation(e: &Expr, model_id: ClassId) -> Vec<Expr> {
     }), relation_ty.clone());
     let mut relation = recv.clone();
     seed_model_root(&mut relation, &model_id, &seed, &relation_ty);
-    let find = send(relation, "find_by", args.clone(),
+    // The lookup reads foreign-key columns; construction keeps the public
+    // association names so its writers and initialization callbacks run.
+    // Admission rejects colliding resolved keys before constructing this Hash.
+    let mut query_args = args.clone();
+    let ExprNode::Hash { entries, .. } = &mut *query_args[0].node else { unreachable!() };
+    for (key, _) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: name } } = &mut *key.node else { unreachable!() };
+        if let Some(foreign_key) = foreign_keys.get(name) {
+            *name = foreign_key.clone();
+        }
+    }
+    let find = send(relation, "find_by", query_args,
         Ty::Union { variants: vec![record_ty.clone(), Ty::Nil].into() });
     let (_, scope_pairs) = scope_literals(recv).expect("admitted literal scope");
     let mut pairs = Vec::new();
-    for (key, value) in scope_pairs.into_iter().chain(scalar_pairs(&args[0]).expect("admitted literal conditions")) {
+    for (key, value) in scope_pairs.into_iter().chain(creation_pairs(&args[0]).expect("admitted creation conditions")) {
         pairs.retain(|(existing, _)| existing != &key);
         pairs.push((key, value));
     }
@@ -459,15 +580,17 @@ fn ledger_scoped_creations(e: &Expr, models: &ModelColumns, diagnostics: &mut Ve
         {
             // Name the cause: the ledger entry is the unsupported list,
             // and the three gaps close in different places.
-            let cause = if block.is_some() {
-                "an initialization block is inlined only on a statement-position call with scalar literal conditions, and only without control flow or new locals in its body"
+            let cause = if let Some(reason) = scoped_creation_refusal(e, models) {
+                reason
+            } else if block.is_some() {
+                "an initialization block is inlined only in statement position with scalar literal conditions, no initialization hooks, and no control flow or new locals in its body".to_string()
             } else if method.as_str() == "find_or_create_by!" {
-                "the runtime has no `find_or_create_by!`; only a statement-position call with scalar literal conditions is inlined"
+                "a bang call is inlined only in statement position with supported model attributes and scalar literal where predicates".to_string()
             } else {
-                "a `where` scope materializes before the call; only scalar literal predicates and conditions on a concrete model are inlined"
+                "a `where` scope materializes before the call; only scalar literal scope predicates and supported attributes on a concrete model are inlined".to_string()
             };
             let mut diagnostic = super::residue_diagnostic("first_or_create", "scoped-find-or-create", e.span,
-                "requires statement position, scalar literal Hash conditions, and a concrete model with literal where predicates",
+                "requires statement position, supported Hash attributes, and a concrete model with literal where predicates",
                 format!("scoped find-or-create cannot be lowered safely: {cause}"));
             diagnostic.severity = crate::diagnostic::Severity::Error;
             diagnostics.push(diagnostic);
