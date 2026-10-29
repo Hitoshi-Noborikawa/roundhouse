@@ -140,6 +140,27 @@ class. Spinel and the other targets keep the constants on the class.
 They drop the statements and report each one by name, as they report
 any other dropped class-body call.
 
+### Class attributes in library classes and included hooks
+
+ActiveSupport's `class_attribute` and its `cattr_*` / `mattr_*` macros
+define methods from names computed at run time, so the emitted runtime
+does not define them. A library class's own `class_attribute :live`, and
+one an app module's `self.included(base)` hook declares on `base`
+(`base.class_attribute :ssl_strict`, `base.cattr_accessor :pem_file`),
+become plain defs on the declaring class or on each app class that
+includes the module (`ingest::hook_class_attribute`). A class attribute
+reads the class's own value once written, else its superclass's. A
+class variable accessor reads and writes `@@name`. The declaration
+becomes its seed. A hook's `if base.respond_to?(:class_attribute)`
+whose branch holds only declarations is that branch, since natively it
+is true.
+
+The Ruby trees write an `include` whose hook calls those writers after
+the defs it needs (`hooked_include_position`), including in a body
+written in source order. A hook with a declaration this cannot read (a
+computed name or flag, a block, an unknown option) keeps its text and
+still fails at the include. So does a model's include of such a module.
+
 ## ERB → Ruby → IR
 
 ### Why compile to Ruby?

@@ -2685,6 +2685,9 @@ end
     // Before analysis, so the controller a functional test builds and the
     // controllers' clearing methods are typed like source.
     crate::lower::controller_test_case::prepare(&mut app);
+    // Before the body statements, which ask whether a class-side writer
+    // the class body writes through is defined.
+    super::hook_class_attribute::expand(&mut app);
     super::app_extension_calls::mark(&mut app);
     super::body_statements::mark(&mut app);
     report_unmodelled_records(&app);

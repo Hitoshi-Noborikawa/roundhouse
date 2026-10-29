@@ -59,8 +59,10 @@ p [Gate.method(:ssl_strict).owner, Gate.instance_method(:ssl_strict).owner, Gate
 p [Posts.respond_to?(:ssl_strict), Posts.method_defined?(:ssl_strict)]
 "##;
 
+/// ActiveSupport 8.1 defines a class attribute's reader on the singleton
+/// and keeps no `@__class_attr_logger` ivar, which the fork's older
+/// Rails did: the probe reads nil natively.
 #[test]
-#[ignore = "fork spec: class-body loops and hooks"]
 fn an_included_hook_s_class_attribute_is_the_includer_s_as_native() {
     let classes = [("lib/posts.rb", POSTS), ("lib/gate.rb", GATE), ("lib/sub_gate.rb", SUB_GATE), ("lib/nonce.rb", NONCE)];
     let program: String = classes.iter().map(|(_, source)| *source).collect();
@@ -71,7 +73,7 @@ fn an_included_hook_s_class_attribute_is_the_includer_s_as_native() {
          [30, 60, 30, 60, 60, [30, 60]]\n\
          [true, \"strict=true\", false, :yes, true, true]\n\
          [:own, true, true, \"strict=false\"]\n\
-         [:log, :log, nil, :log]\n\
+         [:log, :log, nil, nil]\n\
          [#<Class:Gate>, Gate, [Gate, Posts]]\n\
          [false, false]\n",
         "native control"
@@ -115,7 +117,6 @@ end
 "##;
 
 #[test]
-#[ignore = "fork spec: class-body loops and hooks"]
 fn a_respond_to_guarded_hook_declaration_is_its_branch_as_native() {
     let script = "p [Redir::Express.test_url, Redir::InContext.test_url, Redir::InContext.live_url]\n\
                   p [Redir::Express.new.url(true), Redir::InContext.new.url(true), Redir::InContext.new.url(false)]\n";
@@ -155,7 +156,6 @@ const PRESET: &str = "class Preset\n  @@signature = :preset\nend\n";
 const OTHER_PAY: &str = "class OtherPay < Preset\n  class_attribute :live\n  include Creds\nend\n";
 
 #[test]
-#[ignore = "fork spec: class-body loops and hooks"]
 fn an_included_hook_s_cattr_is_the_includer_s_class_variable_as_native() {
     let script = "SubPay.pem_file = \"cert\"\n\
                   p [Pay.pem_file, SubPay.pem_file, Pay.new.pem_file, OtherPay.pem_file, OtherPay.signature]\n\

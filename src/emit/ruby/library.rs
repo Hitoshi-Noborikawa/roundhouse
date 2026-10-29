@@ -8239,11 +8239,22 @@ fn emit_library_class_decl_inner(
             && constant_calls.first().is_some_and(|call| m.name_span.file == call.span.file)
     };
     let mut positioned: Vec<(usize, &ClassId)> = Vec::new();
+    // An ordered body writes such an include where the source has it,
+    // after the methods above it its hook calls on `base`.
+    let mut ordered_includes: Vec<(u32, &ClassId)> = Vec::new();
     if !ordered_body {
         for inc in &lc.includes {
             let floor = positioned.last().map(|(at, _)| *at);
             if let Some(at) = hooked_include_position(lc, inc, app, classes).max(floor) {
                 positioned.push((at, inc));
+            }
+        }
+    } else {
+        for (inc, span) in lc.includes.iter().zip(&lc.include_spans) {
+            let in_body = !span.is_synthetic() && body_file.is_some_and(|file| span.file == file);
+            let after_first = ordered_includes.last().is_some_and(|(start, _)| *start <= span.start);
+            if in_body && (after_first || hooked_include_position(lc, inc, app, classes).is_some()) {
+                ordered_includes.push((span.start, inc));
             }
         }
     }
@@ -8265,6 +8276,7 @@ fn emit_library_class_decl_inner(
     for (slot, start) in &moved_includes {
         body.push((*start, BodyItem::Include(positioned[*slot].1)));
     }
+    body.extend(ordered_includes.iter().map(|(start, inc)| (*start, BodyItem::Include(inc))));
     for index in &moved_methods {
         let method = &lc.methods[*index];
         body.push((method.name_span.start, BodyItem::Method(method)));
@@ -8521,15 +8533,15 @@ fn emit_library_class_decl_inner(
     // An include the source has after a positioned one is written no
     // earlier than it, so the includes keep their source order, and with
     // it the class's ancestors. An ordered body interleaves its methods
-    // with ivar writes and keeps every include first.
+    // with ivar writes and keeps the other includes first.
     for inc in &lc.includes {
-        if positioned.iter().any(|(_, p)| *p == inc) {
+        if positioned.iter().any(|(_, p)| *p == inc) || ordered_includes.iter().any(|(_, p)| *p == inc) {
             continue;
         }
         nested.borrow_mut().write_include(&mut s, depth, lc, inc);
         writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
     }
-    if lc.includes.len() > positioned.len() && !lc.methods.is_empty() {
+    if lc.includes.len() > positioned.len() + ordered_includes.len() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
     }
 
