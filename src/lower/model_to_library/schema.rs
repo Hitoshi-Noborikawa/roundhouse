@@ -1406,14 +1406,27 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     let value_param = Symbol::from("value");
     // Writers normally take the STORAGE type and write the storage ivar:
     // `<col>=` / `@<col>` in general, `<col>_raw=` / `@<col>_raw` (Str)
-    // for a temporal column. Schema-less JSON is the exception: its public
-    // writer takes the decoded value and serializes it into the String slot.
+    // for a temporal column. JSON writers take decoded input and serialize
+    // it into the String slot, including declared has_json key casts.
     // Hydration uses `_write_<col>_json_raw` so DB text never goes through dump.
     let col_ty = super::ty_of_column_slot(col);
     let slot = ColumnSlot::classify(col, model);
-    let value_ty = if slot.is_json() { Ty::Untyped } else { col_ty.clone() };
+    let json_assignment = crate::lower::has_json::column_assign(
+        model,
+        &col.name,
+        with_ty(var_ref(value_param.clone()), Ty::Untyped),
+        col_ty.clone(),
+    );
+    let value_ty = if slot.is_json() || json_assignment.is_some() {
+        Ty::Untyped
+    } else {
+        col_ty.clone()
+    };
     let value = with_ty(var_ref(value_param.clone()), value_ty.clone());
-    let rhs = if let Some(dumped) = slot.json_dump(value.clone()) {
+    let rhs = if let Some(assigned) = json_assignment {
+        crate::lower::normalizes::normalized_write(model, &col.name, assigned.clone())
+            .unwrap_or(assigned)
+    } else if let Some(dumped) = slot.json_dump(value.clone()) {
         dumped
     } else {
         let value = crate::lower::normalizes::normalized_write(model, &col.name, value.clone())
@@ -4571,20 +4584,22 @@ fn synth_mass_attribute_writer(model: &Model, table: &Table) -> MethodDef {
         let slot = ColumnSlot::classify(col, model);
         let (writer, argument) = if source.is_some() || slot.is_json() || col.array {
             (setter, raw())
-        } else if let Some(argument) = crate::lower::has_json::column_assign(
+        } else if crate::lower::has_json::column_assign(
             model,
             &col.name,
             raw(),
             super::ty_of_column_slot(col),
-        ) {
-            (col_storage_setter(col).as_str().to_string(), argument)
+        )
+        .is_some()
+        {
+            (setter, raw())
         } else if slot.is_temporal() {
             (
                 col_storage_setter(col).as_str().to_string(),
                 slot.format_cast(raw()).expect("temporal column"),
             )
-        } else if let Some(mapped) = enum_label_cast(model, col, raw()) {
-            (setter, mapped)
+        } else if enum_setter_value(model, col, raw()).is_some() {
+            (setter, raw())
         } else {
             let cast = match ty_of_column(&col.col_type) {
                 Ty::Int => "cast_integer",
@@ -4616,12 +4631,29 @@ fn synth_mass_attribute_writer(model: &Model, table: &Table) -> MethodDef {
             writes.push((field, send(self_ref(), &setter, vec![raw()])));
         }
     }
-    let mut body = send(
+    let unknown = send(
         self_ref(),
         "_unknown_mass_attribute",
         vec![var_ref(name.clone())],
     );
+    let mut body = unknown.clone();
     for (field, write) in writes.into_iter().rev() {
+        let public = with_ty(
+            send(
+                self_ref(),
+                "respond_to?",
+                vec![lit_sym(Symbol::from(format!("{}=", field.as_str())))],
+            ),
+            Ty::Bool,
+        );
+        let write = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: public,
+                then_branch: write,
+                else_branch: unknown.clone(),
+            },
+        );
         let cond = with_ty(
             send(
                 var_ref(name.clone()),
