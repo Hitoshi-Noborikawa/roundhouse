@@ -83,6 +83,9 @@ module ActiveRecord
 
   class Base
     def self.lock: (?(bool | String)? locking) -> Relation
+    def assign_attributes: (Hash[String | Symbol, untyped] attributes) -> nil
+    def _assign_mass_attribute: (String name, untyped value) -> nil
+    def _unknown_mass_attribute: (String name) -> nil
     def read_attribute: (Symbol name) -> untyped
     def write_attribute: (Symbol name, untyped value) -> untyped
     def saved_changes?: () -> bool

@@ -96,9 +96,9 @@ fn accessors_render_over_the_serialized_column() {
         ),
         "boolean writer casts rather than storing the form value verbatim:\n{src}"
     );
-    // The column accessor pair is NOT replaced: `@settings` stays the
-    // serialized text every synthesized path already moves (hydration,
-    // `[]`, the adapter's escape).
+    // The column reader stays a storage read: `@settings` holds the
+    // serialized text hydration and the adapter move. Schema-key reads
+    // use their separate typed accessors.
     assert!(
         src.contains("def settings\n    @settings\n  end"),
         "the column reader stays the storage read:\n{src}"

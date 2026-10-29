@@ -506,7 +506,21 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 1136 on 2026-10-28: StaleObjectError accepts arbitrary records
     // and actions. This probe omits their Object? signatures, so their reads
     // are vars here (+9 in errors.rb, 1127 -> 1136); the RBS-paired gate adds 2.
-    const CEILING: usize = 1136;
+    // MEASURED 1141 on 2026-10-28 with the same analyzer and collector
+    // on main fa0b92c6 and this runtime (1136 -> 1141). All five new
+    // sites are assign_attributes' two Hash reads, its each call,
+    // the block key's to_s receiver and the block value. Existing methods and
+    // sanitize_sql_like's three sites are unchanged.
+    // MEASURED 1126 on 2026-10-29 after merging main 00e6fc23: the same
+    // analyzer and collector measure 1124 total on main and 1129 here.
+    // The five additional sites are all in Base#assign_attributes; every
+    // other method's count is unchanged. Both totals include the same
+    // 3 sanitize_sql_like sites, excluded from this ceiling (1141 -> 1126).
+    // MEASURED 1111 after merging main f7ec7427 with the current analyzer:
+    // the same collector measures 1109 total on main and 1114 here.
+    // Only Base#assign_attributes adds sites (+5). Both totals include
+    // the same 3 sanitize_sql_like sites, excluded here (1126 -> 1111).
+    const CEILING: usize = 1111;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

@@ -1685,8 +1685,13 @@ fn filter_is_guarded(f: &Filter) -> bool {
 /// instead of running the action. Such a filter stays a call in the
 /// preamble, where its `return` ends the call and `return if
 /// performed?` decides the halt, as Rails does.
+///
+/// Nor a `prepend_before_action`: Rails runs it ahead of every filter
+/// registered before it, which the preamble's hoist does and splicing
+/// in declaration order does not.
 fn filter_is_spliceable(f: &Filter, privs: &[Action]) -> bool {
-    !filter_is_guarded(f)
+    !f.prepend
+        && !filter_is_guarded(f)
         && !privs
             .iter()
             .find(|a| a.name == f.target)

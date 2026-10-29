@@ -809,7 +809,7 @@ impl Analyzer {
                 // reads of newer columns relies on it.
                 ("has_attribute?", Ty::Bool),
                 ("attributes=", Ty::Untyped),
-                ("assign_attributes", Ty::Untyped),
+                ("assign_attributes", Ty::Nil),
                 ("update_column", Ty::Bool),
                 ("update_columns", Ty::Bool),
                 ("update_attribute", Ty::Bool),
@@ -8611,8 +8611,14 @@ pub(crate) fn controller_includes(controller: &Controller) -> Vec<ClassId> {
 /// accepted gap rather than a blocker: no controller in this
 /// codebase's fixtures collides that way.
 pub(crate) fn controller_include_groups(controller: &Controller) -> Vec<Vec<ClassId>> {
+    controller_include_statements(controller).into_iter().map(|(_, group)| group).collect()
+}
+
+/// [`controller_include_groups`], each statement with its index in
+/// `controller.body`: where its concerns' `included` blocks run.
+pub(crate) fn controller_include_statements(controller: &Controller) -> Vec<(usize, Vec<ClassId>)> {
     let mut out = Vec::new();
-    for item in &controller.body {
+    for (index, item) in controller.body.iter().enumerate() {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
         if !matches!(method.as_str(), "include" | "prepend") {
@@ -8625,7 +8631,7 @@ pub(crate) fn controller_include_groups(controller: &Controller) -> Vec<Vec<Clas
             }
         }
         if !group.is_empty() {
-            out.push(group);
+            out.push((index, group));
         }
     }
     out

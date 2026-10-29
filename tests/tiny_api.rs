@@ -613,7 +613,7 @@ fn spinel_gate_models_run() {
     );
     std::fs::write(scratch.join("contract.rb"), contract).expect("write contract.rb");
     let spinel = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
-    compile(&scratch, &spinel, &["contract.rb", "-o", "contract"]);
+    compile(&scratch, &spinel, &["contract.rb", "--rbs", ".", "-o", "contract"]);
     let output = Command::new(scratch.join("contract"))
         .current_dir(&scratch)
         .output()
