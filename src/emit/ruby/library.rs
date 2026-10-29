@@ -2285,7 +2285,7 @@ fn invalidate_on_fk_write(lc: &mut LibraryClass, name: &Symbol, fk: &Symbol) {
         ExprNode::Seq { exprs } => exprs.clone(),
         _ => vec![m.body.clone()],
     };
-    stmts.push(reset);
+    stmts.insert(0, reset);
     m.body = Expr::new(span, ExprNode::Seq { exprs: stmts });
 }
 

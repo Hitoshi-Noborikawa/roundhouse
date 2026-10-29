@@ -809,7 +809,7 @@ impl Analyzer {
                 // reads of newer columns relies on it.
                 ("has_attribute?", Ty::Bool),
                 ("attributes=", Ty::Untyped),
-                ("assign_attributes", Ty::Untyped),
+                ("assign_attributes", Ty::Nil),
                 ("update_column", Ty::Bool),
                 ("update_columns", Ty::Bool),
                 ("update_attribute", Ty::Bool),

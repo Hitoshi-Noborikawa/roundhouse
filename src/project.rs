@@ -7396,6 +7396,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "Arel::Nodes::Ascending",
     "Arel::Nodes::Descending",
     "Arel::Nodes::Predicate",
+    "ActiveModel::UnknownAttributeError",
     // `runtime/ruby/active_record/connection_not_established.rb`,
     // `encryption_errors.rb` and `stale_object_error.rb`. A rescue of
     // ConnectionNotEstablished catches the two children. Strict targets
@@ -7579,7 +7580,7 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
 /// `attributes_before_type_cast` is a Hash of every column's raw stored
 /// value, one value type per column, which a strict target's Hash cannot
 /// hold.
-const RUBY_SPINEL_ONLY_INSTANCE_METHODS: &[&str] = &["attributes_before_type_cast"];
+const RUBY_SPINEL_ONLY_INSTANCE_METHODS: &[&str] = &["attributes_before_type_cast", "assign_attributes"];
 
 /// True only for an application model instance (including nullable model
 /// unions) that does not define its own method with this spelling.
@@ -7719,6 +7720,29 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     }
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;
+    }
+    if !matches!(target.as_str(), "jruby" | "spinel" | "futamura") {
+        fn implicit_assignments(expr: &crate::expr::Expr, target: &str) {
+            if let crate::expr::ExprNode::Send { recv: None, method, .. } = &*expr.node
+                && method.as_str() == "assign_attributes"
+            {
+                emit::diagnostics::report_unsupported(expr.span, target, "assign_attributes",
+                    "ordered attribute assignment is supplied by the Ruby-family runtime");
+            }
+            expr.node.for_each_child(&mut |child| implicit_assignments(child, target));
+        }
+        for model in &app.models {
+            if crate::analyze::source_instance_method(app, &model.name, "assign_attributes") {
+                continue;
+            }
+            for item in &model.body {
+                if let crate::dialect::ModelBodyItem::Method { method, .. } = item
+                    && method.receiver == crate::dialect::MethodReceiver::Instance
+                {
+                    implicit_assignments(&method.body, target.as_str());
+                }
+            }
+        }
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
         // Not the whole constant: spinel answers `Method` as a value, and refuses only a class test against it.

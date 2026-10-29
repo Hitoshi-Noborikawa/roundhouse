@@ -263,7 +263,12 @@ pub(super) fn push_schema_methods(
                 methods.push(synth_temporal_writer(owner, col, model));
             }
         }
-        methods.push(synth_attr_writer(owner, col, model));
+        methods.push(synth_attr_writer(
+            owner,
+            col,
+            model,
+            runtime_relation == super::RuntimeRelation::Present,
+        ));
         // An enum label can share its column's name. Rails' enum predicate
         // overrides the generic attribute query in that case; otherwise
         // push_user_methods would discard the value comparison as a duplicate.
@@ -594,6 +599,9 @@ pub(super) fn push_schema_methods(
 
     // def []=(name, value); case name; when :col then @col = value; ...; end; end
     methods.push(synth_index_write(owner, table, model));
+    if runtime_relation == super::RuntimeRelation::Present {
+        methods.push(synth_mass_attribute_writer(model, table));
+    }
 
     // def update(attrs) / update!(attrs) — Rails-shaped: an attribute
     // Hash over the model's writable surface, saved.
@@ -1399,18 +1407,43 @@ fn synth_key_alias_writer(owner: &ClassId, key: &Column) -> MethodDef {
     }
 }
 
-fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef {
+fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model, raw_inputs: bool) -> MethodDef {
     let value_param = Symbol::from("value");
     // Writers normally take the STORAGE type and write the storage ivar:
     // `<col>=` / `@<col>` in general, `<col>_raw=` / `@<col>_raw` (Str)
-    // for a temporal column. Schema-less JSON is the exception: its public
-    // writer takes the decoded value and serializes it into the String slot.
+    // for a temporal column. JSON writers take decoded input and serialize
+    // it into the String slot, including declared has_json key casts.
     // Hydration uses `_write_<col>_json_raw` so DB text never goes through dump.
     let col_ty = super::ty_of_column_slot(col);
     let slot = ColumnSlot::classify(col, model);
-    let value_ty = if slot.is_json() { Ty::Untyped } else { col_ty.clone() };
+    let json_assignment = if raw_inputs {
+        crate::lower::has_json::column_assign(
+            model,
+            &col.name,
+            with_ty(var_ref(value_param.clone()), Ty::Untyped),
+            col_ty.clone(),
+        )
+    } else {
+        None
+    };
+    let value_ty = if slot.is_json()
+        || json_assignment.is_some()
+        || (raw_inputs && enum_setter_value(
+            model,
+            col,
+            with_ty(var_ref(value_param.clone()), Ty::Untyped),
+        )
+        .is_some())
+    {
+        Ty::Untyped
+    } else {
+        col_ty.clone()
+    };
     let value = with_ty(var_ref(value_param.clone()), value_ty.clone());
-    let rhs = if let Some(dumped) = slot.json_dump(value.clone()) {
+    let rhs = if let Some(assigned) = json_assignment {
+        crate::lower::normalizes::normalized_write(model, &col.name, assigned.clone())
+            .unwrap_or(assigned)
+    } else if let Some(dumped) = slot.json_dump(value.clone()) {
         dumped
     } else {
         let value = crate::lower::normalizes::normalized_write(model, &col.name, value.clone())
@@ -4671,6 +4704,157 @@ fn virtual_writer_fields(model: &Model, table: &Table) -> std::collections::BTre
     }
     virtuals.retain(|field| !table.columns.iter().any(|c| c.name == *field));
     virtuals
+}
+
+fn synth_mass_attribute_writer(model: &Model, table: &Table) -> MethodDef {
+    let name = Symbol::from("name");
+    let value = Symbol::from("value");
+    let raw = || with_ty(var_ref(value.clone()), Ty::Untyped);
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: true,
+            },
+        )
+    };
+    let mut writes = Vec::new();
+    for col in &table.columns {
+        let setter = format!("{}=", col.name.as_str());
+        let source = model.body.iter().find_map(|item| match item {
+            crate::dialect::ModelBodyItem::Method { method, .. }
+                if method.receiver == MethodReceiver::Instance
+                    && method.name.as_str() == setter =>
+            {
+                Some(method)
+            }
+            _ => None,
+        });
+        if source
+            .is_some_and(|method| method.visibility != crate::dialect::MethodVisibility::Public)
+        {
+            continue;
+        }
+        let slot = ColumnSlot::classify(col, model);
+        let (writer, argument) = if source.is_some() || slot.is_json() || col.array {
+            (setter, raw())
+        } else if crate::lower::has_json::column_assign(
+            model,
+            &col.name,
+            raw(),
+            super::ty_of_column_slot(col),
+        )
+        .is_some()
+        {
+            (setter, raw())
+        } else if slot.is_temporal() {
+            (
+                setter,
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Cast {
+                        value: raw(),
+                        target_ty: slot.temporal_writer_types().expect("temporal column").0,
+                    },
+                ),
+            )
+        } else if enum_setter_value(model, col, raw()).is_some() {
+            (setter, raw())
+        } else {
+            let cast = match ty_of_column(&col.col_type) {
+                Ty::Int => "cast_integer",
+                Ty::Float => "cast_float",
+                Ty::Bool => "cast_boolean",
+                _ => "cast_string",
+            };
+            let argument = with_ty(
+                send(
+                    class_const(&ClassId(Symbol::from("ActiveSupport"))),
+                    cast,
+                    vec![raw()],
+                ),
+                super::ty_of_column_slot(col),
+            );
+            (setter, argument)
+        };
+        writes.push((col.name.clone(), send(self_ref(), &writer, vec![argument])));
+    }
+    for field in virtual_writer_fields(model, table) {
+        let setter = format!("{}=", field.as_str());
+        let private = model.body.iter().any(|item| {
+            matches!(item,
+            crate::dialect::ModelBodyItem::Method { method, .. }
+                if method.receiver == MethodReceiver::Instance && method.name.as_str() == setter
+                    && method.visibility != crate::dialect::MethodVisibility::Public)
+        });
+        if !private {
+            writes.push((field, send(self_ref(), &setter, vec![raw()])));
+        }
+    }
+    let unknown = send(
+        self_ref(),
+        "_unknown_mass_attribute",
+        vec![var_ref(name.clone())],
+    );
+    let mut body = unknown.clone();
+    for (field, write) in writes.into_iter().rev() {
+        let public = with_ty(
+            send(
+                self_ref(),
+                "respond_to?",
+                vec![lit_sym(Symbol::from(format!("{}=", field.as_str())))],
+            ),
+            Ty::Bool,
+        );
+        let write = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: public,
+                then_branch: write,
+                else_branch: unknown.clone(),
+            },
+        );
+        let cond = with_ty(
+            send(
+                var_ref(name.clone()),
+                "==",
+                vec![lit_str(field.as_str().to_string())],
+            ),
+            Ty::Bool,
+        );
+        body = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond,
+                then_branch: write,
+                else_branch: body,
+            },
+        );
+    }
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("_assign_mass_attribute"),
+        receiver: MethodReceiver::Instance,
+        params: vec![
+            Param::positional(name.clone()),
+            Param::positional(value.clone()),
+        ],
+        body: seq(vec![body, nil_lit()]),
+        signature: Some(fn_sig(vec![(name, Ty::Str), (value, Ty::Untyped)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
 }
 
 fn synth_update_hash(
