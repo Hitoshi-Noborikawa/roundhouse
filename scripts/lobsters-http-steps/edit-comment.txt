@@ -1,5 +1,0 @@
-# as the comment's author: edit it (a PATCH through _method), then read it back
-GET /comments/{comment}/edit
-POST /comments/{comment} _method=patch&comment=Edited+by+the+replay
-GET {story_path}
-GET /comments

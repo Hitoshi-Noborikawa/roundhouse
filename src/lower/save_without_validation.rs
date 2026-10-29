@@ -43,7 +43,8 @@ fn rewrite(expr: &mut Expr) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
-    let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &mut *expr.node else {
+    // Not the explicit receiver only: a model's own body writes it bare (lobsters' Comment#delete_for_user is `save!(validate: false)`).
+    let ExprNode::Send { method, args, block: None, .. } = &mut *expr.node else {
         return;
     };
     if !matches!(method.as_str(), "save" | "save!") {

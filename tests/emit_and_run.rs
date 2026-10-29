@@ -20117,3 +20117,6 @@ mod joins_several_associations;
 
 #[path = "emit_and_run/chained_find_by_association_key.rs"]
 mod chained_find_by_association_key;
+
+#[path = "emit_and_run/bare_save_without_validation.rs"]
+mod bare_save_without_validation;

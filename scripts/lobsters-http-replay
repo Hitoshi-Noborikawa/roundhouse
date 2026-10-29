@@ -34,6 +34,9 @@
 #                     {comment} and {username} expand to ids scraped
 #                     after login; a step whose id was not scraped (no
 #                     {username} under --no-login) is skipped.
+#                     {last_comment} and {last_story} are the record the
+#                     latest POST's redirect named (a new comment's
+#                     `#c_…`, a new story's `/s/…`).
 #   --email E         login email    (default $LOBSTERS_EMAIL)
 #   --password P      login password (default $LOBSTERS_PASSWORD)
 #   --username U      for {username} (default $LOBSTERS_USERNAME, else
@@ -209,6 +212,9 @@ _, comments, = request("GET", "/comments")
 ids["comment"] = comments[%r{/comments/(\w+)/reply}, 1] || comments[%r{/c/(\w+)}, 1]
 _, settings, = request("GET", "/settings") if opts[:login]
 ids["username"] = opts[:username] || settings.to_s[%r{href="/(?:~|u/)(\w+)"}, 1]
+# Filled as the replay goes: the record a POST's redirect names.
+ids["last_comment"] = nil
+ids["last_story"] = nil
 
 steps = parse_steps(opts[:steps] ? File.read(opts[:steps]) : DEFAULT_STEPS)
 steps.each do |step|
@@ -250,6 +256,10 @@ steps.each do |step|
   name = "#{name}~#{(2..).find { |i| !statuses.key?("#{name}~#{i}") }}" if statuses.key?(name)
   statuses[name] = st
   locations[name] = location if location
+  if step.method == "POST" && location
+    ids["last_comment"] = location[/#c_(\w+)/, 1] || location[%r{/c/(\w+)}, 1] || ids["last_comment"]
+    ids["last_story"] = location[%r{/s/(\w+)}, 1] || ids["last_story"]
+  end
   File.write(File.join(opts[:dump], name), body) unless st == :EXC
   ok = step.expect ? st == step.expect : st.is_a?(Integer) && (200..399).cover?(st)
   # Not for a POST that names its status: one answering `ok` is the whole response.

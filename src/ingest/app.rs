@@ -2513,6 +2513,7 @@ end
     super::discard::expand_discard_models(&mut app)?;
     // Before the macros: a macro's `extend Owner::ClassMethods` names the module this surfaces.
     super::referenced_carriers::surface_referenced_carriers(&mut app, &sources);
+    super::conditional_permit::apply(&mut app);
     let hook_macros_called = super::class_macros::hook_macro_calls(&app);
     super::model_macros::expand_model_macros(&mut app, &sources)?;
     // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
@@ -2555,6 +2556,7 @@ end
     drop(sources);
     carry_included_block_includes_into_controllers(&mut app);
     splice_concerns_into_controllers(&mut app);
+    super::conditional_permit::apply(&mut app);
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
     // After the splice: a macro has to resolve against the concern's

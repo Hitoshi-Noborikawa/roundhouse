@@ -20,8 +20,9 @@ got = [
   Db.escape_string("\x00\x00\x00".b),
   Db.escape_string("it's"),
   Db.escape_string("café"),
+  Db.escape_string((+"\xfc\xd9\x07").force_encoding("UTF-8")),
 ]
-want = ["X'fcd907'", "X'000000'", "'it''s'", "'café'"]
+want = ["X'fcd907'", "X'000000'", "'it''s'", "'café'", "X'fcd907'"]
 raise "escape: #{got.inspect}" unless got == want
 puts "binary literal passed"
 "#,
