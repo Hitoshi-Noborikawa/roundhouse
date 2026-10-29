@@ -331,6 +331,8 @@ RULES = [
     why: "title=/datetime= instants differ by the gap between replays — digits are masked, the FORMAT is not" },
   { name: "totp-secret", kind: :mask,
     why: "a 2FA enrolment draws a fresh random secret: the otpauth URI's secret= and the QR code drawn from it are masked, the page around them is not" },
+  { name: "mini-profiler", kind: :known,
+    why: "the Spinel tree's rack-mini-profiler package injects its panel tag for a moderator; the CRuby tree loads the gem without its middleware" },
   { name: "asset-prefix", kind: :known,
     why: "emit serves /assets/NAME where Rails serves /stylesheets/ and /javascripts/" },
   { name: "request-scheme", kind: :known,
@@ -383,8 +385,19 @@ def fold_totp_qr!(toks, counts)
   end
 end
 
+# The panel's `<script id="mini-profiler">…</script>`, dropped where it was injected.
+def fold_mini_profiler!(toks, counts)
+  i = toks.index { |t| t.kind == :open && t.name == "script" && t.attrs.assoc("id")&.last == "mini-profiler" }
+  return unless i
+  close = (i + 1...toks.size).find { |j| toks[j].kind == :close && toks[j].name == "script" }
+  return unless close
+  toks.slice!(i..close)
+  counts["mini-profiler"] += 1
+end
+
 def normalize!(toks, counts, fold_known)
   fold_totp_qr!(toks, counts)
+  fold_mini_profiler!(toks, counts) if fold_known
   toks.each do |t|
     case t.kind
     when :text
