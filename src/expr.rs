@@ -118,6 +118,10 @@ pub const RESOLVED_MIXIN: u64 = 1 << 22;
 /// can ask; `project::report_unsupported_bundled_constants` reports it elsewhere.
 pub const MODULE_QUERY: u64 = 1 << 23;
 
+/// A runtime Class/Module factory or implicit singleton-class access.
+/// The Ruby and JRuby targets retain these runtime class objects.
+pub const RUNTIME_CLASS_OBJECT: u64 = 1 << 31;
+
 /// The call an `alias new builtin` delegates to (`ingest::library_class::
 /// OBJECT_BUILTINS`): a method every Ruby object answers, which only the
 /// ruby family has; `project::report_builtin_aliases` refuses it elsewhere.

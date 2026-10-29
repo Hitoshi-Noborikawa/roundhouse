@@ -19959,6 +19959,9 @@ mod proc_new_and_std_streams;
 mod core_constants;
 #[path = "emit_and_run/module_protocol_receivers.rs"]
 mod module_protocol_receivers;
+
+#[path = "emit_and_run/module_protocol_block_self.rs"]
+mod module_protocol_block_self;
 #[path = "emit_and_run/ipaddr_include.rs"]
 mod ipaddr_include;
 #[path = "emit_and_run/hash_subclass_include.rs"]

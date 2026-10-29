@@ -7975,6 +7975,18 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("`{}` asks a class object what it holds when the program runs, which the {target} emit cannot answer", method.as_str()),
             );
         }
+        // These newly admitted class objects are retained by Ruby/JRuby only.
+        if target != "jruby"
+            && expr.decisions & crate::expr::RUNTIME_CLASS_OBJECT != 0
+            && let crate::expr::ExprNode::Send { method, .. } = &*expr.node
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "runtime class object",
+                format!("`{}` requires a runtime class object; this form is supported on Ruby and JRuby only", method.as_str()),
+            );
+        }
         // A name computed when it runs: the Ruby family defines it then, which no compiled target can.
         if !matches!(target, "jruby")
             && let crate::expr::ExprNode::Send { recv, method, args, .. } = &*expr.node
