@@ -937,7 +937,7 @@ module ActionController
     # (`raise_on_open_redirects`): `redirect_to params[:back]` and a
     # stored `request.url` from a spoofed `HTTP_HOST` must not become
     # Location on another origin.
-    def redirect_to(path, notice: nil, alert: nil, status: :found, flash: nil)
+    def redirect_to(path, notice: nil, alert: nil, status: :found)
       loc = ActionController.sanitize_location(path)
       # Rails' `_compute_redirect_to_location`: a path becomes the
       # request's absolute URL. `head location:` does not come through
@@ -950,10 +950,6 @@ module ActionController
       @performed = true
       @flash[:notice] = notice unless notice.nil?
       @flash[:alert]  = alert  unless alert.nil?
-      # Rails' `flash: { error: … }`: any key, set after notice/alert as `flash.update` does.
-      unless flash.nil?
-        flash.each { |key, value| @flash[key] = value }
-      end
       nil
     end
 

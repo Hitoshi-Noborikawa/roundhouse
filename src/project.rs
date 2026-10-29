@@ -8482,6 +8482,13 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         files.push(("sig/runtime/action_controller_head.rbs".to_string(), rbs));
     }
 
+    // Any flash key (Rails' FlashHash): a Ruby-family and Spinel reopen of the shared Flash.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/flash_any_key.rbs")
+            .map_err(|e| format!("read runtime/spinel/flash_any_key.rbs: {e}"))?;
+        files.push(("sig/runtime/flash_any_key.rbs".to_string(), rbs));
+    }
+
     // Rails 8.1.4 `send_data(filename:)` and its Content-Disposition
     // escaping, which works over UTF-8 bytes: Ruby family and Spinel only.
     {

@@ -5,6 +5,22 @@
 # in runtime/ruby/action_controller/base.rb.
 module ActionController
   class Base
+    # Rails' `redirect_to …, flash: { error: … }`: any key, set after
+    # notice/alert as `flash.update` does. The strict targets' shared
+    # redirect_to keeps notice/alert only, as their Flash does.
+    def redirect_to(path, notice: nil, alert: nil, status: :found, flash: nil)
+      loc = ActionController.sanitize_location(path)
+      loc = absolute_redirect_location(loc)
+      loc = same_host_location(loc)
+      @location = loc
+      @status   = resolve_status(status)
+      @performed = true
+      @flash[:notice] = notice unless notice.nil?
+      @flash[:alert]  = alert  unless alert.nil?
+      flash&.each { |key, value| @flash[key] = value }
+      nil
+    end
+
     def head(status, options = nil)
       if status.is_a?(Hash)
         raise ArgumentError, "#{status.inspect} is not a valid value for `status`."
