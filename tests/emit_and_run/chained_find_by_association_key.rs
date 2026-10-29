@@ -2,7 +2,8 @@
 //! the association as `where`'s own does. lobsters' Comment#
 //! breaks_speed_limit? reads `Comment.where("created_at >= ?", t)
 //! .find_by(user: user, thread_id: …)`, which emitted `comments."user" = ?`
-//! — no such column — and every reply to a comment was a 500.
+//! — no such column — and every reply to a comment was a 500. A range
+//! condition goes through `where` too, whose binds a terminal does not take.
 
 use super::emit_and_run;
 
@@ -10,8 +11,8 @@ const ASSERTIONS: &str = r#"
 a = Article.create!(title: "Chained", body: "A body long enough for validation.")
 b = Article.create!(title: "Other", body: "A body long enough for validation.")
 Comment.create!(article: a, commenter: "x", body: "first")
-got = [Comment.recent_on(a)&.body, Comment.recent_on(b), Comment.any_recent_on?(a), Comment.any_recent_on?(b)]
-raise "chained: #{got.inspect}" unless got == ["first", nil, true, false]
+got = [Comment.recent_on(a)&.body, Comment.recent_on(b), Comment.any_recent_on?(a), Comment.any_recent_on?(b), Comment.in_window(a)&.body]
+raise "chained: #{got.inspect}" unless got == ["first", nil, true, false, "first"]
 puts "chained find_by passed"
 "#;
 
@@ -21,7 +22,7 @@ fn a_chained_terminal_keys_its_condition_hash_off_the_association() {
         .edit(
             "app/models/comment.rb",
             "  validates :commenter, presence: true\n",
-            "  validates :commenter, presence: true\n\n  def self.recent_on(a)\n    Comment.where(\"created_at >= ?\", 1.day.ago).find_by(article: a, commenter: \"x\")\n  end\n\n  def self.any_recent_on?(a)\n    Comment.where(\"created_at >= ?\", 1.day.ago).exists?(article: a)\n  end\n",
+            "  validates :commenter, presence: true\n\n  def self.recent_on(a)\n    Comment.where(\"created_at >= ?\", 1.day.ago).find_by(article: a, commenter: \"x\")\n  end\n\n  def self.any_recent_on?(a)\n    Comment.where(\"created_at >= ?\", 1.day.ago).exists?(article: a)\n  end\n\n  def self.in_window(a)\n    Comment.where(article: a).find_by(created_at: 1.day.ago..)\n  end\n",
         )
         .run_ruby(ASSERTIONS);
     run.assert_passes();

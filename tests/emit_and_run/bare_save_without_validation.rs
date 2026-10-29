@@ -27,3 +27,17 @@ fn a_bare_save_without_validation_skips_validation() {
     run.assert_passes();
     assert!(run.stdout.contains("bare save passed"), "{}", run.stdout);
 }
+
+/// A bare `save(validate: false)` outside a model is another class's own
+/// method, which may take the kwarg: it is left as written.
+#[test]
+fn a_bare_save_outside_a_model_is_left_alone() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/draft_box.rb",
+            "class DraftBox\n  def save(validate: true)\n    validate ? \"checked\" : \"unchecked\"\n  end\n\n  def stash\n    save(validate: false)\n  end\nend\n",
+        )
+        .run_ruby("raise \"stash\" unless DraftBox.new.stash == \"unchecked\"\nputs \"service save passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("service save passed"), "{}", run.stdout);
+}

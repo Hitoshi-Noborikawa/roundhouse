@@ -2686,6 +2686,7 @@ pub(crate) fn partial_call_contracts(
     // so `flash_locals` sees one handed name across def and callers.
     let (collection_locals, _) = collection_element_locals_from_views(views);
     let request_context = request_context_views(views);
+    let form_bindings = partial_form_bindings(views);
     let mut out = crate::det::HashMap::default();
     for view in views {
         let (dir, base) = split_view_name(view.name.as_str());
@@ -2696,9 +2697,14 @@ pub(crate) fn partial_call_contracts(
         let key = (camelize_path(&snake_case(dir)), stem.to_string());
         // Strict locals declare the whole contract: the first local is
         // the positional record, the rest are keywords.
-        if let Some(sl) = view.strict_locals.as_ref().filter(|sl| !sl.is_empty()) {
-            let declared: Vec<String> =
-                sl.iter().map(|p| p.name.as_str().to_string()).collect();
+        let form_local = form_bindings.get(&key).map(|b| b.form_local.as_str());
+        if let Some(sl) = view.strict_locals.as_ref().filter(|sl| sl.iter().any(|p| Some(p.name.as_str()) != form_local)) {
+            // Not the declared form local: the def drops it (`strict_without_form`), so a caller passing it would hand over an unknown keyword.
+            let declared: Vec<String> = sl
+                .iter()
+                .map(|p| p.name.as_str().to_string())
+                .filter(|n| Some(n.as_str()) != form_local)
+                .collect();
             let closure: Vec<String> = closures
                 .get(&key)
                 .map(|ivs| {

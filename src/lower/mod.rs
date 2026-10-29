@@ -863,6 +863,7 @@ pub fn apply_post_analyze_lowerings(
     crate::timings::phase("post-analyze: fused send rewrites", || {
         fused::apply_fused_independent_rewrites(app);
     });
+    save_without_validation::apply_bare_model_saves(app);
     ran!("pathname_ctor");
     ran!("array_ordinal");
     ran!("save_without_validation");

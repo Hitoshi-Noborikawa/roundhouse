@@ -5220,9 +5220,28 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return Some(mr);
                 }
-                // Not passed through as written: a terminal's condition hash keys off the target's associations as `where`'s does (lobsters' `Comment.where("created_at >= ?", t).find_by(user: user)` read `comments.user`).
-                if matches!(method.as_str(), "find_by" | "find_by!" | "find_sole_by" | "destroy_by" | "delete_by" | "exists?") {
-                    let _ = lower_relation_args(&mr, &method, &mut args, ctx);
+                // Not passed through as written, nor lowered in place: the condition keys off the target's associations (`comments.user` was read), and a lowered range or record list needs `where`'s binds, which a one-argument terminal does not take.
+                let after_where = match method.as_str() {
+                    "find_by" => Some("first"),
+                    "find_by!" => Some("first!"),
+                    "find_sole_by" => Some("sole"),
+                    "destroy_by" => Some("destroy_all"),
+                    "delete_by" => Some("delete_all"),
+                    "exists?" => Some("exists?"),
+                    _ => None,
+                };
+                if let Some(terminal) = after_where
+                    && block.is_none()
+                    && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. }))
+                {
+                    let where_name = Symbol::from("where");
+                    let aliases = lower_relation_args(&mr, &where_name, &mut args, ctx);
+                    let mut r = r;
+                    let unapplied = apply_join_aliases(&mut r, &mr, &aliases, ctx);
+                    key_unapplied_aliases_by_table(&mut args, &mr, &unapplied, ctx);
+                    let filtered = put(span, Some(r), where_name, args, None, true);
+                    *expr = put(span, Some(filtered), Symbol::from(terminal), vec![], None, false);
+                    return None;
                 }
                 *expr = put(span, Some(r), method, args, block, parenthesized);
                 return None;
