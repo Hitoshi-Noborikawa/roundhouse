@@ -863,7 +863,9 @@ pub struct CollectionCacheStore {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GemPackageSetting {
     pub gem: String,
+    pub setter: String,
     pub statement: String,
+    pub span: crate::span::Span,
 }
 
 /// `X.before_action :m, only: [:a, …]` from a `config/initializers/`

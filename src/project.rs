@@ -2737,6 +2737,7 @@ fn target_files_inner(
     report_url_helpers_includes(app, target);
     report_partial_binops(app, target);
     report_spinel_unknown_gem_constants(app, target);
+    report_spinel_gem_package_settings(app, target);
     report_model_attribute_defaults(app, target);
     report_builtin_aliases(app, target);
     report_dynamic_association_joins(app, target);
@@ -8283,11 +8284,34 @@ fn spinel_files_with_source_markers(
     Ok((files, stems))
 }
 
+// Not `lock.has` alone: `require: false` keeps Bundler.require from loading the gem, so its Railtie never inserts the middleware.
+fn package_loads(lock: &crate::gems::Lockfile, package: &crate::gems::GemPackage) -> bool {
+    lock.has(package.gem) && lock.gemfile_requires.get(package.gem).is_none_or(|features| !features.is_empty())
+}
+
+// Not left out silently: a setting the package's Config has no writer for is dropped from boot.rb, so the initializer is not applied as written.
+fn report_spinel_gem_package_settings(app: &App, target: BuildTarget) {
+    if !matches!(target, BuildTarget::Spinel) {
+        return;
+    }
+    let Some(lock) = app.gem_lock.as_ref() else { return };
+    for package in crate::gems::GEM_PACKAGES.iter().filter(|p| package_loads(lock, p)) {
+        for setting in app.gem_package_settings.iter().filter(|s| s.gem == package.gem) {
+            if !setting.carried() {
+                crate::emit::diagnostics::report_unsupported(
+                    setting.span, "spinel", "gem package setting",
+                    format!("`{}` is not a setting the Spinel tree's {} package carries; the initializer line is not applied", setting.statement, package.gem),
+                );
+            }
+        }
+    }
+}
+
 fn apply_gem_packages(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
     const ANCHOR: &str = "require_relative \"runtime/request_hooks\"\n";
     let Some(lock) = app.gem_lock.as_ref() else { return Ok(()) };
     let mut boot_lines = String::new();
-    for package in crate::gems::GEM_PACKAGES.iter().filter(|p| lock.has(p.gem)) {
+    for package in crate::gems::GEM_PACKAGES.iter().filter(|p| package_loads(lock, p)) {
         let dir = format!("runtime/gems/{}", package.dir);
         // Not `walk_partitioned`'s sig/ split: spin_shape moves sidecars beside their .rb anyway, and the assets must ship too.
         crate::runtime_files::walk_into(&dir, &format!("{dir}/"), files)?;
@@ -8295,7 +8319,7 @@ fn apply_gem_packages(files: &mut Vec<(String, String)>, app: &App) -> Result<()
         let settings: Vec<&str> = app
             .gem_package_settings
             .iter()
-            .filter(|s| s.gem == package.gem)
+            .filter(|s| s.gem == package.gem && s.carried())
             .map(|s| s.statement.as_str())
             .collect();
         if !settings.is_empty() {

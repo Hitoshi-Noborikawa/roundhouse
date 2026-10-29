@@ -13,10 +13,10 @@ pub(crate) fn extract(source: &[u8], file: &str) -> Vec<GemPackageSetting> {
     let result = super::prism::parse(source, file);
     let root = result.node();
     let Some(program) = root.as_program_node() else { return Vec::new() };
-    super::app::initializer_statements(&program).iter().filter_map(setting).collect()
+    super::app::initializer_statements(&program).iter().filter_map(|stmt| setting(stmt, file)).collect()
 }
 
-fn setting(stmt: &Node<'_>) -> Option<GemPackageSetting> {
+fn setting(stmt: &Node<'_>, file: &str) -> Option<GemPackageSetting> {
     let call = stmt.as_call_node()?;
     let name = super::util::constant_id_str(&call.name());
     if !name.ends_with('=') || matches!(name, "==" | "!=" | "===" | "<=" | ">=") {
@@ -31,10 +31,20 @@ fn setting(stmt: &Node<'_>) -> Option<GemPackageSetting> {
     if !literal(value) {
         return None;
     }
+    let loc = stmt.location();
+    let (start, end) = super::prism_api::span_offsets(&loc);
     Some(GemPackageSetting {
         gem: package.gem.to_string(),
-        statement: String::from_utf8_lossy(stmt.location().as_slice()).into_owned(),
+        setter: name.trim_end_matches('=').to_string(),
+        statement: String::from_utf8_lossy(loc.as_slice()).into_owned(),
+        span: crate::span::Span { file: super::sources::file_id(file), start, end },
     })
+}
+
+impl GemPackageSetting {
+    pub(crate) fn carried(&self) -> bool {
+        crate::gems::GEM_PACKAGES.iter().any(|p| p.gem == self.gem && p.config_setters.contains(&self.setter.as_str()))
+    }
 }
 
 fn literal(node: &Node<'_>) -> bool {
@@ -65,6 +75,14 @@ mod tests {
             ["Rack::MiniProfiler.config.disable_caching = false", "Rack::MiniProfiler.config.position = \"bottom-left\""]
         );
         assert_eq!(extract(src.as_bytes(), "<test>")[0].gem, "rack-mini-profiler");
+    }
+
+    #[test]
+    fn a_setting_the_package_has_no_writer_for_is_not_carried() {
+        let found = extract(b"Rack::MiniProfiler.config.skip_schema_queries = true\n", "<test>");
+        assert_eq!(found[0].setter, "skip_schema_queries");
+        assert!(!found[0].carried());
+        assert!(extract(b"Rack::MiniProfiler.config.position = \"bottom-left\"\n", "<test>")[0].carried());
     }
 
     #[test]

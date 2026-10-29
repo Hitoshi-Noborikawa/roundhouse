@@ -3334,8 +3334,19 @@ What differs:
   gets the server's `text/html; charset=utf-8`.
 - **The CSP nonce attribute is empty**, as on the CRuby tree; Rails fills
   it when the layout generated one.
-- Only literal initializer settings are replayed; a computed one stays an
-  unconsumed-initializer warning.
+- **The share page escapes what the gem writes raw.** Its `<title>` is
+  HTML-escaped and the page JSON in its `<script>` is `json_escape`d
+  (`<`, `>`, `&` as `\u003c` …): the Spinel server accepts a raw `<` in
+  the request line, which Puma refuses, so request data could otherwise
+  close the script. The browser reads the same values; the bytes differ
+  wherever the data holds one of those characters.
+- Only literal initializer settings are replayed, and only those the
+  package's `Config` has a writer for (`config_setters` in
+  `src/gems/rack_mini_profiler.rs`). Any other literal setting is an
+  `unsupported (spinel)` error at emit and stays an unconsumed-initializer
+  warning; a computed one is only the warning.
+- A Gemfile line with `require: false` keeps the package out, as Bundler
+  would keep the gem's Railtie from loading.
 
 **The middleware is not on the CRuby tree.** It loads the real gem for
 the `authorize_request` gate only, so an authorized page there renders

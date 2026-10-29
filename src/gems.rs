@@ -38,6 +38,7 @@ pub(crate) struct GemPackage {
     pub dir: &'static str,
     pub entry: &'static str,
     pub config_receiver: Option<&'static str>,
+    pub config_setters: &'static [&'static str],
 }
 
 pub(crate) const GEM_PACKAGES: &[GemPackage] = &[rack_mini_profiler::PACKAGE];

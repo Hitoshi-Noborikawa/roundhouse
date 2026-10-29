@@ -308,8 +308,9 @@ module Rack
       def share_html(json)
         name = TimerStruct::Page.read_name(json)
         duration = TimerStruct::Page.read_duration(json).round(1).to_s
-        "<html>\n    <head>\n        <title>" + name + " (" + duration + " ms) - Profiling Results</title>\n" \
-          "        <script type='text/javascript'> var profiler = " + json + "; </script>\n" \
+        # Not raw as the gem (4.0.0) writes both: request data could close the title or the script; the browser reads the same values either way.
+        "<html>\n    <head>\n        <title>" + RequestHook.h(name) + " (" + duration + " ms) - Profiling Results</title>\n" \
+          "        <script type='text/javascript'> var profiler = " + RequestHook.json_escape(json) + "; </script>\n" \
           "        " + profile_script_for("", "[]") + "\n" \
           "    </head>\n    <body>\n        <div class='profiler-result-full'></div>\n    </body>\n</html>\n"
       end
@@ -453,6 +454,10 @@ module Rack
           end
         end
         out
+      end
+
+      def self.json_escape(s)
+        s.gsub("<", "\\u003c").gsub(">", "\\u003e").gsub("&", "\\u0026")
       end
 
       def self.h(s)

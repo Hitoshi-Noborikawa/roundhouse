@@ -51,6 +51,31 @@ fn without_the_gem_nothing_of_it_ships() {
     assert!(!emitted.join("runtime/gems").exists());
 }
 
+#[test]
+fn a_gemfile_require_false_keeps_the_package_out() {
+    let (emitted, _) = app(true).write("Gemfile", "gem \"rack-mini-profiler\", require: false\n").emit(BuildTarget::Spinel);
+    let boot = std::fs::read_to_string(emitted.join("boot.rb")).unwrap();
+    assert!(!boot.contains("runtime/gems/"), "{boot}");
+}
+
+#[test]
+fn a_setting_the_package_does_not_carry_is_reported_and_not_replayed() {
+    let (emitted, errors) = app(true)
+        .write(
+            "config/initializers/mini_profiler.rb",
+            "Rack::MiniProfiler.config.position = \"bottom-left\"\nRack::MiniProfiler.config.skip_schema_queries = true\n",
+        )
+        .emit(BuildTarget::Spinel);
+    assert!(
+        errors.iter().any(|e| e.contains("gem package setting") && e.contains("skip_schema_queries")),
+        "{}",
+        errors.join("\n")
+    );
+    if let Ok(boot) = std::fs::read_to_string(emitted.join("boot.rb")) {
+        assert!(!boot.contains("skip_schema_queries"), "{boot}");
+    }
+}
+
 /// Drives the hook as `Main.dispatch` does: begin, the app's response, end.
 const DRIVE: &str = r##"
 def mp_request(verb, path, query, cookie)
@@ -99,6 +124,16 @@ res = Tep::Response.new
 raise "asset not answered" unless RequestHooks.request_begin(req, res)
 RequestHooks.request_end(req, res)
 raise "asset: #{res.file_path}" unless res.file_path == "runtime/gems/rack_mini_profiler/html/includes.css" && res.headers["Content-Type"] == "text/css"
+
+req = mp_request("GET", "/x", "q=</script><!--", "")
+res = mp_page(req, false)
+sid = res.headers["X-MiniProfiler-Ids"].split(",")[0]
+res = Tep::Response.new
+req = mp_request("GET", "/mini-profiler-resources/results", "id=" + sid, "")
+RequestHooks.request_begin(req, res)
+RequestHooks.request_end(req, res)
+raise "share page: #{res.body}" unless res.body.include?("var profiler = {") && !res.body.include?("q=</script>") && !res.body.include?("<!--")
+raise "share page escaping: #{res.body}" unless res.body.include?("q=\\u003c/script\\u003e\\u003c!--")
 
 # production: the cookie gates profiling, and the controller authorizes
 Rack::MiniProfiler.config.apply_railtie(Rails::Env.new("production"))

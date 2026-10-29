@@ -232,7 +232,7 @@ const RECOGNIZERS: &[Recognizer] = &[
         name: "gem_package_settings (<package config receiver>.<attr> = literal, replayed after the Spinel package loads)",
         origins: INIT,
         levels: TOP_HOOK,
-        reads: |p| !super::gem_package_settings::extract(p.text.as_bytes(), PROBE).is_empty(),
+        reads: |p| super::gem_package_settings::extract(p.text.as_bytes(), PROBE).iter().any(|s| s.carried()),
     },
     Recognizer {
         name: "default_per_page (Kaminari.configure { |c| c.default_per_page = })",
