@@ -20114,3 +20114,6 @@ mod where_record_seed_redirect_back;
 
 #[path = "emit_and_run/joins_several_associations.rs"]
 mod joins_several_associations;
+
+#[path = "emit_and_run/chained_find_by_association_key.rs"]
+mod chained_find_by_association_key;
