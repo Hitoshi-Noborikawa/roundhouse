@@ -891,7 +891,9 @@ struct SourceContractIndex<'a> {
     /// Owners whose own plain `initialize` shadows any a mixin supplies
     /// (`constructor::shadows_supplied_initialize`).
     shadowing_initializers: HashSet<ClassId>,
-    fragments: HashMap<ClassId, usize>,
+    /// Owners a fragment declares a method of again, or whose mixins more than one fragment adds.
+    redefined: HashSet<ClassId>,
+    including_fragments: HashMap<ClassId, usize>,
     instance: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     class: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     virtual_owners: Vec<&'a ClassId>,
@@ -917,7 +919,8 @@ impl<'a> SourceContractIndex<'a> {
             unmodeled_constructor_lookup: HashSet::default(),
             unmodeled_new_lookup: HashSet::default(),
             shadowing_initializers: HashSet::default(),
-            fragments: HashMap::default(),
+            redefined: HashSet::default(),
+            including_fragments: HashMap::default(),
             instance: HashMap::default(),
             class: HashMap::default(),
             virtual_owners: Vec::new(),
@@ -1044,9 +1047,12 @@ impl<'a> SourceContractIndex<'a> {
         parent: Option<&'a ClassId>,
         includes: impl Iterator<Item = ClassId>,
     ) {
-        *self.fragments.entry(owner.clone()).or_default() += 1;
         if let Some(parent) = parent {
             self.parents.entry(owner.clone()).or_insert(parent);
+        }
+        let includes: Vec<ClassId> = includes.collect();
+        if !includes.is_empty() {
+            *self.including_fragments.entry(owner.clone()).or_default() += 1;
         }
         self.includes
             .entry(owner.clone())
@@ -1065,15 +1071,18 @@ impl<'a> SourceContractIndex<'a> {
                 MethodReceiver::Instance => &mut self.instance,
                 MethodReceiver::Class => &mut self.class,
             };
-            declarations.insert((owner.clone(), method.name.clone()), (method, model));
+            if declarations.insert((owner.clone(), method.name.clone()), (method, model)).is_some() {
+                self.redefined.insert(owner.clone());
+            }
         }
     }
 
     /// A second source fragment can replace the keyword contract the
     /// first fragment declared. Anonymous packets have no keys to
     /// re-bind, so a reopened owner stays refused.
+    // Not every second fragment: rotp's `class OTP; class URI` only nests a class, and replaces nothing whichever file loads first.
     fn reopened(&self, owner: &ClassId) -> bool {
-        self.fragments.get(owner).copied().unwrap_or(0) > 1
+        self.redefined.contains(owner) || self.including_fragments.get(owner).copied().unwrap_or(0) > 1
     }
 
     fn parent(&self, owner: &ClassId) -> Option<&'a ClassId> {
@@ -1138,7 +1147,7 @@ impl<'a> SourceContractIndex<'a> {
         if !seen.insert(owner.clone()) {
             return true;
         }
-        (self.fragments.get(owner).copied().unwrap_or(0) <= 1 || self.modules.contains(owner))
+        (!self.reopened(owner) || self.modules.contains(owner))
             && self
                 .parent(owner)
                 .is_none_or(|parent| self.verified_hierarchy(parent, seen))
