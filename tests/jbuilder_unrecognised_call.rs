@@ -8,6 +8,10 @@
 //! cannot follow is now refused where it stands, the way a dynamic
 //! `extract!` is: the survey lists it and the emitted view raises there.
 //!
+//! `json.set!(K, …)` with a literal key is Jbuilder's own spelling of
+//! `json.K(…)` (an undefined method on the builder is sent to `set!`),
+//! and lowers as that.
+//!
 //! The lowering is shared by every target, so the survey check covers
 //! them all; the emitted Ruby (the `ruby` and `spinel` source) is also
 //! run on CRuby next to the runtime's `JsonBuilder`, with plain Structs
@@ -55,6 +59,39 @@ const TEMPLATES: &[(&str, &str)] = &[
         "opts_var_block",
         "opts = { partial: \"widgets/widget\", as: :widget }\njson.count @widgets.size\njson.widgets(@widgets, opts) do |widget|\n  json.label widget.name\nend\n",
     ),
+    // `set!` with no value and a block that names a parameter: jbuilder
+    // yields the builder to it (`_merge_block`), and its calls go
+    // through `g`, not `json`.
+    (
+        "set_block_param",
+        "json.count @widgets.size\njson.set!(:gadget) do |g|\n  g.name \"g\"\nend\n",
+    ),
+];
+
+/// `json.set!` with a literal key, which lowers as `json.<key>` does,
+/// and what jbuilder renders for each.
+const SET_BANG: &[(&str, &str, &str)] = &[
+    (
+        "set_pair",
+        "json.count @widgets.size\njson.set!(:gadget, @widgets.size)\n",
+        r#"{"count":2,"gadget":2}"#,
+    ),
+    (
+        "set_collection",
+        "json.count @widgets.size\njson.set!(:gadgets, @widgets) do |widget|\n  json.label widget.name\nend\n",
+        r#"{"count":2,"gadgets":[{"label":"a"},{"label":"b"}]}"#,
+    ),
+    (
+        "set_block",
+        "json.count @widgets.size\njson.set!(:gadget) do\n  json.name \"g\"\nend\n",
+        r#"{"count":2,"gadget":{"name":"g"}}"#,
+    ),
+    // A String key is the same key.
+    (
+        "set_string_key",
+        "json.count @widgets.size\njson.set!(\"gadget\", @widgets.size)\n",
+        r#"{"count":2,"gadget":2}"#,
+    ),
 ];
 
 /// The construct the refusal names, as the Ruby emit writes it.
@@ -64,7 +101,8 @@ fn app() -> roundhouse::App {
     let mut controller = String::from("class WidgetsController < ApplicationController\n");
     let mut routes = String::from("Rails.application.routes.draw do\n");
     let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
-    for (name, template) in TEMPLATES {
+    let all = TEMPLATES.iter().copied().chain(SET_BANG.iter().map(|(n, t, _)| (*n, *t)));
+    for (name, template) in all {
         controller.push_str(&format!("  def {name}\n    @widgets = Widget.all\n    render :{name}\n  end\n\n"));
         routes.push_str(&format!(
             "  get \"{name}\", to: \"widgets#{name}\", defaults: {{ format: :json }}\n"
@@ -110,8 +148,8 @@ fn view<'a>(files: &'a [(String, String)], name: &str) -> &'a str {
 
 /// Each template on CRuby with two widgets: its JSON, or the class and
 /// message of what it raises.
-fn render_all(files: &[(String, String)]) -> HashMap<String, String> {
-    let dir = std::env::temp_dir().join(format!("roundhouse-jbuilder-unrecognised-call-{}", std::process::id()));
+fn render_all(tag: &str, files: &[(String, String)]) -> HashMap<String, String> {
+    let dir = std::env::temp_dir().join(format!("roundhouse-jbuilder-unrecognised-call-{tag}-{}", std::process::id()));
     for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -125,7 +163,7 @@ fn render_all(files: &[(String, String)]) -> HashMap<String, String> {
         dir.join("app/views/widgets/_widget_json.rb").display().to_string()
     ));
     script.push_str("Widget = Struct.new(:id, :name)\nwidgets = [Widget.new(1, \"a\"), Widget.new(2, \"b\")]\n");
-    for (name, _) in TEMPLATES {
+    for name in TEMPLATES.iter().map(|(n, _)| *n).chain(SET_BANG.iter().map(|(n, _, _)| *n)) {
         let file = dir.join(format!("app/views/widgets/{name}_json.rb"));
         script.push_str(&format!(
             "require {file:?}\nout = begin\n  Views::Widgets.{name}_json(widgets)\nrescue => e\n  \"raises #{{e.class}}: #{{e.message}}\"\nend\nputs \"{name}\\t#{{out}}\"\n",
@@ -184,17 +222,49 @@ fn an_unrecognised_json_call_is_refused_where_it_stands() {
     }
 }
 
-/// On CRuby each template raises the refusal. Jbuilder renders the
-/// first, third and fourth and raises `RuntimeError: bad` on the
-/// second; before the fix all four rendered `{"count":2}`.
+/// On CRuby each template raises the refusal. Jbuilder raises
+/// `RuntimeError: bad` on `options_raise` and renders the others; before
+/// the fix the first four rendered `{"count":2}` and `set_block_param`
+/// raised `NoMethodError` mapping over the Symbol `:gadget`.
 #[test]
 fn an_unrecognised_json_call_raises_when_rendered() {
-    let out = render_all(&emitted());
+    let out = render_all("refused", &emitted());
     for (name, _) in TEMPLATES {
         let got = &out[*name];
         assert!(
             got.starts_with("raises RuntimeError: ") && got.contains(REFUSAL),
             "{name}: {got}"
         );
+    }
+}
+
+/// `json.set!(:k, …)` is `json.k(…)`: a pair, an array built by the
+/// block, a nested object. Before, each of these wrote nothing.
+#[test]
+fn set_bang_with_a_literal_key_lowers_as_the_key() {
+    let files = emitted();
+    for (name, _, _) in SET_BANG {
+        let src = view(&files, name);
+        assert!(!src.contains(REFUSAL), "{name}: lowered, not refused:\n{src}");
+        assert!(!src.contains("\\\"set!\\\":"), "{name}: `set!` is not the key:\n{src}");
+    }
+    let pair = view(&files, "set_pair");
+    assert!(
+        pair.contains("io << \"\\\"gadget\\\":\"\n      io << JsonBuilder.encode_value(widgets.size)\n"),
+        "a pair:\n{pair}"
+    );
+    let collection = view(&files, "set_collection");
+    assert!(
+        collection.contains("__col0 = widgets") && collection.contains("__col0.map"),
+        "an array over the collection, not over the key:\n{collection}"
+    );
+}
+
+/// On CRuby the `set!` templates render what jbuilder 2.15.1 renders.
+#[test]
+fn set_bang_with_a_literal_key_renders_what_jbuilder_renders() {
+    let out = render_all("set_bang", &emitted());
+    for (name, _, expected) in SET_BANG {
+        assert_eq!(&out[*name], expected, "{name}");
     }
 }

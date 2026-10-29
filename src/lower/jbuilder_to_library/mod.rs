@@ -2044,6 +2044,38 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             };
             JbStmt::Partial { partial_path, locals }
         }
+        // `json.set!(K, *rest, &blk)` with a literal key is
+        // `json.K(*rest, &blk)`: jbuilder 2.15.1 sends any method the
+        // builder does not define to `set!`, key first, so the two
+        // spellings take the same path with the same arguments. Only
+        // the generic key shapes below apply: `set!(:array!, x)` writes
+        // a key named `array!`, it is not `json.array!`.
+        //
+        // With no value, a block that names a parameter is given the
+        // builder itself (`_merge_block` yields `self`), and its calls
+        // go through that parameter rather than `json`, which the
+        // lowering cannot follow: Unknown, and so refused. A key that
+        // is not a literal is only known at run time: Unknown too.
+        "set!" => {
+            let Some((key, rest)) = args.split_first() else {
+                return JbStmt::Unknown;
+            };
+            let Some(key) = set_bang_key(key) else {
+                return JbStmt::Unknown;
+            };
+            if rest.is_empty() && block_names_a_parameter(block) {
+                return JbStmt::Unknown;
+            }
+            classify_key(&key, rest, block)
+        }
+        key => classify_key(key, args, block),
+    }
+}
+
+/// The generic `json.<key>(…)` shapes, where the method name (or the
+/// literal key of a `set!`) is the JSON key.
+fn classify_key<'a>(key: &str, args: &'a [Expr], block: &'a Option<Expr>) -> JbStmt<'a> {
+    match key {
         // `json.<key> do … end` — the value is a nested object. No
         // positional args; the block body is another object template.
         key if args.is_empty() && block.is_some() => {
@@ -2076,14 +2108,8 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // them, so the arm only takes them when they are literals: a
         // call there (`cache: raise("bad")`, `cache: key_for(x)`) has
         // effects the lowered array would lose.
-        //
-        // An explicit `json.set!(:key, col) { … }` is not this shape:
-        // its method name is not the key and its first argument is not
-        // the collection, so only its one-argument form reaches this
-        // arm, as before.
         key if !args.is_empty()
             && block.is_some()
-            && (key != "set!" || args.len() == 1)
             && args[1..].iter().all(is_literal_value)
             && !args
                 .get(1)
@@ -2126,6 +2152,26 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         }
         _ => JbStmt::Unknown,
     }
+}
+
+/// The key of `json.set!(key, …)` as Jbuilder writes it, when it is a
+/// Symbol or String literal whose text needs no escaping in JSON (the
+/// walker writes a key as it stands). `None` for anything else, which
+/// the caller refuses.
+fn set_bang_key(e: &Expr) -> Option<String> {
+    let key = match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+        _ => string_literal(e)?,
+    };
+    let plain = !key.is_empty()
+        && key.chars().all(|c| !c.is_control() && !matches!(c, '"' | '\\' | '<' | '>' | '&' | '\u{2028}' | '\u{2029}'));
+    plain.then_some(key)
+}
+
+/// Whether a block names any parameter (`{ |g| … }`, `{ |*a| … }`).
+fn block_names_a_parameter(block: &Option<Expr>) -> bool {
+    matches!(block.as_ref().map(|b| &*b.node), Some(ExprNode::Lambda { params, rest_param, extra_params, block_param, .. })
+        if !params.is_empty() || rest_param.is_some() || !extra_params.is_empty() || block_param.is_some())
 }
 
 /// The element variable and body of a one-parameter block,
