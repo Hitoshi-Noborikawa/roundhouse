@@ -4,7 +4,8 @@
 //! .find_by(user: user, thread_id: …)`, which emitted `comments."user" = ?`
 //! — no such column — and every reply to a comment was a 500. A range
 //! condition goes through `where` too, whose binds a terminal does not take,
-//! and a list of plain ids is passed as is (it has no `.id` to read).
+//! and a list of plain ids is passed as is (it has no `.id` to read); a nil
+//! among them is an `IS NULL` arm.
 
 use super::emit_and_run;
 
@@ -14,6 +15,8 @@ b = Article.create!(title: "Other", body: "A body long enough for validation.")
 Comment.create!(article: a, commenter: "x", body: "first")
 got = [Comment.recent_on(a)&.body, Comment.recent_on(b), Comment.any_recent_on?(a), Comment.any_recent_on?(b), Comment.in_window(a)&.body, Comment.by_id_list(a)&.body]
 raise "chained: #{got.inspect}" unless got == ["first", nil, true, false, "first", "first"]
+# A nil among the ids is Rails' `IS NULL` arm, not `IN (…, NULL)`, which matches no null key.
+raise "nil id" unless Comment.where(article_id: [a.id, nil]).to_sql.include?("IS NULL")
 puts "chained find_by passed"
 "#;
 
