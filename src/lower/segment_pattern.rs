@@ -218,12 +218,29 @@ fn parse_bracket(chars: &[char], i: &mut usize) -> Option<(Vec<char>, bool)> {
                 break;
             }
             Some('\\') => {
-                // An escaped char inside a bracket is always literal
-                // (`\/`, `\-`, `\]`, …) — no `\d`/anchors supported
-                // here, keeping brackets a closed, simple shape.
+                // An escaped punctuation char inside a bracket is
+                // literal (`\/`, `\-`, `\]`, …). A letter escape is a
+                // class or a control char in Ruby, never the letter:
+                // `[\w-]` is word chars and `-`, not `w` and `-`.
+                // `\d` and `\w` expand to their ASCII members (Ruby's
+                // meaning without the `u` flag); any other letter
+                // escape refuses the pattern, as it does outside.
                 *i += 1;
                 let c = *chars.get(*i)?;
                 *i += 1;
+                if c.is_ascii_alphanumeric() {
+                    match c {
+                        'd' => members.extend('0'..='9'),
+                        'w' => {
+                            members.extend('a'..='z');
+                            members.extend('A'..='Z');
+                            members.extend('0'..='9');
+                            members.push('_');
+                        }
+                        _ => return None,
+                    }
+                    continue;
+                }
                 if chars.get(*i) == Some(&'-') && chars.get(*i + 1) != Some(&']') {
                     let (lo, hi) = (c, *chars.get(*i + 1)?);
                     if lo > hi {
@@ -811,6 +828,22 @@ mod tests {
     #[test]
     fn grouped_lazy_class_compiles() {
         ok(r"([^/])+?");
+    }
+
+    #[test]
+    fn a_word_escape_inside_a_bracket_is_the_word_class() {
+        // `[\w-]+` is word characters and `-`, not the letters `w` and `-`.
+        let enc = ok(r"[\w-]+");
+        for c in ['a', 'Z', '0', '_', '-'] {
+            assert!(enc.contains(c), "{enc} lacks {c:?}");
+        }
+        assert_eq!(ok(r"[\d]+"), ok(r"[0-9]+"));
+    }
+
+    #[test]
+    fn other_letter_escapes_inside_a_bracket_are_refused() {
+        refused(r"[\s]+");
+        refused(r"[\W-]+");
     }
 
     #[test]
