@@ -160,7 +160,11 @@ pub(crate) fn rewrite_node(
     );
     call.ty = try_ty.clone();
 
-    let arms = if bang { None } else { narrowing(&name, definers, parents) };
+    // Not narrowed to the app's definers when Ruby's own classes define the name too: every object answers `to_s`, and lobsters' `current_vote.try(:[], :vote)` holds `{vote: 1}`, which `is_a?(CommentVoteHydrator)` answered nil for.
+    let core_receiver = super::core_method_names::defined_by_every_object(name.as_str())
+        || (super::core_method_names::defined_by_a_core_value(name.as_str())
+            && recv.ty.as_ref().is_none_or(may_hold_a_core_value));
+    let arms = if bang || core_receiver { None } else { narrowing(&name, definers, parents) };
     let mut replaced = match arms {
         // Nothing in the tree defines it and it is not `try!`: the only
         // answer `try` can give is nil. Folding rather than emitting a
@@ -215,6 +219,18 @@ pub(crate) fn rewrite_node(
         replaced.ty = try_ty;
     }
     *expr = replaced;
+}
+
+fn may_hold_a_core_value(ty: &Ty) -> bool {
+    match ty {
+        Ty::Nil | Ty::SelfInstance | Ty::Relation { .. } | Ty::Date | Ty::Time => false,
+        Ty::Class { id, .. } => matches!(
+            id.0.as_str(),
+            "Object" | "BasicObject" | "Hash" | "Array" | "String" | "Symbol" | "Integer" | "Float" | "Numeric"
+        ),
+        Ty::Union { variants } => variants.iter().any(may_hold_a_core_value),
+        _ => true,
+    }
 }
 
 /// The classes to test with `is_a?`, or None to keep the nil guard.

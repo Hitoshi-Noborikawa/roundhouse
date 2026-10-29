@@ -322,3 +322,37 @@ fn a_try_on_a_nullable_receiver_resolves_through_the_narrowing() {
         .collect();
     assert!(errors.is_empty(), "{errors:#?}");
 }
+
+/// A name Ruby's own Hash / String / … define too is not narrowed to the
+/// app's definers when the receiver may be one of them. lobsters'
+/// `current_vote` holds `{vote: 1}` or a hydrated row, and
+/// `current_vote.try(:[], :vote)` narrowed to the row's class answered
+/// nil for the Hash: no `upvoted` class on the CRuby lane.
+#[test]
+fn a_core_value_method_on_an_untyped_receiver_keeps_the_nil_guard() {
+    let src = emit(&[
+        (
+            "app/models/vote_row.rb",
+            "class VoteRow\n  def [](key)\n    1\n  end\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  attr_accessor :current_vote\n\n  \
+             def upvoted?\n    current_vote.try(:[], :vote) == 1\n  end\nend\n",
+        ),
+    ]);
+    assert!(!src.contains("is_a?(VoteRow)"), "a Hash answers `[]` too:\n{src}");
+    assert!(src.contains("current_vote && current_vote[:vote]"), "{src}");
+}
+
+/// Every object answers `to_s`, so an app class that defines its own is
+/// no reason to answer nil for the rest.
+#[test]
+fn an_object_method_keeps_the_nil_guard() {
+    let src = emit(&[(
+        "app/models/user.rb",
+        "class User < ApplicationRecord\n  def to_s\n    \"user\"\n  end\n\n  \
+         def show(other)\n    other.try(:to_s)\n  end\nend\n",
+    )]);
+    assert!(!src.contains("is_a?(User)"), "{src}");
+}
