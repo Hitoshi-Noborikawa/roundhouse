@@ -29,10 +29,14 @@ end
 "#;
 
 fn inferred(name: &str) -> Ty {
+    inferred_from(MODEL, name)
+}
+
+fn inferred_from(source: &str, name: &str) -> Ty {
     let mut app = ingest_app_from_tree(
         [(
             std::path::PathBuf::from("app/models/literal_extrema.rb"),
-            MODEL.as_bytes().to_vec(),
+            source.as_bytes().to_vec(),
         )]
         .into_iter()
         .collect(),
@@ -73,6 +77,17 @@ fn empty_and_possibly_empty_extrema_stay_nullable() {
     for name in ["empty", "possibly_empty", "splat"] {
         assert!(can_be_nil(&inferred(name)), "{name}");
     }
+}
+
+#[test]
+fn counted_literal_extrema_do_not_use_the_element_type() {
+    let source = r#"class LiteralExtrema
+  def self.counted
+    [3, 1].max(2)
+  end
+end
+"#;
+    assert_ne!(inferred_from(source, "counted"), Ty::Int);
 }
 
 const SCRIPT: &str = r#"
