@@ -263,7 +263,12 @@ pub(super) fn push_schema_methods(
                 methods.push(synth_temporal_writer(owner, col, model));
             }
         }
-        methods.push(synth_attr_writer(owner, col, model));
+        methods.push(synth_attr_writer(
+            owner,
+            col,
+            model,
+            runtime_relation == super::RuntimeRelation::Present,
+        ));
         // An enum label can share its column's name. Rails' enum predicate
         // overrides the generic attribute query in that case; otherwise
         // push_user_methods would discard the value comparison as a duplicate.
@@ -1402,7 +1407,7 @@ fn synth_key_alias_writer(owner: &ClassId, key: &Column) -> MethodDef {
     }
 }
 
-fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef {
+fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model, raw_inputs: bool) -> MethodDef {
     let value_param = Symbol::from("value");
     // Writers normally take the STORAGE type and write the storage ivar:
     // `<col>=` / `@<col>` in general, `<col>_raw=` / `@<col>_raw` (Str)
@@ -1411,20 +1416,24 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     // Hydration uses `_write_<col>_json_raw` so DB text never goes through dump.
     let col_ty = super::ty_of_column_slot(col);
     let slot = ColumnSlot::classify(col, model);
-    let json_assignment = crate::lower::has_json::column_assign(
-        model,
-        &col.name,
-        with_ty(var_ref(value_param.clone()), Ty::Untyped),
-        col_ty.clone(),
-    );
+    let json_assignment = if raw_inputs {
+        crate::lower::has_json::column_assign(
+            model,
+            &col.name,
+            with_ty(var_ref(value_param.clone()), Ty::Untyped),
+            col_ty.clone(),
+        )
+    } else {
+        None
+    };
     let value_ty = if slot.is_json()
         || json_assignment.is_some()
-        || enum_setter_value(
+        || (raw_inputs && enum_setter_value(
             model,
             col,
             with_ty(var_ref(value_param.clone()), Ty::Untyped),
         )
-        .is_some()
+        .is_some())
     {
         Ty::Untyped
     } else {
