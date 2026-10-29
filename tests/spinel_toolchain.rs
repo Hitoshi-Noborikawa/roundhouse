@@ -360,7 +360,7 @@ fn the_rails_health_check_answers_up_natively() {
         .run_spinel(r#"
 routed = false
 RouteTable.table.each do |route|
-  routed = true if route.verb == "GET" && route.pattern == "/up" && route.controller == :rails_health && route.action == :show
+  routed = true if route.verb == "GET" && route.pattern == "/up" && route.controller == :rails__health && route.action == :show
 end
 raise "no GET /up route to rails_health#show" unless routed
 c = Rails::HealthController.new

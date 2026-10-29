@@ -2,7 +2,7 @@
 //!
 //! The root route camelized its controller with `camelize`, which keeps
 //! the `/` of a namespaced target, so the spinel `main.rb` read
-//! `when :rails_health then Rails/healthController.new` — a division by
+//! `when :rails__health then Rails/healthController.new` — a division by
 //! an undefined local, raising NameError on every `GET /`. The explicit
 //! verb form (`get "up" => "rails/health#show"`) already named the class.
 
