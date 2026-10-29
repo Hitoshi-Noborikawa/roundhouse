@@ -20143,5 +20143,11 @@ mod params_merged_key_type;
 #[path = "emit_and_run/view_nil_seeded_loop_local.rs"]
 mod view_nil_seeded_loop_local;
 
+#[path = "emit_and_run/polymorphic_source_through.rs"]
+mod polymorphic_source_through;
+
+#[path = "emit_and_run/namespaced_controller_symbol.rs"]
+mod namespaced_controller_symbol;
+
 #[path = "emit_and_run/params_write_assign.rs"]
 mod params_write_assign;
