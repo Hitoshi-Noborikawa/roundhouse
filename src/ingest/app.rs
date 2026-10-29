@@ -2414,8 +2414,14 @@ end
     // and emit reopens the controller without its superclass around each
     // nested class. One opening stays when nothing else declares the class.
     // An opening that carries anything stays, and `diagnose` refuses it.
+    // That includes a computed superclass (`< choose_base()`): it has a
+    // span but no name.
     let is_opening = |c: &crate::dialect::Controller| {
-        c.parent.is_none() && c.body.is_empty() && c.layout.is_inherit() && c.sibling_classes.is_empty()
+        c.parent.is_none()
+            && c.parent_span.is_synthetic()
+            && c.body.is_empty()
+            && c.layout.is_inherit()
+            && c.sibling_classes.is_empty()
     };
     let declared: HashSet<crate::ident::ClassId> =
         app.controllers.iter().filter(|c| !is_opening(c)).map(|c| c.name.clone()).collect();

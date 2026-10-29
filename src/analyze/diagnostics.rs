@@ -293,19 +293,19 @@ fn diagnose_controller_output_collisions(app: &App, out: &mut Vec<Diagnostic>) {
         if declarations.len() < 2 {
             continue;
         }
-        // Files sort by path, so `cache_controller/*.rb` comes before
-        // `cache_controller.rb`: look for a location in every declaration,
-        // superclasses first.
+        // The first source location in declaration order, which is file
+        // order: `cache_controller/*.rb` comes before `cache_controller.rb`.
         let span = declarations
             .iter()
-            .map(|c| c.parent_span)
-            .chain(declarations.iter().flat_map(|c| c.body.iter()).filter_map(|item| match item {
-                Item::Action { action, .. } => Some(action.name_span),
-                Item::Filter { filter, .. } => Some(filter.target_span),
-                Item::ClassMethod { method, .. } => Some(method.body.span),
-                Item::ClassIvarInit { expr, .. } | Item::Unknown { expr, .. } => Some(expr.span),
-                Item::PrivateMarker { .. } => None,
-            }))
+            .flat_map(|c| {
+                std::iter::once(c.parent_span).chain(c.body.iter().filter_map(|item| match item {
+                    Item::Action { action, .. } => Some(action.name_span),
+                    Item::Filter { filter, .. } => Some(filter.target_span),
+                    Item::ClassMethod { method, .. } => Some(method.body.span),
+                    Item::ClassIvarInit { expr, .. } | Item::Unknown { expr, .. } => Some(expr.span),
+                    Item::PrivateMarker { .. } => None,
+                }))
+            })
             .find(|span| !span.is_synthetic())
             .unwrap_or_default();
         let mut names: Vec<&str> = Vec::new();

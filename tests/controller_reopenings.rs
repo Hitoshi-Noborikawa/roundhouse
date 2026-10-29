@@ -198,11 +198,46 @@ fn openings_that_sort_first_are_reported_once_with_a_location() {
         .collect();
     assert_eq!(collisions.len(), 1, "{errors:?}");
     assert!(!collisions[0].span.is_synthetic(), "{errors:?}");
+    assert!(app.source_path(collisions[0].span.file).is_some(), "{errors:?}");
+}
+
+/// The location is the first declaration's, in file order, even when a
+/// later file holds the superclass.
+#[test]
+fn the_collision_is_reported_at_the_first_declaration() {
+    let (_emitted, app, errors) = controller_app()
+        .write(
+            "app/controllers/cache_controller/extra.rb",
+            "class CacheController\n  def extra\n    render plain: \"extra\"\n  end\nend\n",
+        )
+        .emit_with_app(BuildTarget::Ruby);
+    let collisions: Vec<_> = errors
+        .iter()
+        .filter(|d| d.message.contains("controller output collision"))
+        .collect();
+    assert_eq!(collisions.len(), 1, "{errors:?}");
     assert!(
         app.source_path(collisions[0].span.file)
-            .is_some_and(|path| path.ends_with("app/controllers/cache_controller.rb")),
+            .is_some_and(|path| path.ends_with("app/controllers/cache_controller/extra.rb")),
         "{errors:?}"
     );
+}
+
+/// A computed superclass has a span but no name. That declaration is not
+/// an empty opening: dropped, it would take its superclass with it.
+#[test]
+fn an_opening_with_a_computed_superclass_is_refused() {
+    let errors = controller_app()
+        .write(
+            "app/controllers/cache_base.rb",
+            "class CacheController < choose_base(); end\n",
+        )
+        .check_errors();
+    let collisions: Vec<_> = errors
+        .iter()
+        .filter(|e| e.contains("controller output collision"))
+        .collect();
+    assert_eq!(collisions.len(), 1, "{errors:?}");
 }
 
 #[test]
