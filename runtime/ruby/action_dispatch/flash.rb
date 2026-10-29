@@ -43,6 +43,11 @@ module ActionDispatch
       # shape) so target type inference reads them as `String?`.
       @notice_was = nil
       @alert_was  = nil
+      # Any other key (lobsters' `flash[:error]` / `[:success]`), as Rails'
+      # FlashHash holds: a loaded one is discarded at the sweep unless the
+      # action sets it again.
+      @others = {}
+      @discard = []
       return if other.nil?
       # Iterate rather than index: the persisted store is partial ({} /
       # notice-only / alert-only), and strict targets (Crystal) raise
@@ -55,6 +60,9 @@ module ActionDispatch
         elsif k == "alert"
           @alert = v
           @alert_was = v
+        else
+          @others[k] = v
+          @discard.push(k)
         end
       end
     end
@@ -77,6 +85,7 @@ module ActionDispatch
       k = key.to_s
       @notice_was = @notice if k == "notice"
       @alert_was = @alert if k == "alert"
+      @discard.push(k) if k != "notice" && k != "alert" && !@discard.include?(k)
       nil
     end
 
@@ -88,6 +97,8 @@ module ActionDispatch
       k = key.to_s
       return @notice if k == "notice"
       return @alert  if k == "alert"
+      # Not indexed blind: a strict target's Hash raises on a missing key.
+      return @others[k] if @others.key?(k)
       nil
     end
 
@@ -97,6 +108,11 @@ module ActionDispatch
         @notice = value
       elsif k == "alert"
         @alert = value
+      elsif value.nil?
+        @others.delete(k)
+      else
+        @others[k] = value
+        @discard.delete(k)
       end
       value
     end
@@ -132,6 +148,11 @@ module ActionDispatch
         @alert = nil
         return v
       end
+      if @others.key?(k)
+        v = @others[k]
+        @others.delete(k)
+        return v
+      end
       nil
     end
 
@@ -140,27 +161,28 @@ module ActionDispatch
     # Hash idiom shim) doesn't recurse the methods through each other
     # when one calls the other.
     def length
-      n = 0
+      n = @others.size
       n += 1 if !@notice.nil?
       n += 1 if !@alert.nil?
       n
     end
 
     def size
-      n = 0
+      n = @others.size
       n += 1 if !@notice.nil?
       n += 1 if !@alert.nil?
       n
     end
 
     def empty?
-      @notice.nil? && @alert.nil?
+      @notice.nil? && @alert.nil? && @others.empty?
     end
 
     def keys
       result = []
       result.push("notice") if !@notice.nil?
       result.push("alert")  if !@alert.nil?
+      @others.each { |k, _v| result.push(k) }
       result
     end
 
@@ -168,6 +190,7 @@ module ActionDispatch
       result = []
       result.push(@notice) if !@notice.nil?
       result.push(@alert)  if !@alert.nil?
+      @others.each { |_k, v| result.push(v) }
       result
     end
 
@@ -177,6 +200,7 @@ module ActionDispatch
     def each
       yield "notice", @notice if !@notice.nil?
       yield "alert",  @alert  if !@alert.nil?
+      @others.each { |k, v| yield k, v }
       self
     end
 
@@ -187,6 +211,7 @@ module ActionDispatch
       result = {}
       result["notice"] = @notice if !@notice.nil?
       result["alert"]  = @alert  if !@alert.nil?
+      @others.each { |k, v| result[k] = v }
       result
     end
 
@@ -205,6 +230,7 @@ module ActionDispatch
       result["notice"] = n if !n.nil? && n != @notice_was
       a = @alert
       result["alert"]  = a if !a.nil? && a != @alert_was
+      @others.each { |k, v| result[k] = v unless @discard.include?(k) }
       result
     end
 
@@ -215,6 +241,7 @@ module ActionDispatch
       result = ActionDispatch::Flash.new
       result.notice = @notice
       result.alert  = @alert
+      @others.each { |k, v| result[k] = v }
       other.each do |k, v|
         result[k] = v
       end

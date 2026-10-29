@@ -202,7 +202,8 @@ module ActionController
       String path,
       ?notice: String?,
       ?alert: String?,
-      ?status: Symbol
+      ?status: Symbol,
+      ?flash: Hash[Symbol, String]?
     ) -> void
 
     # The shared strict-target implementation supports the bounded

@@ -2269,8 +2269,8 @@ module RequestDispatch
 
   # The last request's flash, as Rails' integration tests read it
   # (`assert_equal "✓", flash[:notice]` after an unfollowed redirect).
-  # The dispatch already keeps it in `@__flash` to carry into the next
-  # request; this is its reader.
+  # The dispatch keeps it in `@__flash` and carries what it set into the
+  # next request; this is its reader.
   def flash
     @__flash = ActionDispatch::Flash.new if @__flash.nil?
     @__flash
@@ -2447,7 +2447,9 @@ module RequestDispatch
     controller.params  = merged
     controller.path_parameters = path_params
     controller.session = @__session ||= ActionDispatch::Session.new
-    controller.flash   = @__flash   ||= ActionDispatch::Flash.new
+    # Not the last request's Flash itself: Rails carries only what it set (`to_persisted`), so a shown message is gone on the next page.
+    carried = @__flash
+    controller.flash = ActionDispatch::Flash.new(carried.nil? ? nil : carried.to_persisted)
     # The inbound jar is the browser's whole state — what the test has
     # accumulated from earlier responses PLUS anything it seeded itself,
     # which is exactly `to_h`. A fresh jar per request, so `pending`

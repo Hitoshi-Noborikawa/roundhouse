@@ -1,7 +1,7 @@
 module ActionDispatch
   # Per-app flash store with typed `notice`/`alert` fields plus HWIA-
-  # shape shim methods. Field-set is closed (mirrors the lowerer's
-  # `is_flash_name`); shim keys are String | Symbol.
+  # shape shim methods; any other key lives in `@others`. Shim keys are
+  # String | Symbol.
   class Flash
     @notice: String?
     @alert: String?
@@ -9,6 +9,9 @@ module ActionDispatch
     # `to_persisted` sweep carries forward only entries that differ.
     @notice_was: String?
     @alert_was: String?
+    # Keys other than notice/alert, and the loaded ones the sweep drops.
+    @others: Hash[String, String]
+    @discard: Array[String]
 
     # `attr_accessor :notice, :alert` — getter+setter pair per name.
     def notice: () -> String?
