@@ -2050,6 +2050,11 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // _partial_options?(options)`, which tests that both keys are
         // present, whatever their values); that shape stays below.
         //
+        // Jbuilder still evaluates those arguments before `set!` drops
+        // them, so the arm only takes them when they are literals: a
+        // call there (`cache: raise("bad")`, `cache: key_for(x)`) has
+        // effects the lowered array would lose.
+        //
         // An explicit `json.set!(:key, col) { … }` is not this shape:
         // its method name is not the key and its first argument is not
         // the collection, so only its one-argument form reaches this
@@ -2057,6 +2062,7 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         key if !args.is_empty()
             && block.is_some()
             && (key != "set!" || args.len() == 1)
+            && args[1..].iter().all(is_literal_value)
             && !(args.len() == 2
                 && extract_hash(&args[1]).is_some_and(|opts| {
                     hash_has_key(opts, "partial") && hash_has_key(opts, "as")
@@ -2347,6 +2353,19 @@ fn hash_get_string(entries: &[(Expr, Expr)], key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// A literal, or an Array/Hash of literals: evaluating it has no
+/// effect, so dropping it unevaluated changes nothing.
+fn is_literal_value(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Lit { .. } => true,
+        ExprNode::Array { elements, .. } => elements.iter().all(is_literal_value),
+        ExprNode::Hash { entries, .. } => entries
+            .iter()
+            .all(|(k, v)| is_literal_value(k) && is_literal_value(v)),
+        _ => false,
+    }
 }
 
 /// Whether the Hash has a Symbol key `key`, whatever its value.

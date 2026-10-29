@@ -124,6 +124,15 @@ json.widgets(@widgets, cache: true) do |widget|
 end
 "#;
 
+/// A trailing option that is a call. Jbuilder evaluates it before
+/// `set!` drops it (Rails 8.1.4 + jbuilder 2.15.1 raise here), so the
+/// statement is not lowered to an array that never runs it.
+const OPTIONS_CALL: &str = r#"json.count @widgets.size
+json.widgets(@widgets, cache: raise("bad")) do |widget|
+  json.label widget.name
+end
+"#;
+
 /// An explicit `set!` with a key, a collection and a block. The method
 /// name is `set!`, not the key, and the first argument is the key, not
 /// the collection: the key-with-a-collection shape must not take it.
@@ -160,6 +169,7 @@ fn emitted() -> Vec<(String, String)> {
         ("app/views/widgets/sorted.json.jbuilder", SORTED),
         ("app/views/widgets/options.json.jbuilder", OPTIONS),
         ("app/views/widgets/set_bang.json.jbuilder", SET_BANG),
+        ("app/views/widgets/options_call.json.jbuilder", OPTIONS_CALL),
         ("app/views/widgets/partial_var.json.jbuilder", PARTIAL_VAR),
     ]
     .iter()
@@ -416,4 +426,19 @@ fn an_inline_partial_with_a_variable_path_is_not_an_array_of_blocks() {
         !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
         "the block is not run per element:\n{src}"
     );
+}
+
+/// Literal options (`cache: true`, `OPTIONS`) still become the array;
+/// an option that is a call does not, because the array would drop it
+/// unevaluated.
+#[test]
+fn a_collection_with_a_call_in_its_options_is_not_an_array_of_blocks() {
+    let files = emitted();
+    let src = view(&files, "widgets/options_call_json.rb");
+    assert!(
+        !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
+        "the block is not run per element:\n{src}"
+    );
+    let literal = view(&files, "widgets/options_json.rb");
+    assert!(literal.contains("__col0.map"), "a literal option still lowers:\n{literal}");
 }
