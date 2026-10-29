@@ -244,6 +244,11 @@ fn included_eval_block_that_replaces_new_still_refuses() {
         "base.instance_eval do\n      define_singleton_method(:new) { |**o| o }\n    end",
         "base.class_eval do\n      extend Unknown::Factory\n    end",
         "base.class_eval(\"def self.new(**o) = o\")",
+        // The block's parameter is the receiver too (`klass` is `base`).
+        "base.instance_eval do |klass|\n      klass.define_singleton_method(:new) { |**o| o }\n    end",
+        "base.class_eval { |klass| klass.extend(Unknown::Factory) }",
+        "base.instance_eval { it.define_singleton_method(:new) { |**o| o } }",
+        "base.instance_eval { _1.define_singleton_method(:new) { |**o| o } }",
     ] {
         let source = format!(
             r#"
