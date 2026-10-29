@@ -211,6 +211,11 @@ _, settings, = request("GET", "/settings") if opts[:login]
 ids["username"] = opts[:username] || settings.to_s[%r{href="/(?:~|u/)(\w+)"}, 1]
 
 steps = parse_steps(opts[:steps] ? File.read(opts[:steps]) : DEFAULT_STEPS)
+steps.each do |step|
+  "#{step.path} #{step.form}".scan(/\{(\w+)\}/).flatten.each do |k|
+    abort "lobsters-http-replay: unknown placeholder {#{k}} in #{step.path.inspect} (known: #{ids.keys.map { |n| "{#{n}}" }.join(", ")})" unless ids.key?(k)
+  end
+end
 missing = ->(s) { s.scan(/\{(\w+)\}/).flatten.find { |k| ids[k].nil? } }
 expand = ->(s) { s.gsub(/\{(\w+)\}/) { ids[$1] } }
 
@@ -219,7 +224,8 @@ FileUtils.mkdir_p(opts[:dump])
 # Not left in place: lobsters-content-diff compares every body in the directory, so a previous run's extra steps would be compared too.
 previous = File.join(opts[:dump], "_status.json")
 if File.exist?(previous)
-  JSON.parse(File.read(previous)).each_key { |name| FileUtils.rm_f(File.join(opts[:dump], name)) }
+  # Not a step that raised: it wrote no body, so a file of that name is not the previous run's.
+  JSON.parse(File.read(previous)).each { |name, st| FileUtils.rm_f(File.join(opts[:dump], name)) unless st == "EXC" }
   FileUtils.rm_f([previous, File.join(opts[:dump], "_location.json")])
 end
 THIN_BYTES = 200
@@ -246,7 +252,8 @@ steps.each do |step|
   locations[name] = location if location
   File.write(File.join(opts[:dump], name), body) unless st == :EXC
   ok = step.expect ? st == step.expect : st.is_a?(Integer) && (200..399).cover?(st)
-  thin = st == 200 && body.bytesize < THIN_BYTES
+  # Not for a step that names its status: a POST answering `ok` is the whole response.
+  thin = !step.expect && st == 200 && body.bytesize < THIN_BYTES
   failures += 1 if !ok || thin
   next if opts[:quiet] && ok && !thin
   note = thin ? " THIN" : ""
