@@ -1573,6 +1573,7 @@ mod tests {
             strict_locals: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
+            own_flash: Default::default(),
             ivar_models: Rc::new(
                 ivar_models
                     .iter()
