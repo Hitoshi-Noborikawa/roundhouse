@@ -611,22 +611,49 @@ pub(super) fn scan_constructor_mutations(
         result: &mut ConstructorMutationScan,
     ) {
         if let ExprNode::Send {
-            recv, method, args, ..
+            recv, method, args, block, ..
         } = &*expr.node
         {
-            let mutates_lookup = mutates_constructor_lookup_method(
-                method.as_str(),
-                args,
-                context.modules_with_custom_new,
-                context.modules_with_custom_initialize,
-                context.known_modules,
-                context.modules_with_mutating_hooks,
-                context.hook_targets,
-                context.question,
-            );
+            // `base.instance_eval { ... }` / `base.class_eval do ... end`
+            // with a literal block and no string: the block runs with
+            // `self` = the callback receiver, so its own sends are what can
+            // change the lookup, and the walk below scans them as
+            // receiverless sends on the owner. A string body stays unknown.
+            // A `def` in the block has no IR node: ingest reports it as
+            // `nested def not supported` and the site raises, so it cannot
+            // replace `new` in the emitted program.
+            let scanned_eval = callback_receiver.is_some_and(|callback_receiver| {
+                matches!(
+                    method.as_str(),
+                    "class_eval" | "module_eval" | "instance_eval" | "class_exec" | "instance_exec"
+                ) && args.is_empty()
+                    && block.is_some()
+                    && recv.as_ref().is_some_and(|recv| {
+                        matches!(&*recv.node, ExprNode::Var { name, .. } if name == callback_receiver)
+                    })
+            });
+            let mutates_lookup = !scanned_eval
+                && mutates_constructor_lookup_method(
+                    method.as_str(),
+                    args,
+                    context.modules_with_custom_new,
+                    context.modules_with_custom_initialize,
+                    context.known_modules,
+                    context.modules_with_mutating_hooks,
+                    context.hook_targets,
+                    context.question,
+                );
+            // A send on the callback receiver mutates its lookup only when
+            // the method is one that can (`mutates_lookup`): reading it
+            // (`base.methods`, `base.respond_to?`) or calling a class macro
+            // on it (`base.before_action`) does not, the same rule as for
+            // a named receiver. A send that passes the receiver on as an
+            // argument keeps today's handling.
             let mutates_callback_receiver = callback_receiver.is_some_and(|callback_receiver| {
-                recv.as_ref()
-                    .is_some_and(|recv| receiver_uses_callback(recv, callback_receiver))
+                (mutates_lookup
+                    && recv
+                        .as_ref()
+                        .is_some_and(|recv| receiver_uses_callback(recv, callback_receiver)))
                     || args
                         .iter()
                         .any(|arg| contains_callback(arg, callback_receiver))

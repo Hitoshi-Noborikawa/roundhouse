@@ -206,3 +206,66 @@ end
         "class << self; define_method(:inherited) can replace Child.new"
     );
 }
+
+#[test]
+fn included_callback_that_only_calls_a_macro_on_the_receiver_keeps_keywords() {
+    for body in [
+        "base.before_action(:load_tag) if base.methods.include?(:before_action)",
+        "base.instance_eval do\n      before_action(:load_tag) if base.methods.include?(:before_action)\n    end",
+    ] {
+        let source = format!(
+            r#"
+module Tagging
+  def self.included(base)
+    {body}
+  end
+end
+
+class WidgetClient
+  include Tagging
+
+  def initialize(args)
+    @name = args[:name]
+  end
+
+  def self.build
+    new(name: "x")
+  end
+end
+"#
+        );
+        assert!(!constructor_keywords_are_refused(&source), "{body}");
+    }
+}
+
+#[test]
+fn included_eval_block_that_replaces_new_still_refuses() {
+    for body in [
+        "base.instance_eval do\n      define_singleton_method(:new) { |**o| o }\n    end",
+        "base.class_eval do\n      extend Unknown::Factory\n    end",
+        "base.class_eval(\"def self.new(**o) = o\")",
+    ] {
+        let source = format!(
+            r#"
+module Hooks
+  def self.included(base)
+    {body}
+  end
+end
+
+class Child
+  include Hooks
+
+  def initialize(label:)
+    @label = label
+  end
+
+  def self.build
+    new(label: "x")
+  end
+end
+"#
+        );
+        assert!(constructor_keywords_are_refused(&source), "{body}");
+    }
+}
