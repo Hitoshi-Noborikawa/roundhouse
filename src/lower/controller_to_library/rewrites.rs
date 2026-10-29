@@ -2272,10 +2272,15 @@ pub(super) fn rewrite_request_format(expr: &Expr) -> Expr {
 pub(super) fn rewrite_params(expr: &Expr) -> Expr {
     map_expr(expr, &|e| match &*e.node {
         // `params.expect(...)` — recognized first so the recv is still
-        // the bare `params` Send, not the @params ivar (which would lose
-        // the recognition pattern).
+        // the original params receiver, before recursive rewrites change it.
         ExprNode::Send { recv: Some(recv), method, args, block, parenthesized }
-            if method.as_str() == "expect" && is_bare_params(recv) =>
+            if method.as_str() == "expect"
+                && (is_bare_params(recv)
+                    || matches!(&*recv.node,
+                        ExprNode::Send { recv: Some(receiver), method, args, block: None, .. }
+                            if matches!(&*receiver.node, ExprNode::SelfRef)
+                                && method.as_str() == "params" && args.is_empty())
+                    || matches!(&*recv.node, ExprNode::Ivar { name } if name.as_str() == "params")) =>
         {
             Some(rewrite_expect(args, block.as_ref(), *parenthesized, e.span))
         }

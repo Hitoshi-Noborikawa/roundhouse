@@ -34,10 +34,17 @@ fn source_errors(body: &str) -> Vec<String> {
 
 #[test]
 fn array_expect_is_an_array_before_controller_lowering() {
-    let errors = source_errors(
-        "    answers = params.expect(answers: [[:header, :other, { labels: [] }]])\n    render json: answers.map(&:to_h)",
-    );
-    assert!(errors.is_empty(), "{errors:?}");
+    for receiver in ["params", "self.params", "@params"] {
+        let initialization = if receiver == "@params" {
+            "    @params = params\n"
+        } else {
+            ""
+        };
+        let errors = source_errors(&format!(
+            "{initialization}    answers = {receiver}.expect(answers: [[:header, :other, {{ labels: [] }}]])\n    render json: answers.map(&:to_h)",
+        ));
+        assert!(errors.is_empty(), "{receiver}: {errors:?}");
+    }
 }
 
 #[test]

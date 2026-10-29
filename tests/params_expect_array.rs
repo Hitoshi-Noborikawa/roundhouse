@@ -3,6 +3,10 @@
 mod emit_and_run;
 
 fn app() -> emit_and_run::Overlay {
+    app_with_receiver("params")
+}
+
+fn app_with_receiver(receiver: &str) -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write(
             "db/schema.rb",
@@ -18,13 +22,44 @@ fn app() -> emit_and_run::Overlay {
         )
         .write(
             "app/controllers/items_controller.rb",
-            r#"class ItemsController < ApplicationController
+            &format!(
+                r#"class ItemsController < ApplicationController
   def create
-    render json: params.expect(items: [[:header, :other, { labels: [] }]]).map(&:to_h)
+    {initialization}
+    render json: {receiver}.expect(items: [[:header, :other, {{ labels: [] }}]]).map(&:to_h)
   end
 end
 "#,
+                initialization = if receiver == "@params" {
+                    "@params = params"
+                } else {
+                    ""
+                }
+            ),
         )
+}
+
+#[test]
+fn array_expect_lowers_explicit_params_receivers() {
+    for receiver in ["self.params", "@params"] {
+        let (emitted, errors) =
+            app_with_receiver(receiver).emit(roundhouse::project::BuildTarget::Spinel);
+        assert!(errors.is_empty(), "{receiver}: {errors:?}");
+        let source = std::fs::read_to_string(emitted.join("app/controllers/items_controller.rb"))
+            .expect("controller");
+        assert!(
+            source.contains("Params.expect_array("),
+            "{receiver}: {source}"
+        );
+        assert!(!source.contains(".expect("), "{receiver}: {source}");
+        app_with_receiver(receiver).run_ruby(r##"require "json"
+require "stringio"
+raw = JSON.generate({"items" => [{"header" => "H", "ignored" => "removed"}]})
+status, _, body = Main.run_rack("REQUEST_METHOD" => "POST", "PATH_INFO" => "/items", "QUERY_STRING" => "", "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => raw.bytesize.to_s, "rack.input" => StringIO.new(raw))
+raise "#{status} #{body.inspect}" unless status == 200 && JSON.parse(body.join) == [{"header" => "H"}]
+puts "PASS"
+"##).assert_passes();
+    }
 }
 
 #[test]
