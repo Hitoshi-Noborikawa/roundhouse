@@ -26,6 +26,7 @@
 # `test/test_helper.rb` can load the app without loading this one,
 # which starts a server.
 require_relative "boot"
+require_relative "runtime/cgi_io"
 
 module Main
   # Spinel's class reflection needs a lexical class receiver.
