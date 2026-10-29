@@ -429,7 +429,7 @@ module ActiveRecord
     end
 
     def _unknown_mass_attribute(name)
-      raise ActiveModel::UnknownAttributeError.new(self, name)
+      raise ActiveModel::UnknownAttributeError.new(self, name, "unknown attribute '#{name}' for #{self.class.name}.")
     end
 
     # Ruby-family only, beside the other reopens here: strict targets have
