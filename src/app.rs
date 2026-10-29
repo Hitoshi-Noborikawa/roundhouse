@@ -1335,6 +1335,15 @@ pub enum ProgramItem {
     /// top level): Ruby loads the file the first time `owner::Name` is
     /// read.
     Autoload { span: crate::span::Span, owner: String, name: String, feature: String },
+    /// A file-level `if`/`unless` holding declarations: its branches'
+    /// items run only where Ruby runs the branch (an `elsif` is a branch
+    /// in the `else` items).
+    Branch {
+        condition: crate::expr::Expr,
+        negated: bool,
+        then_items: Vec<ProgramItem>,
+        else_items: Vec<ProgramItem>,
+    },
     /// A statement the ingest cannot carry, reported as
     /// `file_statement_unsupported` and named when the file loads.
     NotCarried { span: crate::span::Span, message: String },

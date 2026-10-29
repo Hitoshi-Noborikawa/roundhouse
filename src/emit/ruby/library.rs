@@ -8501,42 +8501,62 @@ fn emit_library_class_decl_inner(
     // first of its members writes the whole statement where it stands,
     // each branch's methods in that branch, and the others are skipped.
     let written_conditionals: std::cell::RefCell<Vec<usize>> = Default::default();
-    let render_conditional = |s: &mut String, m: &MethodDef| -> bool {
-        let Some(index) = lc.conditional_definitions.iter().position(|c| c.contains(m)) else { return false };
-        if written_conditionals.borrow().contains(&index) {
-            return true;
-        }
-        written_conditionals.borrow_mut().push(index);
-        fn write(s: &mut String, conditional: &crate::dialect::ConditionalDefinitions, lc: &LibraryClass, pad: &str) {
-            let inner = format!("{pad}  ");
-            for (i, arm) in conditional.arms.iter().enumerate() {
-                match (&arm.condition, i) {
-                    (Some(cond), 0) => {
-                        let keyword = if conditional.negated { "unless" } else { "if" };
-                        writeln!(s, "{pad}{keyword} {}", super::emit_expr(cond)).unwrap();
-                    }
-                    (Some(cond), _) => writeln!(s, "{pad}elsif {}", super::emit_expr(cond)).unwrap(),
-                    (None, _) => writeln!(s, "{pad}else").unwrap(),
+    // A branch's class or module loads from its own file, here.
+    let require_of = |name: &ClassId| -> String {
+        let anchor = format!("app/models/{}", crate::naming::underscore(&file_owner(name.0.as_str(), app, classes)));
+        format!("require_relative {:?}", relpath(&out_dir, &anchor))
+    };
+    fn write(
+        s: &mut String,
+        conditional: &crate::dialect::ConditionalDefinitions,
+        lc: &LibraryClass,
+        pad: &str,
+        require_of: &dyn Fn(&ClassId) -> String,
+    ) {
+        let inner = format!("{pad}  ");
+        for (i, arm) in conditional.arms.iter().enumerate() {
+            match (&arm.condition, i) {
+                (Some(cond), 0) => {
+                    let keyword = if conditional.negated { "unless" } else { "if" };
+                    writeln!(s, "{pad}{keyword} {}", super::emit_expr(cond)).unwrap();
                 }
-                // The branch's methods and nested conditionals, in source order.
-                let mut parts: Vec<(u32, Result<&MethodDef, &crate::dialect::ConditionalDefinitions>)> = Vec::new();
-                for member in &arm.methods {
-                    if let Some(method) = lc.methods.iter().find(|m| member.is(m)) {
-                        parts.push((member.name_span.start, Ok(method)));
-                    }
-                }
-                parts.extend(arm.nested.iter().map(|n| (n.span.start, Err(n))));
-                parts.sort_by_key(|(start, _)| *start);
-                for (_, part) in parts {
-                    match part {
-                        Ok(method) => render_library_method(s, method, &inner),
-                        Err(nested) => write(s, nested, lc, &inner),
-                    }
+                (Some(cond), _) => writeln!(s, "{pad}elsif {}", super::emit_expr(cond)).unwrap(),
+                (None, _) => writeln!(s, "{pad}else").unwrap(),
+            }
+            // The branch's methods and nested conditionals, in source order.
+            enum Part<'a> {
+                Method(&'a MethodDef),
+                Nested(&'a crate::dialect::ConditionalDefinitions),
+                Declared(&'a ClassId),
+            }
+            let mut parts: Vec<(u32, Part<'_>)> = Vec::new();
+            for member in &arm.methods {
+                if let Some(method) = lc.methods.iter().find(|m| member.is(m)) {
+                    parts.push((member.name_span.start, Part::Method(method)));
                 }
             }
-            writeln!(s, "{pad}end").unwrap();
+            parts.extend(arm.nested.iter().map(|n| (n.span.start, Part::Nested(n))));
+            parts.extend(arm.declarations.iter().map(|d| (d.start, Part::Declared(&d.name))));
+            parts.sort_by_key(|(start, _)| *start);
+            for (_, part) in parts {
+                match part {
+                    Part::Method(method) => render_library_method(s, method, &inner),
+                    Part::Nested(nested) => write(s, nested, lc, &inner, require_of),
+                    Part::Declared(name) => writeln!(s, "{inner}{}", require_of(name)).unwrap(),
+                }
+            }
         }
-        write(s, &lc.conditional_definitions[index], lc, &body_pad);
+        writeln!(s, "{pad}end").unwrap();
+    }
+    let write_conditional = |s: &mut String, index: usize| {
+        written_conditionals.borrow_mut().push(index);
+        write(s, &lc.conditional_definitions[index], lc, &body_pad, &require_of);
+    };
+    let render_conditional = |s: &mut String, m: &MethodDef| -> bool {
+        let Some(index) = lc.conditional_definitions.iter().position(|c| c.contains(m)) else { return false };
+        if !written_conditionals.borrow().contains(&index) {
+            write_conditional(s, index);
+        }
         true
     };
     let render_method = |s: &mut String, m: &MethodDef| {
@@ -8739,6 +8759,15 @@ fn emit_library_class_decl_inner(
             writeln!(s).unwrap();
         }
         render_constants(&mut s, &deferred);
+    }
+
+    // A conditional that defines no method (it only declares) has had no
+    // member to stand at.
+    for index in 0..lc.conditional_definitions.len() {
+        if !written_conditionals.borrow().contains(&index) {
+            writeln!(s).unwrap();
+            write_conditional(&mut s, index);
+        }
     }
 
     let remaining = nested.borrow().names.clone();

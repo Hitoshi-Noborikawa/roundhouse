@@ -185,6 +185,12 @@ fn ingest_library_classes_impl(
         out.extend(structs.into_iter().map(|(_, s)| s));
         out.extend(made.into_iter().map(|(_, c)| c));
     }
+    // The classes and modules a load-time conditional in a class or
+    // module body declares (`ConditionalArm::declarations`), which the
+    // finders above do not reach: each loads only where its branch runs.
+    if nested_in.is_none() {
+        out.extend(conditional_declaration_classes(&root, file)?);
+    }
     if out.is_empty() {
         if let Some(lc) = file_data_class(&root, file)? {
             return Ok(vec![lc]);
@@ -1983,8 +1989,21 @@ fn conditional_definitions(
             condition: condition.map(|c| ingest_expr(&c, file)).transpose()?,
             methods: Vec::new(),
             nested: Vec::new(),
+            declarations: Vec::new(),
         };
         for stmt in stmts {
+            // Its library class is ingested by `conditional_declaration_classes`.
+            let declared = stmt
+                .as_class_node()
+                .and_then(|c| class_name_path(&c))
+                .or_else(|| stmt.as_module_node().and_then(|m| module_name_path(&m)));
+            if let Some(path) = declared {
+                arm.declarations.push(crate::dialect::ConditionalDeclaration {
+                    name: ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), path.join("::")))),
+                    start: stmt.location().start_offset() as u32,
+                });
+                continue;
+            }
             if visibility::conditional_definition(&stmt).is_some() {
                 arm.nested.push(conditional_definitions(&stmt, owner, file, class_side, visibility, methods)?);
                 continue;
@@ -2023,6 +2042,124 @@ fn conditional_definitions(
         record.arms.push(arm);
     }
     Ok(record)
+}
+
+/// The library classes a file-level `if` / `unless` declares (in any
+/// branch, `elsif`s and nested branches too), with what each nests: a gem
+/// file's program loads each only where its branch runs
+/// (`ProgramItem::Branch`). The finders of `ingest_library_classes` do not
+/// reach them.
+pub(super) fn ingest_file_branch_classes(source: &[u8], file: &str) -> IngestResult<Vec<LibraryClass>> {
+    fn branch_statements<'pr>(node: &ruby_prism::Node<'pr>) -> Vec<ruby_prism::Node<'pr>> {
+        let mut out = Vec::new();
+        let mut take = |s: Option<ruby_prism::StatementsNode<'pr>>| out.extend(s.map(|s| s.body().iter().collect::<Vec<_>>()).unwrap_or_default());
+        if let Some(branch) = node.as_if_node() {
+            if branch.end_keyword_loc().is_none() {
+                return Vec::new();
+            }
+            take(branch.statements());
+            let mut next = branch.subsequent();
+            while let Some(sub) = next {
+                if let Some(elsif) = sub.as_if_node() {
+                    take(elsif.statements());
+                    next = elsif.subsequent();
+                } else {
+                    take(sub.as_else_node().and_then(|e| e.statements()));
+                    next = None;
+                }
+            }
+        } else if let Some(branch) = node.as_unless_node() {
+            if branch.end_keyword_loc().is_none() {
+                return Vec::new();
+            }
+            take(branch.statements());
+            take(branch.else_clause().and_then(|e| e.statements()));
+        }
+        out
+    }
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let Some(program) = root.as_program_node() else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    let mut pending: Vec<ruby_prism::Node<'_>> = program.statements().body().iter().flat_map(|s| branch_statements(&s)).collect();
+    while let Some(stmt) = pending.pop() {
+        if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
+            for (scope, class) in find_all_classes_with_scope(&stmt) {
+                let (lc, base) = library_class_and_struct_base(&class, &scope, file)?;
+                out.extend(base);
+                out.push(lc);
+            }
+            for (scope, module) in find_all_modules_with_scope(&stmt) {
+                out.push(library_class_from_module_node_with_scope(&module, &scope, file)?);
+            }
+        } else {
+            pending.extend(branch_statements(&stmt));
+        }
+    }
+    Ok(out)
+}
+
+/// The library classes the `class` / `module` statements in a class or
+/// module body's load-time conditionals declare (`visibility::
+/// conditional_definition`), with what each nests, qualified by where
+/// the conditional stands. Conditionals nested in a branch are walked too.
+fn conditional_declaration_classes(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Vec<LibraryClass>> {
+    fn declarations(
+        node: &ruby_prism::Node<'_>,
+        scope: &[String],
+        file: &str,
+        out: &mut Vec<LibraryClass>,
+    ) -> IngestResult<()> {
+        let take = |decl: &ruby_prism::Node<'_>, scope: &[String], out: &mut Vec<LibraryClass>| -> IngestResult<()> {
+            for (inner, class) in find_all_classes_with_scope(decl) {
+                let full: Vec<String> = scope.iter().cloned().chain(inner).collect();
+                let (lc, base) = library_class_and_struct_base(&class, &full, file)?;
+                out.extend(base);
+                out.push(lc);
+            }
+            for (inner, module) in find_all_modules_with_scope(decl) {
+                let full: Vec<String> = scope.iter().cloned().chain(inner).collect();
+                out.push(library_class_from_module_node_with_scope(&module, &full, file)?);
+            }
+            Ok(())
+        };
+        fn arms_of<'pr>(stmt: &ruby_prism::Node<'pr>) -> Vec<ruby_prism::Node<'pr>> {
+            visibility::conditional_definition(stmt).map(|(_, arms)| arms.into_iter().flat_map(|(_, s)| s).collect()).unwrap_or_default()
+        }
+        let (path, body) = if let Some(c) = node.as_class_node() {
+            (class_name_path(&c), c.body())
+        } else if let Some(m) = node.as_module_node() {
+            (module_name_path(&m), m.body())
+        } else {
+            return Ok(());
+        };
+        let Some(path) = path else { return Ok(()) };
+        let inner: Vec<String> = scope.iter().cloned().chain(path).collect();
+        let Some(body) = body else { return Ok(()) };
+        for stmt in flatten_statements(body) {
+            if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
+                declarations(&stmt, &inner, file, out)?;
+                continue;
+            }
+            let mut pending = arms_of(&stmt);
+            while let Some(arm_stmt) = pending.pop() {
+                if arm_stmt.as_class_node().is_some() || arm_stmt.as_module_node().is_some() {
+                    take(&arm_stmt, &inner, out)?;
+                    declarations(&arm_stmt, &inner, file, out)?;
+                } else {
+                    pending.extend(arms_of(&arm_stmt));
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    if let Some(program) = root.as_program_node() {
+        for stmt in program.statements().body().iter() {
+            declarations(&stmt, &[], file, &mut out)?;
+        }
+    }
+    Ok(out)
 }
 
 /// A receiver that is `self`, or a call chain on `self` (`self.logger`,

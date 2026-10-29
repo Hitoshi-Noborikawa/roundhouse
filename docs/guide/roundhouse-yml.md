@@ -249,6 +249,8 @@ its own requires and autoloads reach them, as natively: a file nothing
 requires defines nothing. The boot loads a gem through `Bundler.require`,
 a literal `require` in `config/boot.rb`, `config/application.rb` or
 `config/environment.rb`, or an app file's `require` of it.
+A file-level `if` / `unless` that declares a class or module runs its
+branches as Ruby does, so the class exists only where its branch ran.
 A `require` of a Rails framework feature is left to the runtime, as are
 `ActiveSupport.on_load` (see `on_load` reopens) and `I18n.load_path`
 (the gem's locale files are compiled in). A

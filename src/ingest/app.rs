@@ -867,6 +867,10 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                         }
                     }
                     if gem_libs.iter().any(|lib| entry.starts_with(lib)) {
+                        if let Ok(branched) = super::library_class::ingest_file_branch_classes(&source, &path_str) {
+                            let branched: Vec<_> = branched.into_iter().filter(|m| !classes.iter().any(|c| c.name == m.name)).collect();
+                            classes.extend(branched);
+                        }
                         if let Ok(empty) = super::library_class::ingest_empty_modules(&source, &path_str) {
                             let empty: Vec<_> = empty.into_iter().filter(|m| !classes.iter().any(|c| c.name == m.name)).collect();
                             classes.extend(empty);

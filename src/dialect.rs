@@ -2486,6 +2486,35 @@ pub struct ConditionalArm {
     /// their start among the branch's methods.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested: Vec<ConditionalDefinitions>,
+    /// The classes and modules this branch declares, in source order.
+    /// Each is an ordinary library class (with what it nests), so analysis
+    /// types it; the Ruby family loads its file inside the branch, so it
+    /// exists only when Ruby runs the branch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declarations: Vec<ConditionalDeclaration>,
+}
+
+/// A `class` / `module` statement in a [`ConditionalArm`]: the name it
+/// declares, qualified, and where the statement starts, which orders it
+/// among the branch's methods.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConditionalDeclaration {
+    pub name: ClassId,
+    pub start: u32,
+}
+
+impl ConditionalDefinitions {
+    /// The names every branch (and every nested conditional) declares.
+    pub fn declared_names(&self) -> Vec<&ClassId> {
+        let mut out = Vec::new();
+        for arm in &self.arms {
+            out.extend(arm.declarations.iter().map(|d| &d.name));
+            for nested in &arm.nested {
+                out.extend(nested.declared_names());
+            }
+        }
+        out
+    }
 }
 
 /// One method a [`ConditionalArm`] defines: its name, side and the span

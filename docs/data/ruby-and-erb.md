@@ -94,7 +94,9 @@ A library class or module body may define methods under a load-time
 `if` / `elsif` / `else` or `unless` / `else` (`if Rails.env.test?` around
 two `def`s). Each branch may hold `def`s (`private def` too), plain
 `attr_reader` / `attr_writer` / `attr_accessor`s and nested conditionals
-of the same shape. Every branch's methods are ordinary methods of the
+of the same shape, and `class` / `module` declarations, each loaded from
+its own file inside its branch (one nested in a class shares that
+class's file and is an error). Every branch's methods are ordinary methods of the
 class, so analysis types each one; `LibraryClass::conditional_definitions`
 records which branch defines which. The Ruby and JRuby trees write the
 conditional around them where the source had it, so the branch Ruby

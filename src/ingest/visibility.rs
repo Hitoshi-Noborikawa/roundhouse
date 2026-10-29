@@ -57,9 +57,10 @@ impl Visibility {
 /// A class-body `if` (with its `elsif`s and `else`) or `unless` (with
 /// its `else`), not a ternary or modifier, whose branches hold only
 /// method definitions (`def`, or `private def` and the other inline
-/// markers), at least one: `(unless, [(condition, statements)])`, the
-/// `else` branch with no condition. Ruby runs it when the body loads, and
-/// only the selected branch defines its methods.
+/// markers), plain accessors, `class` / `module` declarations and nested
+/// conditionals of the same shape, at least one: `(unless, [(condition,
+/// statements)])`, the `else` branch with no condition. Ruby runs it when
+/// the body loads, and only the selected branch defines what it holds.
 pub(super) fn conditional_definition<'pr>(node: &Node<'pr>) -> Option<(bool, Vec<(Option<Node<'pr>>, Vec<Node<'pr>>)>)> {
     // Declares nothing in the emitted app (`if defined?(Rails::Console)`).
     if console_only(node) {
@@ -100,7 +101,13 @@ pub(super) fn conditional_definition<'pr>(node: &Node<'pr>) -> Option<(bool, Vec
     }
     let defines = arms.iter().any(|(_, stmts)| !stmts.is_empty());
     let only_defs = arms.iter().all(|(_, stmts)| {
-        stmts.iter().all(|stmt| definition(stmt).is_some() || conditional_accessor(stmt).is_some() || conditional_definition(stmt).is_some())
+        stmts.iter().all(|stmt| {
+            definition(stmt).is_some()
+                || conditional_accessor(stmt).is_some()
+                || conditional_definition(stmt).is_some()
+                || stmt.as_class_node().is_some()
+                || stmt.as_module_node().is_some()
+        })
     });
     (defines && only_defs).then_some((negated, arms))
 }
@@ -117,6 +124,12 @@ pub(super) fn conditional_accessor<'pr>(stmt: &Node<'pr>) -> Option<CallNode<'pr
         && matches!(constant_id_str(&call.name()), "attr_reader" | "attr_writer" | "attr_accessor")
         && call.arguments().is_some_and(|args| args.arguments().iter().all(|arg| symbol_or_string_value(&arg).is_some())))
     .then_some(call)
+}
+
+/// Whether `node` declares only for the Rails console
+/// (`if defined?(Rails::Console)`), which the emitted app never runs.
+pub(super) fn console_only_node(node: &Node<'_>) -> bool {
+    console_only(node)
 }
 
 pub(super) fn marker(call: &CallNode<'_>) -> bool {
@@ -556,6 +569,10 @@ impl Visibility {
                 self.defaults.insert(at, default);
                 if conditional_definition(stmt).is_some() {
                     self.walk_conditional(stmt, class_side, default, file)?;
+                    continue;
+                }
+                // A declaration has its own pass and namespace.
+                if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
                     continue;
                 }
                 if let Some(call) = conditional_accessor(stmt) {
