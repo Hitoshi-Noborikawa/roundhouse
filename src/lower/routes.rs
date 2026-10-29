@@ -490,6 +490,10 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                                 .map(|child| format!("{}{parent}_{child}", ctx.name_prefix))
                         }) {
                             Some(n) => (n, true),
+                            // Not left unnamed under a namespace: Rails names it for the namespace itself (lobsters' `get "notes(/:period)", to: redirect(…)` in `namespace :mod` is `mod_path`), the first such route taking it.
+                            None if ctx.parent_pair().is_none() && !ctx.name_prefix.is_empty() => {
+                                (ctx.name_prefix.trim_end_matches('_').to_string(), true)
+                            }
                             None => (action.as_str().to_string(), false),
                         },
                     },
