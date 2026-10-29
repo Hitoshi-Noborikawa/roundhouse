@@ -20091,6 +20091,9 @@ mod hash_ivar_symbol_keys;
 #[path = "emit_and_run/date_time_package.rs"]
 mod date_time_package;
 
+#[path = "emit_and_run/date_error.rs"]
+mod date_error;
+
 #[path = "emit_and_run/data_point_shapes.rs"]
 mod data_point_shapes;
 

@@ -1171,6 +1171,10 @@ fn app_uses_date(app: &App) -> bool {
             || matches!(&*e.node, crate::expr::ExprNode::Const { path }
                 if (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty()))
                     && path.last().is_some_and(|name| matches!(name.as_str(), "Date" | "DateTime")))
+            || matches!(&*e.node, crate::expr::ExprNode::Const { path }
+                if (path.len() == 2 || (path.len() == 3 && path[0].as_str().is_empty()))
+                    && path[path.len() - 2].as_str() == "Date"
+                    && path[path.len() - 1].as_str() == "Error")
         {
             return true;
         }
