@@ -2757,11 +2757,12 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         | "change" | "advance" | "ago" | "since" | "from_now"
         | "round" | "floor" | "ceil" | "to_datetime" => time(),
         "to_date" => Ty::Date,
+        "+" => time(),
         // `Time - x` is `Time` for a Duration arg but a Float for a
         // Time arg — the receiver-only dispatch can't disambiguate, so
         // gradual `Untyped` (the chains read `.before?`/`/ 60`/`> 1.minute`
         // off the result, all of which absorb Untyped).
-        "+" | "-" => Ty::Untyped,
+        "-" => Ty::Untyped,
         "all_day" | "all_week" | "all_month" | "all_year" => Ty::Class {
             id: ClassId(Symbol::from("Range")),
             args: vec![time()].into(),
