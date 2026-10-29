@@ -2391,12 +2391,15 @@ impl<'a> BodyTyper<'a> {
                 // `URI(str)` stay gradual, like `to_r` and `URI.parse`: the registry models neither
                 // result. Only a String makes `Pathname(path)` the `Pathname.new(path)` lowering
                 // writes: given a Pathname, Kernel's answers that same object, frozen or not.
+                // Only a method on the side the call dispatches to shadows Kernel's: a class
+                // body's call does not reach an included module's instance method.
                 if recv.is_none() && block.is_none()
                     && matches!((method.as_str(), args.len()), ("Pathname" | "URI", 1) | ("Rational", 1 | 2))
                     && !args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { .. }))
                     && (method.as_str() != "Pathname" || matches!(args[0].ty, Some(Ty::Str)))
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
-                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                    && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body)
+                    && (matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                        || self.app_defines_on_side(ctx.self_ty.as_ref(), method, !ctx.instance_body))
                 {
                     expr.decisions |= crate::expr::KERNEL_CONVERSION;
                     return match method.as_str() {

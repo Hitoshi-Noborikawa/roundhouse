@@ -152,6 +152,40 @@ fn a_pathname_converted_from_a_pathname_stays_refused() {
     );
 }
 
+/// Only a method on the call's own side shadows Kernel's: a class body's
+/// `URI(...)` reaches Kernel's beside an included module's instance method
+/// `URI`, which an instance method's bare call reaches instead.
+#[test]
+fn an_instance_side_uri_does_not_shadow_kernel_s_in_the_class_body() {
+    let stripper = "module Stripper\n  #: (String) -> String\n  def URI(text) = text.strip\nend\n";
+    let endpoints = "class Endpoints\n  include Stripper\n  URL = URI(\"https://example.com/api\")\n\n  \
+                     def self.host = URL.host\n\n  def label = URI(\"  label  \")\nend\n";
+    let report = "p [Endpoints.host, Endpoints.new.label]\n";
+    let dir = std::env::temp_dir().join(format!("roundhouse-kernel-side-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("stripper.rb"), stripper).unwrap();
+    std::fs::write(dir.join("endpoints.rb"), endpoints).unwrap();
+    let native = emit_and_run::ruby()
+        .arg("-e")
+        .arg(format!("require \"uri\"\nrequire {:?}\nrequire {:?}\n{report}", dir.join("stripper.rb"), dir.join("endpoints.rb")))
+        .output()
+        .expect("native Ruby control");
+    let _ = std::fs::remove_dir_all(&dir);
+    let expected = String::from_utf8_lossy(&native.stdout).into_owned();
+    assert_eq!(expected, "[\"example.com\", \"label\"]\n", "native control: {}", String::from_utf8_lossy(&native.stderr));
+
+    let app = || emit_and_run::empty_app()
+        .write("app/lib/stripper.rb", stripper)
+        .write("app/lib/endpoints.rb", endpoints);
+    let errors = app().check_errors();
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let run = app().run_ruby(report);
+    run.assert_passes();
+    assert_eq!(run.stdout, expected);
+    let (_, errors) = app().emit(BuildTarget::Typescript);
+    assert_eq!(refusals(&errors, "Kernel#URI", BuildTarget::Typescript), 1, "{errors:?}");
+}
+
 /// An app method named like the conversion is the app's own: its
 /// declared return types the constant, and no target refuses the call.
 #[test]
