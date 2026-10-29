@@ -295,6 +295,13 @@ if [[ $STATUS -eq 0 && $SIDEKIQ -eq 1 ]]; then
         sleep 0.2
     done
     all_ended || { printf '  \033[31mFAIL\033[0m a job the worker started never ended (log: %s)\n' "$WORKER_LOG"; STATUS=1; }
+    # A job that failed ended too, but the walk does not pass with one:
+    # under `retry: false` it leaves nothing in the dead set to catch.
+    if grep -qE " fail: " "$WORKER_LOG"; then
+        printf '  \033[31mFAIL\033[0m a job failed in the worker (log: %s)\n' "$WORKER_LOG"
+        grep -E " fail: " "$WORKER_LOG" | head -5 | sed 's/^/       /'
+        STATUS=1
+    fi
     for job in Room::PushMessageJob Message::BroadcastUnreadRoomJob; do
         if worker_ran "$job"; then
             printf '  \033[32mok\033[0m   the worker ran %s\n' "$job"

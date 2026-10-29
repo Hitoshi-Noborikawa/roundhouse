@@ -728,7 +728,7 @@ fn priority_warns_and_a_computed_set_is_an_error() {
 /// Sidekiq has no such part.
 #[test]
 fn the_readme_says_how_to_run_the_worker() {
-    for (target, worker) in [(BuildTarget::Spinel, "./build/bin/blog sidekiq"), (BuildTarget::Ruby, "bundle exec ruby sidekiq.rb")] {
+    for (target, worker) in [(BuildTarget::Spinel, "./build/bin/blog sidekiq"), (BuildTarget::Ruby, "bundle exec ruby sidekiq.rb"), (BuildTarget::Jruby, "jruby -S bundle exec jruby sidekiq.rb")] {
         let (emitted, errors) = on_sidekiq().write("config/cable.yml", CABLE_REDIS).emit(target);
         assert!(errors.is_empty(), "{errors:#?}");
         let readme = read(&emitted, "README.md");

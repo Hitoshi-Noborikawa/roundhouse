@@ -3156,7 +3156,7 @@ fn with_sidekiq_readme(mut files: Vec<(String, String)>, target: BuildTarget, ap
     let worker = match target {
         BuildTarget::Spinel => "./build/bin/blog sidekiq",
         BuildTarget::Ruby => "bundle exec ruby sidekiq.rb",
-        BuildTarget::Jruby => "jruby -S bundle exec ruby sidekiq.rb",
+        BuildTarget::Jruby => "jruby -S bundle exec jruby sidekiq.rb",
         _ => return files,
     };
     if !needs_redis(app) {
