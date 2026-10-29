@@ -633,6 +633,23 @@ end
     assert!(emitted.contains("constructor keyword arguments"));
 }
 
+fn constructor_refusals(source: &str, file: &str) -> Vec<roundhouse::diagnostic::Diagnostic> {
+    let classes = ingest_library_classes(source.as_bytes(), file).expect("ingest");
+    let mut app = App::new();
+    app.library_classes.extend(classes);
+    roundhouse::session::analyze_and_lower(&mut app)
+        .into_iter()
+        .filter(|diagnostic| matches!(
+            &diagnostic.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "constructor keyword arguments"
+        ))
+        .collect()
+}
+
+/// A reopening that adds `new` is found whichever fragment declares it:
+/// the call binds to that `new`, as Ruby's lookup does, rather than to
+/// the first fragment's `initialize`.
 #[test]
 fn a_custom_new_added_by_reopening_is_not_missed() {
     let source = r#"
@@ -658,13 +675,83 @@ end
     app.library_classes.extend(classes);
     let lower_diagnostics = roundhouse::session::analyze_and_lower(&mut app);
     assert!(
-        lower_diagnostics.iter().any(|diagnostic| matches!(
+        !lower_diagnostics.iter().any(|diagnostic| matches!(
             &diagnostic.kind,
             roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
                 if construct.as_str() == "constructor keyword arguments"
         )),
-        "an unverified reopened class hierarchy must not infer default Class#new dispatch"
+        "{lower_diagnostics:#?}"
     );
+}
+
+/// A second fragment that declares a method the first already did may
+/// replace it, depending on which file loads first: the contract stays
+/// unverified.
+#[test]
+fn a_reopening_that_redefines_initialize_stays_refused() {
+    let source = r#"
+class RedefinedConstructor
+  def initialize(label: "default")
+    @label = label
+  end
+
+  def self.build
+    RedefinedConstructor.new(label: "z")
+  end
+end
+
+class RedefinedConstructor
+  def initialize(name:)
+    @label = name
+  end
+end
+"#;
+    assert!(!constructor_refusals(source, "redefined_constructor.rb").is_empty());
+}
+
+/// rotp's `class OTP` is opened again by `otp/uri.rb` only to nest
+/// `class URI`: nothing in it replaces the constructor, so
+/// `ROTP::TOTP.new(secret, issuer: …)` (an options Hash `initialize`
+/// under a subclass) keeps its keyword call.
+#[test]
+fn a_reopening_that_only_nests_a_class_keeps_the_constructor_verified() {
+    let source = r#"
+module Otp
+  class Base
+    def initialize(s, options = {})
+      @s = s
+      @issuer = options[:issuer]
+    end
+  end
+end
+
+module Otp
+  class Base
+    class Uri
+      def initialize(otp)
+        @otp = otp
+      end
+    end
+  end
+end
+
+module Otp
+  class Timed < Otp::Base
+    def initialize(s, options = {})
+      @interval = options[:interval] || 30
+      super
+    end
+  end
+end
+
+class OtpCaller
+  def self.build
+    Otp::Timed.new("secret", issuer: "lobsters")
+  end
+end
+"#;
+    let refusals = constructor_refusals(source, "nested_reopen.rb");
+    assert!(refusals.is_empty(), "{refusals:#?}");
 }
 
 #[test]

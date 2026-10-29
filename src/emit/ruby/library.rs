@@ -2982,12 +2982,21 @@ fn resolve_through_chain(
     // Owner edge is the sibling's foreign key. `through_writer_join`
     // copies that same key; asking it again cannot change the edge.
     let (back_joins, edge_table, edge_fk) = match thr_through {
-        None => (Vec::new(), pluralize_snake(thr_target.0.as_str()), thr_fk.clone()),
+        // Not the class name's plural: the owner edge is the join model's own table, as the join below reads it.
+        None => (
+            Vec::new(),
+            models.iter().find(|m| &m.name == thr_target).map_or_else(|| pluralize_snake(thr_target.0.as_str()), |m| m.table.0.as_str().to_string()),
+            thr_fk.clone(),
+        ),
         Some(_) => resolve_through_chain(models, model, thr, depth + 1)?,
     };
     let thr_model = models.iter().find(|m| &m.name == thr_target)?;
-    let thr_table = pluralize_snake(thr_target.0.as_str());
-    let target_table = pluralize_snake(target.0.as_str());
+    // Not the class name's plural: a model's `self.table_name =` names another table.
+    let thr_table = thr_model.table.0.as_str().to_string();
+    let target_table = models
+        .iter()
+        .find(|m| &m.name == target)
+        .map_or_else(|| pluralize_snake(target.0.as_str()), |m| m.table.0.as_str().to_string());
     let owner_type = through_owner_type_predicate(&thr_table, as_interface, &model.name);
     let mut joins = match thr_model.through_source(assoc)? {
         // The source belongs_to on the join model (`Vote.belongs_to
@@ -3004,6 +3013,21 @@ fn resolve_through_chain(
             };
             vec![format!(
                 "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
+            )]
+        }
+        // A polymorphic source named by `source_type:` (lobsters'
+        // `ModMail#comment_references`): the same join, restricted to the
+        // rows of that type. Without the type the reader fell back to a
+        // direct has_many and read a `comments.mod_mail_id` column.
+        Association::BelongsTo { foreign_key: src_fk, polymorphic: true, .. } if thr_through.is_none() => {
+            let crate::lower::model_to_library::ThroughWriterJoin::ResolvedPolymorphic(_, _, _, _, type_col, pk) =
+                crate::lower::model_to_library::through_writer_join(model, models, name)
+            else {
+                return None;
+            };
+            let type_name = target.0.as_str().trim_start_matches("::").replace('\'', "''");
+            vec![format!(
+                "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.{pk} AND {thr_table}.{type_col} = '{type_name}'{owner_type}"
             )]
         }
         // The source is a plain `has_many` on the join model, so the
@@ -5506,6 +5530,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let slug_models = models_overriding_to_param(app);
     let assoc_targets = singular_association_targets(app);
+    let owned_assocs = owned_singular_associations(app);
     let collection_targets = collection_association_targets(app);
     // `direct :name do |record, options| … end` helpers take their
     // arguments VERBATIM — Rails hands them to the block, and the block
@@ -5538,6 +5563,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         all_models: &all_models,
         slug_models: &slug_models,
         assoc_targets: &assoc_targets,
+        owned_assocs: &owned_assocs,
         collection_targets: &collection_targets,
         class_method_targets: &class_method_targets,
         direct_helpers: &direct_helpers,
@@ -5860,6 +5886,30 @@ fn singular_association_targets(app: &App) -> crate::det::HashMap<String, String
     out
 }
 
+fn owned_singular_associations(app: &App) -> crate::det::HashSet<(String, String)> {
+    use crate::dialect::Association;
+    let mut out = crate::det::HashSet::default();
+    for m in &app.models {
+        // Not the model's own declarations alone: an STI subclass (campfire's `Rooms::Open < Room`) answers its parent's associations.
+        let mut current = Some(m);
+        let mut seen = 0;
+        while let Some(owner) = current {
+            for a in owner.associations() {
+                if let Association::BelongsTo { name, .. } | Association::HasOne { name, .. } = a {
+                    out.insert((m.name.0.as_str().to_string(), name.as_str().to_string()));
+                }
+            }
+            seen += 1;
+            current = owner
+                .parent
+                .as_ref()
+                .filter(|_| seen < 16)
+                .and_then(|p| app.models.iter().find(|x| &x.name == p));
+        }
+    }
+    out
+}
+
 /// Everything `arg_record_model` reads, in one place — the signal set
 /// grew past what a positional argument list explains.
 ///
@@ -5902,6 +5952,8 @@ pub(crate) struct RecordSignals<'a> {
     all_models: &'a crate::det::HashSet<String>,
     slug_models: &'a crate::det::HashSet<String>,
     assoc_targets: &'a crate::det::HashMap<String, String>,
+    /// `(model, name)` for each singular association a model declares.
+    owned_assocs: &'a crate::det::HashSet<(String, String)>,
     collection_targets: &'a crate::det::HashMap<String, String>,
     /// A model CLASS METHOD whose body answers one record of that model
     /// — `Room.original` is `order(:created_at).first`. Unambiguous
@@ -6188,6 +6240,13 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
     let all_models = sig.all_models;
     let assoc_targets = sig.assoc_targets;
     let collection_targets = sig.collection_targets;
+    // Not by name alone once a read's type says otherwise: lobsters' `tag.tag` is Tag's String column, named like a `belongs_to :tag`. A bare local keeps its name: its inferred type is the weaker signal there.
+    if matches!(&*arg.node, ExprNode::Send { recv: Some(_), .. }) && matches!(
+        arg.ty.as_ref().map(crate::ty::Ty::peel_nilable),
+        Some(crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym | crate::ty::Ty::Bool)
+    ) {
+        return None;
+    }
     // (1) A stamped model type.
     if let Some(crate::ty::Ty::Class { id, .. }) =
         arg.ty.as_ref().map(crate::ty::Ty::peel_nilable)
@@ -6217,9 +6276,21 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
         // separate `first`/`last` arm placed after this one would be
         // unreachable, since this pattern matches those method names too.
         ExprNode::Send { recv: Some(r), method, args, block: None, .. } if args.is_empty() => {
+            // Not by name alone when the receiver's model is known: lobsters' `category.category` and `tag.tag` are columns, named like another model's `belongs_to`.
+            let recv_model = match (r.ty.as_ref().map(crate::ty::Ty::peel_nilable), &*r.node) {
+                (Some(crate::ty::Ty::Class { id, .. }), _) if all_models.contains(id.0.as_str()) => Some(id.0.as_str().to_string()),
+                (_, ExprNode::Var { name, .. }) if all_models.contains(&crate::naming::camelize(name.as_str())) => {
+                    Some(crate::naming::camelize(name.as_str()))
+                }
+                (_, ExprNode::Var { name, .. }) => sig.local_records.get(name.as_str()).cloned(),
+                _ => None,
+            };
+            let owned = recv_model
+                .as_ref()
+                .is_none_or(|m| sig.owned_assocs.contains(&(m.clone(), method.as_str().to_string())));
             if let Some(target) = assoc_targets
                 .get(method.as_str())
-                .filter(|target| all_models.contains(*target))
+                .filter(|target| owned && all_models.contains(*target))
             {
                 return Some(target.clone());
             }

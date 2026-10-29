@@ -97,6 +97,7 @@ SPINEL_TESTS = [
     "spinel_transaction_connection",
     "routes_segment_pattern_spinel",
     "open_telemetry_stub_spinel",
+    "spinel_mini_profiler",
     "around_block_filter_spinel",
     "after_initialize_bare_new_spinel",
     "find_or_create_bang_records",
@@ -472,7 +473,7 @@ def native_coverage(path):
         "runtime/spinel/module_delegate.rb",
     }
     native = (
-        path.startswith(("runtime/ruby/", "runtime/spinel/", "src/emit/ruby/"))
+        path.startswith(("runtime/ruby/", "runtime/spinel/", "runtime/gems/", "src/emit/ruby/"))
         or path == "src/emit/ruby.rs"
         or (path.startswith("tests/spinel") and path.endswith((".rs", ".rb")))
         or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
@@ -519,6 +520,11 @@ def native_coverage(path):
                 break
     if path == "runtime/spinel/test/statement_cache_cases.rb":
         suites.add("param_binds")
+    if path.startswith("runtime/gems/rack_mini_profiler/") or path in {
+        "src/gems/rack_mini_profiler.rs",
+        "runtime/spinel/request_hooks.rb",
+    }:
+        suites.add("spinel_mini_profiler")
     if path in PG_DB_INPUTS:
         suites.add("spinel_pg_db")
     suites.update(DB_CONTRACT_INPUTS.get(path, ()))

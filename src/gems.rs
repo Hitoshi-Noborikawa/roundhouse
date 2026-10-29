@@ -30,6 +30,19 @@ pub(crate) enum Marker {
     AnyText(&'static [&'static str]),
 }
 
+mod rack_mini_profiler;
+
+/// Not a section of `gem_facades.rb`: a package keeps one gem's Ruby, signatures and assets under `runtime/gems/<dir>/`, so it moves as a unit.
+pub(crate) struct GemPackage {
+    pub gem: &'static str,
+    pub dir: &'static str,
+    pub entry: &'static str,
+    pub config_receiver: Option<&'static str>,
+    pub config_setters: &'static [&'static str],
+}
+
+pub(crate) const GEM_PACKAGES: &[GemPackage] = &[rack_mini_profiler::PACKAGE];
+
 /// The emitted constructor call for declared Active Storage variants.
 /// Project assembly uses it to select the image processor. An app without
 /// variants never emits this call.
@@ -212,8 +225,8 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         (Marker::Constant("Retryable"), "retryable"),
         (Marker::Constant("JWT"), "jwt"),
         // lobsters' `Rack::MiniProfiler.authorize_request` for every
-        // moderator: the real gem on this lane, the gate alone in
-        // gem_facades.rb on spinel.
+        // moderator: the real gem on this lane, its package
+        // (`GEM_PACKAGES`) on spinel.
         (Marker::Constant("Rack::MiniProfiler"), "rack-mini-profiler"),
     ];
     &RUNTIME_GEMS

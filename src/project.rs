@@ -2754,6 +2754,7 @@ fn target_files_inner(
     report_url_helpers_includes(app, target);
     report_partial_binops(app, target);
     report_spinel_unknown_gem_constants(app, target);
+    report_spinel_gem_package_settings(app, target);
     report_model_attribute_defaults(app, target);
     report_builtin_aliases(app, target);
     report_dynamic_association_joins(app, target);
@@ -7253,7 +7254,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
 
 /// Add `RouteTable::CONTROLLER_PATHS` to routes.rb. It maps the router
 /// symbol of a namespaced controller to the Rails controller path
-/// (`admin_posts: "admin/posts"`). The ruby overlay's `recognize_path`
+/// (`admin__posts: "admin/posts"`). The ruby overlay's `recognize_path`
 /// and the test helper's `assert_recognizes` read it. A top-level controller has no row, and
 /// `recognize_path` gives its router symbol. The path comes from the
 /// class name, so it differs from Rails for an acronym inflection
@@ -8347,6 +8348,7 @@ fn spinel_files_with_source_markers(
 ) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     let (mut files, stems) =
         emit::ruby::source_markers::with_source_markers(app, || spinel_files(app, fixture, param_binds))?;
+    apply_gem_packages(&mut files, app)?;
     for (path, content) in files.iter_mut() {
         if path.ends_with(".rb") {
             *content = emit::ruby::source_markers::finish(content);
@@ -8357,6 +8359,64 @@ fn spinel_files_with_source_markers(
     // directly and keeps `ConfigurationFile`.
     drop_yaml_configuration_file(&mut files);
     Ok((files, stems))
+}
+
+// Not `lock.has` alone: `require: false` keeps Bundler.require from loading the gem, so its Railtie never inserts the middleware.
+fn package_loads(lock: &crate::gems::Lockfile, package: &crate::gems::GemPackage) -> bool {
+    lock.has(package.gem) && lock.gemfile_requires.get(package.gem).is_none_or(|features| !features.is_empty())
+}
+
+// Not left out silently: a setting the package's Config has no writer for is dropped from boot.rb, so the initializer is not applied as written.
+fn report_spinel_gem_package_settings(app: &App, target: BuildTarget) {
+    if !matches!(target, BuildTarget::Spinel) {
+        return;
+    }
+    let Some(lock) = app.gem_lock.as_ref() else { return };
+    for package in crate::gems::GEM_PACKAGES.iter().filter(|p| package_loads(lock, p)) {
+        for setting in app.gem_package_settings.iter().filter(|s| s.gem == package.gem) {
+            if !setting.carried() {
+                crate::emit::diagnostics::report_unsupported(
+                    setting.span, "spinel", "gem package setting",
+                    format!("`{}` is not a setting the Spinel tree's {} package carries; the initializer line is not applied", setting.statement, package.gem),
+                );
+            }
+        }
+    }
+}
+
+fn apply_gem_packages(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
+    const ANCHOR: &str = "require_relative \"runtime/request_hooks\"\n";
+    let Some(lock) = app.gem_lock.as_ref() else { return Ok(()) };
+    let mut boot_lines = String::new();
+    for package in crate::gems::GEM_PACKAGES.iter().filter(|p| package_loads(lock, p)) {
+        let dir = format!("runtime/gems/{}", package.dir);
+        // Not `walk_partitioned`'s sig/ split: spin_shape moves sidecars beside their .rb anyway, and the assets must ship too.
+        crate::runtime_files::walk_into(&dir, &format!("{dir}/"), files)?;
+        boot_lines.push_str(&format!("require_relative \"{dir}/{}\"\n", package.entry));
+        let settings: Vec<&str> = app
+            .gem_package_settings
+            .iter()
+            .filter(|s| s.gem == package.gem && s.carried())
+            .map(|s| s.statement.as_str())
+            .collect();
+        if !settings.is_empty() {
+            boot_lines.push_str(&format!("# {}'s settings from config/initializers.\n", package.gem));
+            for statement in settings {
+                boot_lines.push_str(statement);
+                boot_lines.push('\n');
+            }
+        }
+    }
+    if boot_lines.is_empty() {
+        return Ok(());
+    }
+    let (_, boot) = files
+        .iter_mut()
+        .find(|(p, _)| p == "boot.rb")
+        .ok_or("apply_gem_packages: no boot.rb")?;
+    let at = boot.find(ANCHOR).ok_or("apply_gem_packages: boot.rb lost its runtime/request_hooks require")? + ANCHOR.len();
+    boot.insert_str(at, &boot_lines);
+    Ok(())
 }
 
 fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {
@@ -8584,6 +8644,13 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         let rbs = crate::runtime_files::read_to_string("runtime/spinel/action_controller_head.rbs")
             .map_err(|e| format!("read runtime/spinel/action_controller_head.rbs: {e}"))?;
         files.push(("sig/runtime/action_controller_head.rbs".to_string(), rbs));
+    }
+
+    // Any flash key (Rails' FlashHash): a Ruby-family and Spinel reopen of the shared Flash.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/flash_any_key.rbs")
+            .map_err(|e| format!("read runtime/spinel/flash_any_key.rbs: {e}"))?;
+        files.push(("sig/runtime/flash_any_key.rbs".to_string(), rbs));
     }
 
     // Rails 8.1.4 `send_data(filename:)` and its Content-Disposition
@@ -12898,7 +12965,7 @@ mod tests {
         apply_controller_paths(&mut files, &crate::lower::flatten_routes(&app));
         assert_eq!(
             files[0].1,
-            "module RouteTable\n  CONTROLLER_PATHS = { admin_posts: \"admin/posts\" }.freeze\n\nend\n"
+            "module RouteTable\n  CONTROLLER_PATHS = { admin__posts: \"admin/posts\" }.freeze\n\nend\n"
         );
         assert_eq!(files[1].1, module);
     }

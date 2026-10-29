@@ -467,6 +467,10 @@ pub struct App {
     /// Object, which the emitted app does not define.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_defs: Vec<crate::ident::Symbol>,
+    /// Literal settings on a gem package's config receiver, from
+    /// `config/initializers/` (`ingest::gem_package_settings`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_package_settings: Vec<GemPackageSetting>,
     /// Installed gems compiled from source because the app's code needs
     /// them and nothing models or ports them (`ingest::auto_source_gems`).
     /// The Spinel tree carries their code; the ruby family loads the real
@@ -855,6 +859,15 @@ pub struct CollectionCacheStore {
     pub reader: Symbol,
 }
 
+/// `Rack::MiniProfiler.config.position = "bottom-left"`, kept as written.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GemPackageSetting {
+    pub gem: String,
+    pub setter: String,
+    pub statement: String,
+    pub span: crate::span::Span,
+}
+
 /// `X.before_action :m, only: [:a, …]` from a `config/initializers/`
 /// file. `only` empty means every action, as Rails reads it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1180,6 +1193,7 @@ impl App {
             rake_task_gaps: Vec::new(),
             initializer_filters: Vec::new(),
             initializer_defs: Vec::new(),
+            gem_package_settings: Vec::new(),
             auto_source_gems: Vec::new(),
             initializer_response_headers: Vec::new(),
             collection_cache_store: None,

@@ -891,7 +891,12 @@ struct SourceContractIndex<'a> {
     /// Owners whose own plain `initialize` shadows any a mixin supplies
     /// (`constructor::shadows_supplied_initialize`).
     shadowing_initializers: HashSet<ClassId>,
-    fragments: HashMap<ClassId, usize>,
+    /// Owners a fragment declares a method of again, or whose mixins more than one fragment adds.
+    redefined: HashSet<ClassId>,
+    including_fragments: HashMap<ClassId, usize>,
+    /// The fragment being read for each owner, and the one each method was declared in.
+    current_fragment: HashMap<ClassId, usize>,
+    declared_in: HashMap<(ClassId, Symbol, bool), usize>,
     instance: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     class: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     virtual_owners: Vec<&'a ClassId>,
@@ -901,6 +906,18 @@ struct SourceContractIndex<'a> {
     /// Keep the model alongside the span so an unrelated sibling receiver
     /// does not inherit another model's loss, while descendants still do.
     unretained_models: HashSet<(Span, ClassId)>,
+}
+
+/// Whether a branch of `defs` (or of a conditional nested in it) defines `initialize` or `self.new`.
+fn conditionally_constructs(defs: &crate::dialect::ConditionalDefinitions) -> bool {
+    defs.arms.iter().any(|arm| {
+        arm.methods.iter().any(|m| {
+            matches!(
+                (m.name.as_str(), m.receiver),
+                ("initialize", MethodReceiver::Instance) | ("new", MethodReceiver::Class)
+            )
+        }) || arm.nested.iter().any(conditionally_constructs)
+    })
 }
 
 impl<'a> SourceContractIndex<'a> {
@@ -917,7 +934,10 @@ impl<'a> SourceContractIndex<'a> {
             unmodeled_constructor_lookup: HashSet::default(),
             unmodeled_new_lookup: HashSet::default(),
             shadowing_initializers: HashSet::default(),
-            fragments: HashMap::default(),
+            redefined: HashSet::default(),
+            including_fragments: HashMap::default(),
+            current_fragment: HashMap::default(),
+            declared_in: HashMap::default(),
             instance: HashMap::default(),
             class: HashMap::default(),
             virtual_owners: Vec::new(),
@@ -940,9 +960,19 @@ impl<'a> SourceContractIndex<'a> {
                 class.includes.iter().cloned(),
             );
             index.add_methods(&class.name, class.methods.iter(), false);
+            // Not one branch's contract for all: a constructor a load-time conditional defines differs by which branch ran.
+            if class.conditional_definitions.iter().any(conditionally_constructs) {
+                index.redefined.insert(class.name.clone());
+            }
             index.virtual_owners.push(&class.name);
         }
+        // Not verified when two kinds of source declare one owner (a model and a library class): which file the emit writes last decides the constructor.
+        let mut kinds: HashMap<ClassId, usize> = HashMap::default();
+        for name in &class_owners {
+            *kinds.entry(name.clone()).or_default() += 1;
+        }
         for model in &app.models {
+            *kinds.entry(model.name.clone()).or_default() += 1;
             index.add_fragment(
                 &model.name,
                 model.parent.as_ref(),
@@ -954,6 +984,7 @@ impl<'a> SourceContractIndex<'a> {
             index.virtual_owners.push(&model.name);
         }
         for module in &app.test_modules {
+            *kinds.entry(module.name.clone()).or_default() += 1;
             index.add_fragment(
                 &module.name,
                 module.parent.as_ref(),
@@ -968,7 +999,13 @@ impl<'a> SourceContractIndex<'a> {
         // Controllers' spliced concern methods are already among their
         // actions, so the includes add nothing a lookup could find.
         for controller in &app.controllers {
+            *kinds.entry(controller.name.clone()).or_default() += 1;
             index.add_fragment(&controller.name, controller.parent.as_ref(), std::iter::empty());
+        }
+        for (owner, n) in kinds {
+            if n > 1 {
+                index.redefined.insert(owner);
+            }
         }
         for (owner, method) in actions {
             index.add_methods(owner, std::iter::once(method), false);
@@ -1044,9 +1081,13 @@ impl<'a> SourceContractIndex<'a> {
         parent: Option<&'a ClassId>,
         includes: impl Iterator<Item = ClassId>,
     ) {
-        *self.fragments.entry(owner.clone()).or_default() += 1;
+        *self.current_fragment.entry(owner.clone()).or_default() += 1;
         if let Some(parent) = parent {
             self.parents.entry(owner.clone()).or_insert(parent);
+        }
+        let includes: Vec<ClassId> = includes.collect();
+        if !includes.is_empty() {
+            *self.including_fragments.entry(owner.clone()).or_default() += 1;
         }
         self.includes
             .entry(owner.clone())
@@ -1066,14 +1107,21 @@ impl<'a> SourceContractIndex<'a> {
                 MethodReceiver::Class => &mut self.class,
             };
             declarations.insert((owner.clone(), method.name.clone()), (method, model));
+            // Not a redefinition within one class body: Ruby keeps the last, whatever loads first.
+            let fragment = self.current_fragment.get(owner).copied().unwrap_or(0);
+            let key = (owner.clone(), method.name.clone(), method.receiver == MethodReceiver::Class);
+            if self.declared_in.insert(key, fragment).is_some_and(|prev| prev != fragment) {
+                self.redefined.insert(owner.clone());
+            }
         }
     }
 
     /// A second source fragment can replace the keyword contract the
     /// first fragment declared. Anonymous packets have no keys to
     /// re-bind, so a reopened owner stays refused.
+    // Not every second fragment: rotp's `class OTP; class URI` only nests a class, and replaces nothing whichever file loads first.
     fn reopened(&self, owner: &ClassId) -> bool {
-        self.fragments.get(owner).copied().unwrap_or(0) > 1
+        self.redefined.contains(owner) || self.including_fragments.get(owner).copied().unwrap_or(0) > 1
     }
 
     fn parent(&self, owner: &ClassId) -> Option<&'a ClassId> {
@@ -1138,7 +1186,7 @@ impl<'a> SourceContractIndex<'a> {
         if !seen.insert(owner.clone()) {
             return true;
         }
-        (self.fragments.get(owner).copied().unwrap_or(0) <= 1 || self.modules.contains(owner))
+        (!self.reopened(owner) || self.modules.contains(owner))
             && self
                 .parent(owner)
                 .is_none_or(|parent| self.verified_hierarchy(parent, seen))

@@ -20131,5 +20131,26 @@ mod bare_save_without_validation;
 #[path = "emit_and_run/route_param_recall.rs"]
 mod route_param_recall;
 
+#[path = "emit_and_run/reopened_class_constructor.rs"]
+mod reopened_class_constructor;
+
+#[path = "emit_and_run/flash_any_key.rs"]
+mod flash_any_key;
+
+#[path = "emit_and_run/route_arg_column_named_like_association.rs"]
+mod route_arg_column_named_like_association;
+
+#[path = "emit_and_run/params_merged_key_type.rs"]
+mod params_merged_key_type;
+
+#[path = "emit_and_run/view_nil_seeded_loop_local.rs"]
+mod view_nil_seeded_loop_local;
+
+#[path = "emit_and_run/polymorphic_source_through.rs"]
+mod polymorphic_source_through;
+
+#[path = "emit_and_run/namespaced_controller_symbol.rs"]
+mod namespaced_controller_symbol;
+
 #[path = "emit_and_run/params_write_assign.rs"]
 mod params_write_assign;
