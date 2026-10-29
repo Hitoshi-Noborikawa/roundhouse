@@ -3925,10 +3925,13 @@ fn lower_relation_args(
                     // IS NULL. One statically-known case keeps a typed
                     // narrowing — a collection-typed value maps to ids
                     // here so the emitted SQL shape is visible.
-                    // Not every Array: a list of plain ids (`find_by(article: ids)`) has no `.id` to read, and the runtime predicate takes it as is.
+                    // Not an Array of scalars: a list of plain ids (`find_by(article: ids)`) has no `.id` to read, and the runtime predicate takes it as is.
                     if matches!(&*v.node, ExprNode::Var { .. } | ExprNode::Ivar { .. })
                         && match v.ty.as_ref() {
-                            Some(crate::ty::Ty::Array { elem }) => matches!(&**elem, crate::ty::Ty::Class { .. }),
+                            Some(crate::ty::Ty::Array { elem }) => !matches!(
+                                &**elem,
+                                crate::ty::Ty::Int | crate::ty::Ty::Str | crate::ty::Ty::Float | crate::ty::Ty::Sym | crate::ty::Ty::Bool
+                            ),
                             Some(crate::ty::Ty::Relation { .. }) => true,
                             _ => false,
                         }
