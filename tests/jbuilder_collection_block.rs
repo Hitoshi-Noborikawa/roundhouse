@@ -159,6 +159,10 @@ json.widgets @widgets, partial: @partial, as: :widget do |widget|
 end
 "#;
 
+/// What the Ruby emit writes for a `json` call the lowering refuses
+/// (#1539).
+const REFUSAL: &str = "jbuilder call with unrecognised arguments not supported";
+
 fn emitted() -> Vec<(String, String)> {
     let files: HashMap<PathBuf, Vec<u8>> = [
         ("db/schema.rb", SCHEMA),
@@ -417,13 +421,15 @@ puts Views::Widgets.options_json(widgets)
 }
 
 /// `json.set!(:widgets, col) { … }` is not a key named `set!` mapped
-/// over the Symbol `:widgets`.
+/// over the Symbol `:widgets`. The lowering has no `set!` arm, so it is
+/// refused (#1539) rather than written as nothing.
 #[test]
 fn an_explicit_set_bang_with_a_block_is_not_a_key_with_a_collection() {
     let files = emitted();
     let src = view(&files, "widgets/set_bang_json.rb");
     assert!(!src.contains("\\\"set!\\\":"), "`set!` is not the key:\n{src}");
     assert!(!src.contains("__col0 = :widgets"), "the key is not the collection:\n{src}");
+    assert!(src.contains(REFUSAL), "the statement is refused, not dropped:\n{src}");
 }
 
 /// `partial:` + `as:` with a non-literal `partial:` value is still the
@@ -436,6 +442,7 @@ fn an_inline_partial_with_a_variable_path_is_not_an_array_of_blocks() {
         !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
         "the block is not run per element:\n{src}"
     );
+    assert!(src.contains(REFUSAL), "the partial path is not known, so it is refused:\n{src}");
 }
 
 /// Literal options (`cache: true`, `OPTIONS`) still become the array;
@@ -449,6 +456,7 @@ fn a_collection_with_a_call_in_its_options_is_not_an_array_of_blocks() {
         !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
         "the block is not run per element:\n{src}"
     );
+    assert!(src.contains(REFUSAL), "the statement is refused, not dropped:\n{src}");
     let literal = view(&files, "widgets/options_json.rb");
     assert!(literal.contains("__col0.map"), "a literal option still lowers:\n{literal}");
 }
@@ -462,4 +470,5 @@ fn an_inline_partial_hash_before_another_argument_is_not_an_array_of_blocks() {
         !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
         "the block is not run per element:\n{src}"
     );
+    assert!(src.contains(REFUSAL), "the extra argument is not lowered, so it is refused:\n{src}");
 }

@@ -245,7 +245,8 @@ fn a_record_renders_its_models_partial() {
 }
 
 /// A local for the partial (`label:`) has no way through a positional
-/// call, and stays unrecognized. An `as:` other than `widget` names a
+/// call, and stays unrecognized: refused where it stands (#1539), not
+/// written as nothing. An `as:` other than `widget` names a
 /// local the lowered partial does not take its record under: refused
 /// with the reason, rather than calling a partial that would miss its
 /// local or rendering nothing.
@@ -254,8 +255,10 @@ fn a_record_with_extra_locals_is_left_alone_and_another_as_is_refused() {
     let files = emitted();
     let src = view(&files, "widgets/extra_json.rb");
     assert!(
-        !src.contains("Views::Widgets.") && src.contains("io << \"\""),
-        "extra: no partial call is emitted:\n{src}"
+        !src.contains("Views::Widgets.")
+            && !src.contains("io << \"\"")
+            && src.contains("jbuilder call with unrecognised arguments not supported"),
+        "extra: no partial call is emitted, and the statement is refused:\n{src}"
     );
     let src = view(&files, "widgets/entry_json.rb");
     assert!(
@@ -282,7 +285,8 @@ fn a_record_of_no_known_model_is_refused_not_rendered_empty() {
 /// A String `as:` is compared like the Symbol: `as: "entry"` is
 /// refused as `as: :entry` is, rather than binding the record as
 /// `widget` for a partial that reads `entry`; `as: "widget"` renders
-/// the partial. An `as:` that is not a literal is left alone.
+/// the partial. An `as:` that is not a literal is not lowered, and is
+/// refused where it stands (#1539).
 #[test]
 fn a_string_as_is_compared_like_a_symbol() {
     let files = emitted();
@@ -293,8 +297,10 @@ fn a_string_as_is_compared_like_a_symbol() {
     );
     let src = view(&files, "widgets/dynamic_as_json.rb");
     assert!(
-        !src.contains("Views::Widgets.") && src.contains("io << \"\""),
-        "dynamic_as: no partial call is emitted:\n{src}"
+        !src.contains("Views::Widgets.")
+            && !src.contains("io << \"\"")
+            && src.contains("jbuilder call with unrecognised arguments not supported"),
+        "dynamic_as: no partial call is emitted, and the statement is refused:\n{src}"
     );
     let src = view(&files, "widgets/widget_string_json.rb");
     assert!(

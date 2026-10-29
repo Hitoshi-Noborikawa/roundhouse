@@ -690,8 +690,8 @@ struct Ctx {
 
 /// Classification of a single top-level statement in a jbuilder
 /// template. The walker normalizes recognized DSL Sends into this
-/// closed enum; unknown shapes are tagged `Unknown` and emit a TODO
-/// marker so the file still parses.
+/// closed enum; unknown shapes are tagged `Unknown`: refused when they
+/// are calls on `json`, an empty append otherwise.
 enum JbStmt<'a> {
     /// `json.extract! obj, :a, :b` — N pairs, one per attribute.
     Extract { obj: &'a Expr, attrs: Vec<Symbol> },
@@ -790,7 +790,8 @@ enum JbStmt<'a> {
     /// attribute name and raises (`TypeError: {fields: :b} is not a
     /// symbol nor a string`). Reported, never dropped.
     ArrayHashArgument,
-    /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
+    /// Unrecognized DSL or non-Send statement. A call on `json` is
+    /// refused where it stands; anything else surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
 }
@@ -1020,14 +1021,15 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
     mark_sound_merges(&classified, raw_stmts, ctx);
     let end = emit_pairs(&classified, raw_stmts, ctx, &mut out, Sep::First);
     out.push(io_append_lit(&ctx.accumulator, "}"));
-    // A statement the walker could not lower is written as nothing, so
-    // an empty object there says nothing about what Jbuilder sets:
-    // such an object is left as it was, not taken for BLANK.
+    // A statement the walker could not lower is refused or written as
+    // nothing, so an empty object there says nothing about what
+    // Jbuilder sets: such an object is left as it was, not taken for
+    // BLANK.
     (out, end == Sep::After || has_unlowered(raw_stmts, ctx))
 }
 
 /// Whether an object's statements, or a branch of them, include one
-/// the walker writes as an empty append (`JbStmt::Unknown`).
+/// the walker refuses or writes as an empty append (`JbStmt::Unknown`).
 fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
     stmts.iter().any(|s| match classify(s) {
         JbStmt::Unknown
@@ -1464,6 +1466,24 @@ fn emit_pairs(
                     src.span,
                     "jbuilder merge!",
                     "only a Hash literal whose keys the object sets nowhere else, or a value typed Hash, is lowered",
+                ));
+            }
+            // A `json.<key>(…)` the classifier does not recognise. Writing
+            // it as nothing dropped the key and never evaluated its
+            // arguments, with no report: Jbuilder renders it or raises.
+            // It is refused where it stands instead, as `ExtractDynamic`
+            // is. A statement on any other receiver keeps the empty
+            // append.
+            JbStmt::Unknown if is_json_send(src) => {
+                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                    file: String::new(),
+                    message: "jbuilder: a `json.<key>(…)` or `json.set!` call whose arguments or block the lowering does not recognise"
+                        .to_string(),
+                });
+                out.push(unsupported_stmt(
+                    src.span,
+                    "jbuilder call with unrecognised arguments",
+                    "the key, its arguments or its block do not match a lowered shape (options that are not literals or that are only known at run time, a non-literal `set!` key, a block that names its own builder)",
                 ));
             }
             JbStmt::Unknown => {
@@ -2333,6 +2353,11 @@ fn is_json_receiver(recv: &Expr) -> bool {
             ..
         } if method.as_str() == "json" && args.is_empty()
     )
+}
+
+/// Whether `stmt` is a call on the template's builder, `json.<m>(…)`.
+fn is_json_send(stmt: &Expr) -> bool {
+    matches!(&*stmt.node, ExprNode::Send { recv: Some(recv), .. } if is_json_receiver(recv))
 }
 
 fn extract_hash<'a>(e: &'a Expr) -> Option<&'a [(Expr, Expr)]> {
