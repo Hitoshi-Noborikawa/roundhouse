@@ -375,8 +375,9 @@ def fold_totp_qr!(toks, counts)
           depth -= 1 if toks[j].kind == :close && toks[j].name == "svg"
           depth.zero?
         end
-        if stop
-          toks[start..stop] = [Tok.new(:text, nil, nil, "«totp-qr»")]
+        # Not the whole svg: its own attributes (size, viewBox) still compare, only the modules drawn from the secret are folded.
+        if stop && stop > start + 1
+          toks[(start + 1)...stop] = [Tok.new(:text, nil, nil, "«totp-qr»")]
           counts["totp-secret"] += 1
         end
       end
@@ -385,9 +386,13 @@ def fold_totp_qr!(toks, counts)
   end
 end
 
-# The panel's `<script id="mini-profiler">…</script>`, dropped where it was injected.
+def mini_profiler_at(toks)
+  toks.index { |t| t.kind == :open && t.name == "script" && t.attrs.assoc("id")&.last == "mini-profiler" }
+end
+
+# The panel's `<script id="mini-profiler">…</script>`, dropped where only one side injected it.
 def fold_mini_profiler!(toks, counts)
-  i = toks.index { |t| t.kind == :open && t.name == "script" && t.attrs.assoc("id")&.last == "mini-profiler" }
+  i = mini_profiler_at(toks)
   return unless i
   close = (i + 1...toks.size).find { |j| toks[j].kind == :close && toks[j].name == "script" }
   return unless close
@@ -395,9 +400,9 @@ def fold_mini_profiler!(toks, counts)
   counts["mini-profiler"] += 1
 end
 
-def normalize!(toks, counts, fold_known)
+def normalize!(toks, counts, fold_known, fold_profiler = false)
   fold_totp_qr!(toks, counts)
-  fold_mini_profiler!(toks, counts) if fold_known
+  fold_mini_profiler!(toks, counts) if fold_known && fold_profiler
   toks.each do |t|
     case t.kind
     when :text
@@ -576,8 +581,10 @@ results = names.map do |name|
   cand_kind, cand_toks = tokenize(cand)
 
   counts = Hash.new(0)
-  normalize!(ref_toks, counts, !opts[:strict])
-  normalize!(cand_toks, counts, !opts[:strict])
+  # Not when both carry the panel: then its tags are compared like any markup.
+  one_sided_profiler = mini_profiler_at(ref_toks).nil? != mini_profiler_at(cand_toks).nil?
+  normalize!(ref_toks, counts, !opts[:strict], one_sided_profiler)
+  normalize!(cand_toks, counts, !opts[:strict], one_sided_profiler)
   # A rule fires on both sides of an identical pair; report pairs, not sides.
   counts.each_key { |k| counts[k] = (counts[k] / 2.0).ceil }
 

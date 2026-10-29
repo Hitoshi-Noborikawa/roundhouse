@@ -61,6 +61,8 @@ require "net/http"
 require "uri"
 require "json"
 require "fileutils"
+require "cgi"
+require "erb"
 
 opts = {
   email: ENV["LOBSTERS_EMAIL"], password: ENV["LOBSTERS_PASSWORD"], username: ENV["LOBSTERS_USERNAME"],
@@ -244,9 +246,13 @@ input_value = lambda do |name|
   q = Regexp.escape(name)
   v = body[/<input[^>]*name="#{q}"[^>]*value="([^"]*)"/, 1] || body[/<input[^>]*value="([^"]*)"[^>]*name="#{q}"/, 1]
   abort "lobsters-http-replay: no form field #{name.inspect} on the last page" unless v
-  enc(v.gsub("&amp;", "&").gsub("&quot;", '"').gsub("&#39;", "'").gsub("&lt;", "<").gsub("&gt;", ">"))
+  CGI.unescapeHTML(v)
 end
-expand = ->(s) { s.gsub(/\{(\w+)\}/) { ids[$1] }.gsub(/\{input:([^}]+)\}/) { input_value.($1) } }
+# A path takes a path component's escape, a form a form value's: `a b` is `a%20b` in one and `a+b` in the other.
+expand = lambda do |s, form: false|
+  escape = form ? ->(v) { enc(v) } : ->(v) { ERB::Util.url_encode(v) }
+  s.gsub(/\{(\w+)\}/) { ids[$1] }.gsub(/\{input:([^}]+)\}/) { escape.(input_value.($1)) }
+end
 
 # ── the visits ───────────────────────────────────────────────────────
 FileUtils.mkdir_p(opts[:dump])
@@ -269,7 +275,7 @@ steps.each do |step|
     next
   end
   path = expand.(step.path)
-  form = step.form && expand.(step.form)
+  form = step.form && expand.(step.form, form: true)
   if step.method == "POST"
     token = token_of($last_body)
     form = [form, ("authenticity_token=#{enc(token)}" if token)].compact.join("&")

@@ -2798,6 +2798,8 @@ impl<'a> BodyTyper<'a> {
                         _ => false,
                     };
                     let tail = i + 1 == exprs.len();
+                    // What the statement was typed against, for the retype below.
+                    let entry_ctx = (!nil_seed.is_empty()).then(|| local_ctx.clone());
                     {
                         let e = &mut exprs[i];
                         if !tail {
@@ -3185,7 +3187,7 @@ impl<'a> BodyTyper<'a> {
                     if !nil_seed.is_empty() {
                         let mut writes: Vec<(Symbol, Ty)> = Vec::new();
                         collect_local_assignment_tys(&exprs[i], &mut writes);
-                        let mut widened = false;
+                        let mut widened: Vec<(Symbol, Ty)> = Vec::new();
                         for (name, ty) in writes {
                             let Some((si, acc)) = nil_seed.get(&name) else {
                                 continue;
@@ -3202,12 +3204,18 @@ impl<'a> BodyTyper<'a> {
                             if let ExprNode::Assign { value, .. } = &mut *seed.node {
                                 value.ty = Some(merged.clone());
                             }
-                            seed.ty = Some(merged);
-                            widened = true;
+                            seed.ty = Some(merged.clone());
+                            widened.push((name.clone(), merged));
                         }
                         // Not left as first typed: a read earlier in the same loop body (`if prev … prev = x`) saw the bare nil seed, and a body typed only once (a view) keeps that.
-                        if widened && si_is_not(i, &nil_seed) {
-                            last = self.analyze_expr(&mut exprs[i], &local_ctx);
+                        // Not against the context after the statement either: its other writes would reach reads that precede them.
+                        if !widened.is_empty() && si_is_not(i, &nil_seed) {
+                            if let Some(mut retype) = entry_ctx {
+                                for (name, ty) in widened {
+                                    retype.local_bindings.insert(name, ty);
+                                }
+                                last = self.analyze_expr(&mut exprs[i], &retype);
+                            }
                         }
                     }
                     let e = &exprs[i];

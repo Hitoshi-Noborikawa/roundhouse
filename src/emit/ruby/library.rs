@@ -2986,8 +2986,12 @@ fn resolve_through_chain(
         Some(_) => resolve_through_chain(models, model, thr, depth + 1)?,
     };
     let thr_model = models.iter().find(|m| &m.name == thr_target)?;
-    let thr_table = pluralize_snake(thr_target.0.as_str());
-    let target_table = pluralize_snake(target.0.as_str());
+    // Not the class name's plural: a model's `self.table_name =` names another table.
+    let thr_table = thr_model.table.0.as_str().to_string();
+    let target_table = models
+        .iter()
+        .find(|m| &m.name == target)
+        .map_or_else(|| pluralize_snake(target.0.as_str()), |m| m.table.0.as_str().to_string());
     let owner_type = through_owner_type_predicate(&thr_table, as_interface, &model.name);
     let mut joins = match thr_model.through_source(assoc)? {
         // The source belongs_to on the join model (`Vote.belongs_to
@@ -3011,14 +3015,14 @@ fn resolve_through_chain(
         // rows of that type. Without the type the reader fell back to a
         // direct has_many and read a `comments.mod_mail_id` column.
         Association::BelongsTo { foreign_key: src_fk, polymorphic: true, .. } if thr_through.is_none() => {
-            let crate::lower::model_to_library::ThroughWriterJoin::ResolvedPolymorphic(_, _, _, _, type_col) =
+            let crate::lower::model_to_library::ThroughWriterJoin::ResolvedPolymorphic(_, _, _, _, type_col, pk) =
                 crate::lower::model_to_library::through_writer_join(model, models, name)
             else {
                 return None;
             };
             let type_name = target.0.as_str().trim_start_matches("::").replace('\'', "''");
             vec![format!(
-                "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id AND {thr_table}.{type_col} = '{type_name}'{owner_type}"
+                "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.{pk} AND {thr_table}.{type_col} = '{type_name}'{owner_type}"
             )]
         }
         // The source is a plain `has_many` on the join model, so the

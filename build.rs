@@ -108,8 +108,11 @@ fn embed_runtime_files() {
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
     for top in ["runtime/ruby", "runtime/spinel", "runtime/gems"] {
         let dir = root.join(top);
-        // Not for a tree a checkout lacks: cargo reruns a script whose watched path does not exist on every build.
+        // Not the missing tree itself (cargo reruns a script whose watched path does not exist on every build), but its parent, so the tree appearing later regenerates the table.
         if !dir.exists() {
+            if let Some(parent) = dir.parent().filter(|p| p.exists()) {
+                println!("cargo:rerun-if-changed={}", parent.display());
+            }
             continue;
         }
         println!("cargo:rerun-if-changed={}", dir.display());

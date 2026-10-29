@@ -69,6 +69,7 @@ fn record_model(ty: &Ty, models: &crate::det::HashMap<String, crate::det::HashSe
             args.iter().find_map(|a| record_model(a, models))
         }
         Ty::Array { elem } => record_model(elem, models),
+        Ty::Relation { of } => models.contains_key(of.0.as_str()).then(|| of.0.as_str().to_string()),
         _ => None,
     }
 }

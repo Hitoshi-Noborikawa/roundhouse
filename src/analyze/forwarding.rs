@@ -908,6 +908,18 @@ struct SourceContractIndex<'a> {
     unretained_models: HashSet<(Span, ClassId)>,
 }
 
+/// Whether a branch of `defs` (or of a conditional nested in it) defines `initialize` or `self.new`.
+fn conditionally_constructs(defs: &crate::dialect::ConditionalDefinitions) -> bool {
+    defs.arms.iter().any(|arm| {
+        arm.methods.iter().any(|m| {
+            matches!(
+                (m.name.as_str(), m.receiver),
+                ("initialize", MethodReceiver::Instance) | ("new", MethodReceiver::Class)
+            )
+        }) || arm.nested.iter().any(conditionally_constructs)
+    })
+}
+
 impl<'a> SourceContractIndex<'a> {
     /// Build source lookup and collect only selectors that need preservation
     /// checks: full forwarders and declarations reached by source argument
@@ -948,6 +960,10 @@ impl<'a> SourceContractIndex<'a> {
                 class.includes.iter().cloned(),
             );
             index.add_methods(&class.name, class.methods.iter(), false);
+            // Not one branch's contract for all: a constructor a load-time conditional defines differs by which branch ran.
+            if class.conditional_definitions.iter().any(conditionally_constructs) {
+                index.redefined.insert(class.name.clone());
+            }
             index.virtual_owners.push(&class.name);
         }
         // Not verified when two kinds of source declare one owner (a model and a library class): which file the emit writes last decides the constructor.

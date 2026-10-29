@@ -34,9 +34,10 @@ pub(crate) enum ThroughWriterJoin {
     /// `source_type:` (lobsters' `ModMail has_many :comment_references,
     /// through: :mod_mail_references, source: :reference, source_type:
     /// "Comment"`): the join row also carries the source's `<name>_type`
-    /// (the fifth field), set to the target class. Only the writer takes
-    /// it; the readers and preloads keep their own type predicate.
-    ResolvedPolymorphic(ClassId, Symbol, Symbol, Option<Symbol>, Symbol),
+    /// (the fifth field, or its `foreign_type:`), set to the target class,
+    /// and keys the target by its `primary_key:` (the sixth). Only the
+    /// writer and the reader take it.
+    ResolvedPolymorphic(ClassId, Symbol, Symbol, Option<Symbol>, Symbol, Symbol),
     /// No join row to write. The first hop is itself `:through`, or the
     /// source association is not a `belongs_to` (`Category has_many
     /// :stories, through: :tags`, where `Tag#stories` goes through
@@ -135,17 +136,19 @@ pub(crate) fn through_writer_join(
                 Some((foreign_key.clone(), None))
             }
             // Not without `source_type:`: Rails cannot tell which class the rows are (HasManyThroughAssociationPolymorphicSourceError).
-            Some(Association::BelongsTo { name: src_name, foreign_key, polymorphic: true, .. })
+            Some(Association::BelongsTo { name: src_name, foreign_key, polymorphic: true, foreign_type, primary_key, .. })
                 if matches!(assoc, Association::HasMany { class_explicit: true, .. }) =>
             {
-                Some((foreign_key.clone(), Some(Symbol::from(format!("{}_type", src_name.as_str())))))
+                let type_col = foreign_type.clone().unwrap_or_else(|| Symbol::from(format!("{}_type", src_name.as_str())));
+                let pk = primary_key.clone().unwrap_or_else(|| Symbol::from("id"));
+                Some((foreign_key.clone(), Some((type_col, pk))))
             }
             _ => None,
         }
     });
     match src {
         Some((src_fk, None)) => ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as),
-        Some((src_fk, Some(type_col))) => ThroughWriterJoin::ResolvedPolymorphic(join_class, owner_fk, src_fk, thr_as, type_col),
+        Some((src_fk, Some((type_col, pk)))) => ThroughWriterJoin::ResolvedPolymorphic(join_class, owner_fk, src_fk, thr_as, type_col, pk),
         None => ThroughWriterJoin::Nested(join_class),
     }
 }
@@ -344,10 +347,10 @@ pub(super) fn push_association_methods(
                     match through_joins.get(name) {
                         Some(
                             ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as)
-                            | ThroughWriterJoin::ResolvedPolymorphic(join_class, owner_fk, src_fk, thr_as, _),
+                            | ThroughWriterJoin::ResolvedPolymorphic(join_class, owner_fk, src_fk, thr_as, _, _),
                         ) => {
                             let source_type = match through_joins.get(name) {
-                                Some(ThroughWriterJoin::ResolvedPolymorphic(.., type_col)) => Some((type_col, target)),
+                                Some(ThroughWriterJoin::ResolvedPolymorphic(.., type_col, pk)) => Some((type_col, target, pk)),
                                 _ => None,
                             };
                             if !model_defines_instance_method(model, &writer_name)
@@ -2265,7 +2268,7 @@ fn synth_through_sync(
     owner_fk: &Symbol,
     src_fk: &Symbol,
     owner_as: Option<&Symbol>,
-    source_type: Option<(&Symbol, &ClassId)>,
+    source_type: Option<(&Symbol, &ClassId, &Symbol)>,
 ) -> MethodDef {
     use crate::ident::VarId;
 
@@ -2311,7 +2314,7 @@ fn synth_through_sync(
                             ));
                         }
                         // Not every join row of the owner: its rows of another source type belong to a sibling association.
-                        if let Some((type_col, class)) = source_type {
+                        if let Some((type_col, class, _)) = source_type {
                             e.push((lit_sym(type_col.clone()), super::lit_str(class.0.as_str().to_string())));
                         }
                         e
@@ -2374,7 +2377,7 @@ fn synth_through_sync(
             vec![owner_type()],
         ));
     }
-    if let Some((type_col, class)) = source_type {
+    if let Some((type_col, class, _)) = source_type {
         insert_stmts.push(send(
             var_ref(join_var.clone()),
             &format!("{}=", type_col.as_str()),
@@ -2385,7 +2388,7 @@ fn synth_through_sync(
         send(
             var_ref(join_var.clone()),
             &format!("{}=", src_fk.as_str()),
-            vec![send(var_ref(target_var.clone()), "id", vec![])],
+            vec![send(var_ref(target_var.clone()), source_type.map_or("id", |(_, _, pk)| pk.as_str()), vec![])],
         ),
         send(var_ref(join_var), "save", vec![]),
     ]);

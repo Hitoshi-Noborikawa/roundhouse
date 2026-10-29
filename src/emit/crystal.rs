@@ -681,10 +681,8 @@ fn emit_main_cr(app: &App) -> EmittedFile {
     s.push_str("  controllers: {\n");
     for c in &app.controllers {
         let class_name = c.name.0.as_str();
-        let stem = crate::naming::snake_case(
-            class_name.strip_suffix("Controller").unwrap_or(class_name),
-        );
-        writeln!(s, "    :{} => {},", stem, class_name).unwrap();
+        // Not the class's own snake_case: the router looks a controller up by its route symbol (`:admin__posts`).
+        writeln!(s, "    :{} => {},", controller_symbol(class_name), class_name).unwrap();
     }
     s.push_str("  } of Symbol => ActionController::Base.class,\n");
     s.push_str(")\n");
