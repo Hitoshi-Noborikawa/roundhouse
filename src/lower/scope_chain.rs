@@ -5239,6 +5239,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     let mut r = r;
                     let unapplied = apply_join_aliases(&mut r, &mr, &aliases, ctx);
                     key_unapplied_aliases_by_table(&mut args, &mr, &unapplied, ctx);
+                    if matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. })) {
+                        *expr = put(span, Some(r), method, args, block, parenthesized);
+                        return None;
+                    }
                     let filtered = put(span, Some(r), where_name, args, None, true);
                     *expr = put(span, Some(filtered), Symbol::from(terminal), vec![], None, false);
                     return None;
