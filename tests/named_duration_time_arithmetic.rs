@@ -46,6 +46,50 @@ fn named_duration_values_match_time_arithmetic_on_ruby() {
     app().run_ruby(ASSERTIONS).assert_passes();
 }
 
+fn test_app() -> emit_and_run::Overlay {
+    app()
+        .write("roundhouse.yml", "test_paths:\n  - test\n")
+        .write("test/upload_clock_test.rb", r#"require "test_helper"
+class UploadClockTest < ActiveSupport::TestCase
+  setup do
+    @now = Time.at(10) + UploadClock::SHIFT
+  end
+
+  test "shifted time" do
+    assert_equal 12, (Time.at(10) + UploadClock::SHIFT).to_i
+    assert_shifted_time
+  end
+
+  def assert_shifted_time
+    assert_equal 8, (Time.at(10) - UploadClock::SHIFT).to_i
+  end
+end
+"#)
+}
+
+#[test]
+fn named_durations_are_converted_in_emitted_test_bodies() {
+    let (emitted, errors) = test_app().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:?}");
+    let source = std::fs::read_to_string(emitted.join("test/upload_clock_test.rb")).unwrap();
+    assert!(source.matches("UploadClock::SHIFT.to_i").count() >= 3, "{source}");
+}
+
+#[test]
+fn named_durations_run_in_emitted_test_bodies() {
+    test_app().run_test("test/models/upload_clock_test.rb").assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn named_durations_run_in_native_test_bodies() {
+    test_app()
+        .write("app/controllers/articles_controller.rb", "class ArticlesController < ActionController::Base\nend\n")
+        .write("app/controllers/comments_controller.rb", "class CommentsController < ActionController::Base\nend\n")
+        .run_spinel_with_rbs("require_relative 'test/upload_clock_test'\n")
+        .assert_passes();
+}
+
 #[test]
 fn a_numeric_constant_in_a_nearer_namespace_keeps_fractional_seconds() {
     app()

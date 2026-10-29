@@ -98,6 +98,7 @@ pub fn apply_duration_lowering(app: &mut App) {
     // runtime answers, rather than leaning on a CRuby overlay the
     // strict-target test lanes do not ship.
     super::for_each_test_body(app, &mut |body| {
+        type_duration_constants(body, None, &duration_constants);
         apply_duration_rewrites(body, temporal_predicates)
     });
 }
