@@ -101,6 +101,29 @@ end
     assert_eq!(inferred_from(source, "maximum"), Ty::Int);
 }
 
+const NULLABLE_MODEL: &str = r#"class LiteralExtrema
+  def self.single(condition)
+    candidate = condition ? 3 : nil
+    [candidate].max
+  end
+
+  def self.with_present(condition)
+    candidate = condition ? 3 : nil
+    [candidate, 3].max
+  end
+end
+"#;
+
+#[test]
+fn a_single_nullable_element_keeps_a_nullable_extremum() {
+    assert!(can_be_nil(&inferred_from(NULLABLE_MODEL, "single")));
+}
+
+#[test]
+fn a_definitely_present_element_keeps_the_non_nil_extremum() {
+    assert_eq!(inferred_from(NULLABLE_MODEL, "with_present"), Ty::Int);
+}
+
 const SCRIPT: &str = r#"
 raise "time maximum changed" unless LiteralExtrema.time.iso8601 == "2026-01-02T00:00:00Z"
 raise "string minimum changed" unless LiteralExtrema.string == "a"

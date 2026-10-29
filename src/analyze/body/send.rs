@@ -21,17 +21,17 @@ pub(super) fn literal_array_extreme_ty(recv: &Expr, method: &Symbol, args: &[Exp
     if !matches!(method.as_str(), "max" | "min") || !args.is_empty() || has_block {
         return None;
     }
-    let (array, compact) = match &*recv.node {
-        ExprNode::Array { .. } => (recv, false),
+    let array = match &*recv.node {
+        ExprNode::Array { .. } => recv,
         ExprNode::Send { recv: Some(array), method, args, block: None, .. }
-            if method.as_str() == "compact" && args.is_empty() => (array, true),
+            if method.as_str() == "compact" && args.is_empty() => array,
         _ => return None,
     };
     let ExprNode::Array { elements, .. } = &*array.node else { return None };
     if elements.is_empty() || elements.iter().any(|element| matches!(&*element.node, ExprNode::Splat { .. })) {
         return None;
     }
-    if compact && !elements.iter().any(|element| element.ty.as_ref().is_some_and(definitely_present)) {
+    if !elements.iter().any(|element| element.ty.as_ref().is_some_and(definitely_present)) {
         return None;
     }
     let Some(Ty::Array { elem }) = recv.ty.as_ref() else { return None };
