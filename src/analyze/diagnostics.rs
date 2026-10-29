@@ -269,11 +269,71 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
     diagnose_with_coverage(app).0
 }
 
+/// Separate controller declarations lower independently, including their
+/// dispatchers. They cannot share an output path: keeping the last file loses
+/// methods, and concatenating them still replaces the earlier dispatcher.
+/// Ingest has already dropped openings that only nest classes.
+fn diagnose_controller_output_collisions(app: &App, out: &mut Vec<Diagnostic>) {
+    use crate::dialect::ControllerBodyItem as Item;
+    let mut groups: crate::det::HashMap<String, Vec<&crate::dialect::Controller>> = Default::default();
+    let mut paths = Vec::new();
+    for controller in &app.controllers {
+        let path = format!(
+            "app/controllers/{}.rb",
+            crate::naming::underscore(controller.name.0.as_str())
+        );
+        let group = groups.entry(path.clone()).or_default();
+        if group.is_empty() {
+            paths.push(path);
+        }
+        group.push(controller);
+    }
+    for path in paths {
+        let declarations = &groups[&path];
+        if declarations.len() < 2 {
+            continue;
+        }
+        // Files sort by path, so `cache_controller/*.rb` comes before
+        // `cache_controller.rb`: look for a location in every declaration,
+        // superclasses first.
+        let span = declarations
+            .iter()
+            .map(|c| c.parent_span)
+            .chain(declarations.iter().flat_map(|c| c.body.iter()).filter_map(|item| match item {
+                Item::Action { action, .. } => Some(action.name_span),
+                Item::Filter { filter, .. } => Some(filter.target_span),
+                Item::ClassMethod { method, .. } => Some(method.body.span),
+                Item::ClassIvarInit { expr, .. } | Item::Unknown { expr, .. } => Some(expr.span),
+                Item::PrivateMarker { .. } => None,
+            }))
+            .find(|span| !span.is_synthetic())
+            .unwrap_or_default();
+        let mut names: Vec<&str> = Vec::new();
+        for name in declarations.iter().map(|c| c.name.0.as_str()) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        let detail = match names.as_slice() {
+            [name] => format!(
+                "`{name}` is declared in more than one file, and each declaration writes `{path}`; only the last would survive"
+            ),
+            _ => format!(
+                "`{}` {} write `{path}`; only the last would survive",
+                names.join("` and `"),
+                if names.len() == 2 { "both" } else { "all" }
+            ),
+        };
+        out.push(Diagnostic::unsupported(span, None, "controller output collision", detail));
+    }
+}
+
 /// [`diagnose`] plus the missing-preload coverage triple, for report
 /// skins that state the denominator (#64: "0 findings" must be
 /// distinguishable from "couldn't check").
 pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     let mut out = app.routes.diagnostics.clone();
+    diagnose_controller_output_collisions(app, &mut out);
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));

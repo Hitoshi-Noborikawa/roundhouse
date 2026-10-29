@@ -2407,6 +2407,22 @@ end
             && lc.origin.is_none();
         !(bodiless && model_names.contains(lc.name.0.as_str()))
     });
+    // The same reopen for a controller: `cache_controller/fetching.rb`
+    // opens `class CacheController` only to hold `CacheController::
+    // Fetching`. Nested classes are not body items, so that opening has no
+    // superclass and no body. Kept, it also writes the controller's file,
+    // and emit reopens the controller without its superclass around each
+    // nested class. One opening stays when nothing else declares the class.
+    // An opening that carries anything stays, and `diagnose` refuses it.
+    let is_opening = |c: &crate::dialect::Controller| {
+        c.parent.is_none() && c.body.is_empty() && c.layout.is_inherit() && c.sibling_classes.is_empty()
+    };
+    let declared: HashSet<crate::ident::ClassId> =
+        app.controllers.iter().filter(|c| !is_opening(c)).map(|c| c.name.clone()).collect();
+    let mut kept = HashSet::default();
+    app.controllers.retain(|c| {
+        !is_opening(c) || (!declared.contains(&c.name) && kept.insert(c.name.clone()))
+    });
 
     // A model's `begin include(X) rescue NameError end` becomes its
     // `include`s (or nothing), now that every module of the app is
@@ -4240,7 +4256,8 @@ mod controller_concern_surface_tests {
         let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
         let base = crate::ident::ClassId("Review::BaseController".into());
         let child = crate::ident::ClassId("Review::ChildController".into());
-        assert_eq!(app.controllers.iter().filter(|c| c.name == base).count(), 3);
+        // The namespace-only opening in `c_base_nested.rb` is dropped.
+        assert_eq!(app.controllers.iter().filter(|c| c.name == base).count(), 2);
         for _ in 0..2 {
             let surfaces = controller_concern_surfaces(&app);
             let parent = &surfaces.controllers[&base];
