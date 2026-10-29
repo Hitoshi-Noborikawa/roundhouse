@@ -362,7 +362,9 @@ module ActiveRecord
         next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range) || val.is_a?(Bounds)
         name = key.is_a?(Symbol) ? key.to_s : key.to_s
         next if name.include?(".")
-        @scope_attributes = @scope_attributes.merge({ name.to_sym => val })
+        # Not the record itself: the key was renamed to the foreign key at lower time (`where(story: s)` → `story_id`), so the column wants its id.
+        seed = val.is_a?(Base) ? val._primary_key_value : val
+        @scope_attributes = @scope_attributes.merge({ name.to_sym => seed })
       end
     end
 
