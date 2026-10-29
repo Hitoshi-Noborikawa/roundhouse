@@ -9,7 +9,8 @@
 # Where a paired Location or dump name differs only in id-shaped tokens
 # (lobsters' short ids, six lowercase letters and digits), the candidate's
 # id is mapped to the reference's; so is an id-shaped token a paired page
-# has where the other has another, after the same preceding token. The
+# has where the other has another, after the same preceding token, when it
+# sits in a record's URL (/s/, /c/, /messages/ …) or a prefixed element id. The
 # candidate's dump names, its _status.json / _location.json and its bodies
 # are then rewritten with the reference's ids, so lobsters-content-diff
 # compares what the pages say rather than which random ids they got.
@@ -67,6 +68,9 @@ learn_exact = lambda do |r, c|
   pairs.each { |a, b| record.(a, b) }
 end
 
+# The path segments a record's short id follows in lobsters' URLs.
+ID_CONTEXTS = %w[s c comments messages stories].freeze
+
 learn_body = lambda do |r, c|
   rt = tokens.(r)
   ct = tokens.(c)
@@ -74,6 +78,9 @@ learn_body = lambda do |r, c|
   rt.each_index do |i|
     next if i.zero? || rt[i] == ct[i] || rt[i - 1] != ct[i - 1]
     # Not only pages that differ in ids alone: a CSRF token or a clock differs too, so an id pair counts when the token before it agrees.
+    # Not any six-letter word after it either (`delete` against `hidden` is a real difference): only a record's URL or a prefixed element id.
+    prefixed = rt[i].match?(PREFIXED_ID) && !rt[i].match?(ID)
+    next unless prefixed || ID_CONTEXTS.include?(rt[i - 1])
     pair = id_pair.(rt[i], ct[i])
     record.(*pair) if pair
   end

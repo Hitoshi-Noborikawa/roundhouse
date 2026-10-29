@@ -2578,7 +2578,6 @@ end
     drop(sources);
     carry_included_block_includes_into_controllers(&mut app);
     splice_concerns_into_controllers(&mut app);
-    super::conditional_permit::apply(&mut app);
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
     // After the splice: a macro has to resolve against the concern's
@@ -2586,6 +2585,8 @@ end
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
     expand_class_body_macros(&mut app)?;
+    // After the splice and the macros: a concern's action, or one a macro synthesizes, gates its permit too.
+    super::conditional_permit::apply(&mut app);
     // The same idea one base over: `const` / `prop` under a class
     // whose ancestry a sidecar says reaches `T::Props` IS the
     // `T::Struct` macro, and gets expanded rather than replayed. It

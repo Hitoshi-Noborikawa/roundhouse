@@ -3518,7 +3518,11 @@ fn strict_locals_by_key(views: &[View]) -> crate::det::HashMap<ViewKey, Vec<Para
         let Some(sl) = v.strict_locals.as_ref() else { continue };
         let Some(key) = view_key_of(v) else { continue };
         let form_local = bindings.get(&key).map(|b| b.form_local.as_str());
-        out.insert(key, sl.iter().filter(|p| Some(p.name.as_str()) != form_local).cloned().collect());
+        let declared: Vec<_> = sl.iter().filter(|p| Some(p.name.as_str()) != form_local).cloned().collect();
+        // Not an empty contract: the definition skips strict lowering for one, and a caller reading it as strict would bind nothing.
+        if !declared.is_empty() {
+            out.insert(key, declared);
+        }
     }
     out
 }

@@ -10,6 +10,7 @@ use crate::det::HashMap;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::span::Span;
+use crate::ty::Ty;
 
 pub fn apply_route_param_recall(app: &mut App) {
     let required: HashMap<String, Vec<Symbol>> = super::lower_routes_to_library_functions(app)
@@ -74,7 +75,7 @@ fn rewrite(expr: &mut Expr, required: &HashMap<String, Vec<Symbol>>) {
 }
 
 fn recalled(name: &Symbol, span: Span) -> Expr {
-    let params = Expr::new(
+    let mut params = Expr::new(
         span,
         ExprNode::Send {
             recv: None,
@@ -84,8 +85,11 @@ fn recalled(name: &Symbol, span: Span) -> Expr {
             parenthesized: false,
         },
     );
-    let key = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: name.as_str().to_string() } });
-    Expr::new(
+    params.ty = Some(Ty::Hash { key: Ty::Str.into(), value: Ty::Str.into() });
+    let mut key = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: name.as_str().to_string() } });
+    key.ty = Some(Ty::Str);
+    // Not left untyped: the helper's segment types come from what its calls pass, and an untyped one leaves an Integer slot a String reaches.
+    let mut fetched = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(params),
@@ -94,5 +98,7 @@ fn recalled(name: &Symbol, span: Span) -> Expr {
             block: None,
             parenthesized: true,
         },
-    )
+    );
+    fetched.ty = Some(Ty::Str);
+    fetched
 }
