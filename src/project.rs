@@ -2969,7 +2969,7 @@ fn target_files_inner(
         let files = ensure_static_assets(files, target, app);
         ensure_e2e(files, target)
     };
-    Ok(ensure_readme(files, target))
+    Ok(with_sidekiq_readme(ensure_readme(files, target), target, app))
 }
 
 /// Targets whose archives ship the Playwright e2e suite under `e2e/`
@@ -3199,6 +3199,66 @@ fn ensure_readme(
     if !files.iter().any(|(p, _)| p == "README.md") {
         files.push(("README.md".to_string(), target_readme(target)));
         files.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    files
+}
+
+/// A `### Jobs on Sidekiq` part at the end of the README's `## Run`, for a
+/// tree that [`needs_redis`]: how to start the worker role, what its
+/// options default to, and where its broadcasts go. A `###` heading, so
+/// `scripts/smoke` skips it with the rest of `## Run` (the worker runs in
+/// the foreground).
+fn with_sidekiq_readme(mut files: Vec<(String, String)>, target: BuildTarget, app: &App) -> Vec<(String, String)> {
+    let worker = match target {
+        BuildTarget::Spinel => "./build/bin/blog sidekiq",
+        BuildTarget::Ruby => "bundle exec ruby sidekiq.rb",
+        BuildTarget::Jruby => "jruby -S bundle exec jruby sidekiq.rb",
+        _ => return files,
+    };
+    if !needs_redis(app) {
+        return files;
+    }
+    let cable = match cable_redis(app) {
+        Some(c) if c.channel_prefix.is_empty() => {
+            "config/cable.yml's production adapter is `redis`, so every broadcast, \
+             the worker's and the server's, is a `PUBLISH` on its stream name, and \
+             each server process delivers what it receives to its own sockets."
+                .to_string()
+        }
+        Some(c) => format!(
+            "config/cable.yml's production adapter is `redis`, so every broadcast, \
+             the worker's and the server's, is a `PUBLISH` on `{}:<stream>`, and \
+             each server process delivers what it receives to its own sockets.",
+            c.channel_prefix
+        ),
+        None => "config/cable.yml's production adapter isn't `redis`, so a broadcast a job \
+                 makes in the worker reaches no browser (the transpile warns about this)."
+            .to_string(),
+    };
+    let section = format!(
+        "### Jobs on Sidekiq\n\
+         The app is on `queue_adapter :sidekiq`, so `perform_later` pushes each job \
+         to Redis (`REDIS_URL`, or `redis://localhost:6379`) in Sidekiq 8's format. \
+         Run them with the same build in a second process (or with a Ruby Sidekiq \
+         process on the Rails app):\n\
+         ```sh\n\
+         {worker}\n\
+         ```\n\
+         `-c N` sets the processor threads (default: config/sidekiq.yml's \
+         `:concurrency:`, then `RAILS_MAX_THREADS`, then 5), `-q queue[,weight]` the \
+         queues (repeatable; default: config/sidekiq.yml's `:queues:`, then \
+         `default`), and `-t seconds` the shutdown timeout (default: \
+         config/sidekiq.yml's `:timeout:`, then 25). Each thread has its own Redis \
+         connection, and the database pool is sized to the threads plus headroom \
+         unless `DATABASE_POOL_SIZE` is set. TSTP stops fetching; TERM or INT \
+         waits for running jobs up to the timeout and pushes the rest back. A job \
+         that raises goes to the dead set; there are no retries yet.\n\n\
+         {cable}\n\n"
+    );
+    if let Some((_, readme)) = files.iter_mut().find(|(p, _)| p == "README.md") {
+        let Some(run) = readme.find("## Run\n") else { return files };
+        let end = readme[run + 1..].find("\n## ").map(|i| run + 2 + i).unwrap_or(readme.len());
+        readme.insert_str(end, &section);
     }
     files
 }
