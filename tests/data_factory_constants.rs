@@ -529,7 +529,7 @@ fn rehomed_file_level_factories_remain_unsupported() {
 }
 
 #[test]
-fn factories_outside_library_classes_remain_unsupported() {
+fn factories_in_unretained_owner_positions_remain_unsupported() {
     let tree: HashMap<PathBuf, Vec<u8>> = [
         (
             "app/models/factory_model.rb",
@@ -572,8 +572,8 @@ end
     assert_eq!(app.test_modules.len(), 1);
     assert_eq!(app.test_modules[0].inner_classes.len(), 1);
     let analyzer = Analyzer::new(&app);
+    assert!(analyzer.class_registry().contains_key(&ClassId(Symbol::from("FactoryModel::Result"))));
     for name in [
-        "FactoryModel::Result",
         "FactoryModel::Qualified",
         "FactoryOwnerController::Result",
         "FactoryOwnerController::Qualified",
@@ -590,7 +590,6 @@ end
     roundhouse::session::analyze_and_lower(&mut app);
     let diagnostics = roundhouse::analyze::diagnose(&app);
     for name in [
-        "FactoryModel::Result",
         "FactoryOwnerController::Result",
         "FactoryTest::Result",
         "FactoryCompanion::Result",

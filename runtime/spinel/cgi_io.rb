@@ -71,7 +71,7 @@ module CgiIo
         body = stdin.read(length).to_s
         form = ActionDispatch::Http::Multipart.parse(body, ctype)
         form.fields.each { |k, v| assign_form_pair(body_params, k, v) }
-        form.files.each { |k, v| assign_form_pair(body_params, k, v) }
+        form.file_parts.each { |part| assign_form_pair(body_params, part.name, part.file) }
       elsif length > 0 && ctype.start_with?("application/json")
         # `@rails/request.js` with `contentType: "application/json"`
         # (campfire's link unfurl): Rails parses the object into params,

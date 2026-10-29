@@ -463,20 +463,22 @@ pub(crate) fn tree_answer(catalog: &Catalog, recv: Option<&Expr>, method: &str, 
         return None;
     }
     let full = Translate::full_key(&call.lookup, &call.lookup.key).ok()?;
-    let mut locales = catalog.locales();
-    for other in &catalog.others {
-        if !locales.contains(&other.locale) {
-            locales.push(other.locale.clone());
-        }
-    }
     let lands = |c: &Catalog| c.entries.contains_key(&full) || c.opaque.contains(&full) || c.is_subtree(&full);
-    let every = catalog.variants(&locales).iter().all(|v| {
-        let chain = match &v.fallbacks {
-            Some(defaults) => crate::i18n::fallback_chain(&v.locale, defaults),
-            None => vec![v.locale.clone()],
-        };
-        chain.iter().filter_map(|l| catalog.catalog_for(l)).find(|c| lands(c)).is_some_and(|c| c.plain_subtree(&full))
-    });
+    // Most keys are leaves: reject the first variant without building
+    // every locale/environment's owned Variant. Repeated locales give
+    // the same verdict, so this `all` needs no deduplicated locale list.
+    let every = std::iter::once(&catalog.locale)
+        .chain(&catalog.available)
+        .chain(catalog.others.iter().map(|c| &c.locale))
+        .all(|locale| {
+            std::iter::once(&catalog.fallbacks.app).chain(catalog.fallbacks.envs.iter().map(|(_, setting)| setting)).all(|fallbacks| {
+                let chain = match fallbacks {
+                    Some(defaults) => crate::i18n::fallback_chain(locale, defaults),
+                    None => vec![locale.clone()],
+                };
+                chain.iter().filter_map(|l| catalog.catalog_for(l)).find(|c| lands(c)).is_some_and(|c| c.plain_subtree(&full))
+            })
+        });
     every.then_some(full)
 }
 
@@ -1587,4 +1589,70 @@ fn interpolate(span: Span, template: &str, call: &Call, html: bool) -> Expr {
     };
     e.ty = Some(Ty::Str);
     e
+}
+
+#[cfg(test)]
+mod tree_answer_tests {
+    use super::*;
+    use crate::i18n::FallbackPolicy;
+
+    // The original eager path: build all locale/environment variants,
+    // then check whether every one answers a plain subtree.
+    fn eager(catalog: &Catalog, full: &str) -> bool {
+        let mut locales = catalog.locales();
+        for other in &catalog.others {
+            if !locales.contains(&other.locale) {
+                locales.push(other.locale.clone());
+            }
+        }
+        let lands = |c: &Catalog| c.entries.contains_key(full) || c.opaque.contains(full) || c.is_subtree(full);
+        catalog.variants(&locales).iter().all(|v| {
+            let chain = match &v.fallbacks {
+                Some(defaults) => crate::i18n::fallback_chain(&v.locale, defaults),
+                None => vec![v.locale.clone()],
+            };
+            chain.iter().filter_map(|l| catalog.catalog_for(l)).find(|c| lands(c)).is_some_and(|c| c.plain_subtree(full))
+        })
+    }
+
+    #[test]
+    fn lazy_tree_answers_match_eager_locale_variants() {
+        let source = "en:\n  shared:\n    title: Shared\n    empty: {}\n  menu:\n    title: Menu\n    empty: {}\n  mixed:\n    title: Text\n    count: 2\n  only_en:\n    title: English\n  changed:\n    title: Text\nfr:\n  shared:\n    title: Partage\n    empty: {}\n  menu:\n    title: Carte\n    empty: {}\n  mixed:\n    title: Texte\n    count: 3\n  changed: false\nfr-CA:\n  shared:\n    title: Partage\n    empty: {}\n  regional:\n    title: Quebec\n";
+        let mut files = vec![("locales.yml".into(), source.into())];
+        let (mut catalog, problems) = Catalog::load("en", &mut files);
+        assert!(problems.is_empty());
+        catalog.load_locales(vec!["en".into(), "fr".into(), "fr-CA".into()], FallbackPolicy::default(), &[], &mut files);
+        let recv = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("I18n")] });
+        let keys = ["", "shared", "shared.empty", "menu", "menu.title", "menu.empty", "mixed", "mixed.count", "only_en", "changed", "regional", "missing", "men", "menu."];
+        let settings = [None, Some(Vec::new()), Some(vec!["en".into()]), Some(vec!["fr-CA".into(), "en".into()])];
+        let (mut positive, mut negative) = (0, 0);
+        for default in &settings {
+            for environment in &settings {
+                catalog.fallbacks = FallbackPolicy {
+                    app: default.clone(),
+                    envs: vec![("production".into(), environment.clone()), ("test".into(), default.clone())],
+                    ..Default::default()
+                };
+                for duplicate in [false, true] {
+                    let mut c = catalog.clone();
+                    if duplicate {
+                        // fr-CA remains in `others` even when it is not available.
+                        c.available.retain(|l| l != "fr-CA");
+                        c.available.extend(["en".into(), "fr".into()]);
+                        c.others.push(c.others[0].clone());
+                    }
+                    for key in keys {
+                        let args = [lit(Span::synthetic(), key.into())];
+                        let expected = eager(&c, key).then(|| key.to_string());
+                        if expected.is_some() { positive += 1 } else { negative += 1 }
+                        for method in ["t", "translate"] {
+                            assert_eq!(tree_answer(&c, Some(&recv), method, &args, None), expected,
+                                "{key:?}, {default:?}, {environment:?}, duplicate={duplicate}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(positive > 0 && negative > 0);
+    }
 }

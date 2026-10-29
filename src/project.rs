@@ -2469,7 +2469,7 @@ pub fn target_files(
             (crate::gems::native_extension_gem_namespaces(app), Default::default())
         };
         return crate::emit::ruby::with_external_gem_namespaces(&namespaces, includes, || {
-            target_files_inner(app, fixture, target)
+            crate::emit::ruby::expr::with_body_statements(|| target_files_inner(app, fixture, target))
         });
     }
     target_files_inner(app, fixture, target)

@@ -333,7 +333,6 @@ end
 )];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_class_side_writer_call_and_a_class_eval_loop_run_as_native() {
     gem_same_as_native(
         "cardlike",
@@ -468,7 +467,6 @@ end
 )];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_module_eval_loop_over_a_literal_hash_of_lists_runs_as_native() {
     gem_same_as_native(
         "verbs",

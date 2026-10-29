@@ -81,6 +81,7 @@ pub mod thread_mattr;
 pub mod model;
 mod delegated_type;
 mod app_extension_calls;
+mod body_statements;
 mod class_macros;
 mod column_accessors;
 mod model_macros;

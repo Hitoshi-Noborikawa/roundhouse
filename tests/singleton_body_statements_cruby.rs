@@ -53,7 +53,6 @@ const EXPECTED: &str = "[\"h\", \"s\", [\"host\", \"secret\", \"kind\"], \"singl
 [true, false]\n";
 
 #[test]
-#[ignore = "fork spec: class-body loops and hooks"]
 fn singleton_body_statements_on_a_constant_run_on_the_singleton_class_as_in_cruby() {
     let native = emit_and_run::ruby().arg("-e").arg(format!("require \"active_support/core_ext/module/delegation\"\n{SOURCE}\n{SCRIPT}")).output().expect("CRuby control");
     assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
@@ -84,7 +83,6 @@ p [WritersGem.singleton_class.constants(false).sort, (WritersGem::WRITERS rescue
 "#;
 
 #[test]
-#[ignore = "fork spec: class-body loops and hooks"]
 fn a_gem_source_singleton_body_loop_runs_on_the_singleton_class_as_in_cruby() {
     let gem = std::env::temp_dir().join(format!("rh_writers_gem_native_{}", std::process::id()));
     for (path, text) in GEM_FILES {
