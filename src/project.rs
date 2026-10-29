@@ -9581,6 +9581,9 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
                 gemfile.push('\n');
             }
             gemfile.push_str(&block);
+            // The scaffold lock no longer matches; `bundle install`
+            // resolves the edited Gemfile fresh.
+            files.retain(|(p, _)| p != "Gemfile.lock");
         }
     }
 }
@@ -12676,6 +12679,24 @@ mod tests {
         apply_test_gem_wiring(&mut files);
         let gemfile = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
         assert!(gemfile.contains("webmock"), "a test body's demand stands:\n{gemfile}");
+    }
+
+    /// A test gem added to the Gemfile drops the scaffold lock, which
+    /// does not pin it; a Gemfile left alone keeps its lock.
+    #[test]
+    fn a_declared_test_gem_drops_the_stale_lock() {
+        let test = |body: &str| {
+            let mut files = vec![
+                ("test/test_helper.rb".to_string(), String::new()),
+                ("test/models/article_test.rb".to_string(), body.to_string()),
+                ("Gemfile".to_string(), "source \"https://rubygems.org\"\n".to_string()),
+                ("Gemfile.lock".to_string(), "GEM\n".to_string()),
+            ];
+            apply_test_gem_wiring(&mut files);
+            files.iter().any(|(p, _)| p == "Gemfile.lock")
+        };
+        assert!(!test("WebMock.stub_request(:get, \"/\")\n"));
+        assert!(test("assert true\n"));
     }
 
     /// `require "vips"` after boot. ruby-vips pulls in the system
