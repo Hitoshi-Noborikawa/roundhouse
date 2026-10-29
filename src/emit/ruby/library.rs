@@ -1105,7 +1105,7 @@ fn rewrite_library_partial_render(
             recv: Some(sp_expr(ExprNode::Const {
                 path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
             })),
-            method: crate::lower::view::view_method_name(&stem),
+            method: contract.method.clone(),
             args: view_args,
             block: None,
             parenthesized: true,
@@ -3322,9 +3322,16 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         // Declared names per side (a helper module's methods are all about to
         // become module functions, so for it they are one set): an instance
         // body is not shadowed by a `def self.x`, nor a class body by `def x`.
+        // A template's own method is not one of them: a template is no
+        // method a bare call in it could reach (its renders are already
+        // `Views::…` calls), so a bare call naming it is the helper of
+        // that name — a renamed pair partial (`show_partial`) included.
+        let is_template =
+            lc.name.0.as_str() == "Views" || lc.name.0.as_str().starts_with("Views::");
         let declared_on = |class_side: bool| -> crate::det::HashSet<Symbol> {
             lc.methods
                 .iter()
+                .filter(|_| !is_template)
                 .filter(|m| {
                     is_helper_module
                         || (m.receiver == MethodReceiver::Class) == class_side

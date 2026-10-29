@@ -1837,6 +1837,7 @@ mod tests {
             view_formats: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),
+            partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
             view_name: "messages/_message".to_string(),

@@ -412,7 +412,8 @@ fn block_has_file_field(body: &Expr, form_param: &str, ctx: &ViewCtx) -> bool {
             if let Some(ExprNode::Lit { value: Literal::Str { value } }) =
                 args.first().map(|a| &*a.node)
             {
-                let key = super::partial_name_to_key(value, &ctx.resource_dir);
+                let key =
+                    super::partial_name_to_key(value, &ctx.resource_dir, &ctx.partial_stems);
                 if ctx.multipart_partials.contains(&key) {
                     return true;
                 }
@@ -1569,6 +1570,7 @@ mod tests {
             view_formats: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),
+            partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
             str_ivars: Default::default(),
