@@ -36,12 +36,13 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
     let ported = crate::gems::ported_runtime_constants();
     // Not a gem the Spinel tree already carries (a spin package or a facade): the same boundary `project::report_spinel_unknown_gem_constants` reports.
     let carried = crate::gems::native_extension_gem_namespaces(app);
+    let ownership = crate::gems::LockGemIndex::new(lock);
     let mut out: BTreeSet<String> = BTreeSet::new();
     let mut consider = |path: &str, from_gem: bool| {
         if own.contains(path) || ported.contains(path) {
             return;
         }
-        let owners = crate::gems::lock_gems_owning_constant(lock, path);
+        let owners = ownership.owners(path);
         let [gem] = owners.as_slice() else { return };
         if lock.is_in_repo(gem)
             || lock.is_from_git(gem)

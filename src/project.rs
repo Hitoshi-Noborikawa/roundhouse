@@ -2066,11 +2066,12 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
     }
     // The longest-matching gem across the whole lockfile, so `Rack::Utils` stays rack's while `Rack::MiniProfiler` is rack-mini-profiler's
     let ported = crate::gems::spinel_runtime_constants();
+    let ownership = crate::gems::LockGemIndex::new(lock);
     let owner = |path: &str| -> Option<String> {
         if ported.contains(path) {
             return None;
         }
-        let owners = crate::gems::lock_gems_owning_constant(lock, path);
+        let owners = ownership.owners(path);
         (!owners.is_empty() && owners.iter().all(|g| unknown.contains(g))).then(|| owners.join(", "))
     };
     let report = |span: crate::span::Span, path: &str, ns: &str| {
@@ -9859,8 +9860,9 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     let census = crate::gems::GemCensus::of(lock);
     // Not only the gem's conventional namespace spelled exactly: svg-graph's is `SVG::Graph`.
     let mut owned = crate::det::HashSet::default();
+    let ownership = crate::gems::LockGemIndex::new(lock);
     for_each_app_constant(app, &mut |_, path| {
-        owned.extend(crate::gems::lock_gems_owning_constant(lock, path).into_iter().map(str::to_string));
+        owned.extend(ownership.owners(path).into_iter().map(str::to_string));
     });
     let needed: Vec<_> = census
         .unknown()
