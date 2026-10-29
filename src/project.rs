@@ -9509,7 +9509,7 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
     // every understood `stub_request` chain to the slot by the time this
     // scan runs, so on the ruby family the slot's delegate is what reaches
     // the gem — and that is the demand.
-    const TEST_GEMS: [(Marker, &str, &str); 3] = [
+    const TEST_GEMS: [(Marker, &str, &str); 6] = [
         (Marker::AnyText(&["WebMock.", "WebMock::", "HttpStub."]), "webmock", "webmock/minitest"),
         // `MochaBridge.` is the lowering's own spelling of a chain it hands
         // back to the gem (`lower::mocha`), and the paren-less forms are
@@ -9524,6 +9524,12 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
         // dimensions, which is the only honest way to check that an
         // image endpoint served an image of the right size.
         (Marker::Constant("Vips"), "ruby-vips", "vips"),
+        // The `lower::ruby_family_gems` gems in a test body alone:
+        // `gems::RUNTIME_GEMS` reads app/ only, so without these rows the
+        // suite would reach a gem its Gemfile never named.
+        (Marker::Constant("Retryable"), "retryable", "retryable"),
+        (Marker::Constant("JWT"), "jwt", "jwt"),
+        (Marker::Constant("RestClient"), "rest-client", "rest-client"),
     ];
 
     let mut needed: Vec<(&str, &str)> = Vec::new();
@@ -10815,6 +10821,40 @@ fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
 /// character or colon rules out `HashSet` and `Foo::Set`. Whole-line
 /// comments are skipped: the cookie jar explains a `Set.new` rewrite in
 /// one, and that is not a use.
+/// Whether the end of `head` lies inside a single- or double-quoted
+/// literal on its line (a backslash escapes the next byte). Code inside a
+/// double-quoted `#{…}` is code again.
+fn inside_quotes(head: &[u8]) -> bool {
+    // Open literals, innermost last, each with the `{` depth of the
+    // interpolation inside it (0 while in the literal's text).
+    let mut open: Vec<(u8, usize)> = Vec::new();
+    let mut escaped = false;
+    let mut i = 0;
+    while i < head.len() {
+        let c = head[i];
+        match open.last_mut() {
+            Some((q, 0)) => {
+                if escaped {
+                    escaped = false;
+                } else if c == b'\\' {
+                    escaped = true;
+                } else if c == *q {
+                    open.pop();
+                } else if *q == b'"' && c == b'#' && head.get(i + 1) == Some(&b'{') {
+                    open.last_mut().unwrap().1 = 1;
+                    i += 1;
+                }
+            }
+            Some((_, depth)) if c == b'{' => *depth += 1,
+            Some((_, depth)) if c == b'}' => *depth -= 1,
+            _ if c == b'"' || c == b'\'' => open.push((c, 0)),
+            _ => {}
+        }
+        i += 1;
+    }
+    matches!(open.last(), Some((_, 0)))
+}
+
 fn names_constant(src: &str, konst: &str) -> bool {
     // Most files never mention this name. Reject those with the optimized
     // substring search before walking/decoding every line of the runtime.
@@ -10842,11 +10882,29 @@ fn names_constant(src: &str, konst: &str) -> bool {
         let mut i = 0;
         while let Some(off) = line[i..].find(konst) {
             let at = i + off;
-            let head_ok = at == 0
-                || !matches!(b[at - 1],
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b':');
+            let ident = |c: u8| matches!(c, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+            // `::RestClient` is the top-level name too; `Foo::RestClient`
+            // is another one.
+            let rooted = at >= 2 && &b[at - 2..at] == b"::" && (at == 2 || !ident(b[at - 3]));
+            let head_ok = (at == 0 || rooted || !(ident(b[at - 1]) || b[at - 1] == b':'))
+                && !inside_quotes(&b[..at]);
             let tail = at + konst.len();
-            let tail_ok = matches!(b.get(tail), Some(b'.' | b'[' | b'('))
+            // A value: `client = RestClient`, `use(::RestClient)`, an
+            // argument or array element, `"#{RestClient}"`. A `%w[...]`
+            // word is a string.
+            let value = {
+                let start = if rooted { at - 2 } else { at };
+                let before = line[..start].trim_end();
+                let words = ["%w[", "%W[", "%i[", "%I["].iter().any(|w| before.ends_with(w));
+                // `[ RestClient ]` — the BracketsSpaced array style.
+                let after = line[tail..].trim_start().as_bytes().first();
+                ((before.ends_with('=') || before.ends_with('(') || before.ends_with(',') || before.ends_with('['))
+                    && !words
+                    && matches!(after, None | Some(b')' | b',' | b']')))
+                    || (before.ends_with("#{") && after == Some(&b'}'))
+            };
+            let tail_ok = value
+                || matches!(b.get(tail), Some(b'.' | b'[' | b'('))
                 || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'))
                 // Only right after the keyword or a rescue-list comma: `raise "Timeout waiting"` names no constant.
                 || (matches!(b.get(tail), None | Some(b',' | b' ')) && {
@@ -12730,6 +12788,67 @@ mod tests {
         };
         assert!(!test("WebMock.stub_request(:get, \"/\")\n"));
         assert!(test("assert true\n"));
+    }
+
+    /// A rooted `::Name` names the top-level constant, and so does a value
+    /// use; `Outer::Name` does not.
+    #[test]
+    fn names_constant_reads_a_rooted_name_and_a_value() {
+        assert!(names_constant("x = ::RestClient.get(u)\n", "RestClient"));
+        assert!(names_constant("::RestClient::Request.execute(a)\n", "RestClient"));
+        assert!(names_constant("rescue ::RestClient::NotFound\n", "RestClient"));
+        assert!(!names_constant("x = Foo::RestClient.get(u)\n", "RestClient"));
+        assert!(!names_constant("x = MyRestClient.get(u)\n", "RestClient"));
+        // As a value, bare or rooted.
+        assert!(names_constant("CLIENT = RestClient\n", "RestClient"));
+        assert!(names_constant("client = ::RestClient\n", "RestClient"));
+        assert!(names_constant("register(RestClient)\n", "RestClient"));
+        assert!(names_constant("pick(RestClient, 1)\n", "RestClient"));
+        assert!(!names_constant("CLIENT = Outer::RestClient\n", "RestClient"));
+        // Not prose in a literal.
+        assert!(!names_constant("msg = \"Saved, RestClient down\"\n", "RestClient"));
+        assert!(!names_constant("msg = \"Saved, RestClient\"\n", "RestClient"));
+        assert!(!names_constant("msg = 'a \\' (RestClient)'\n", "RestClient"));
+        assert!(!names_constant("doc = \"::RestClient::Request.execute\"\n", "RestClient"));
+        assert!(!names_constant("doc = 'see RestClient.get(u)'\n", "RestClient"));
+        // Interpolated code is code.
+        assert!(names_constant("msg = \"#{::RestClient::Request.new(a).url}\"\n", "RestClient"));
+        assert!(names_constant("msg = \"a #{h.fetch(:x) { RestClient.get(u) }} b\"\n", "RestClient"));
+        assert!(!names_constant("msg = \"#{x} RestClient.get\"\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [RestClient]\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [ RestClient ]\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [ RestClient , Net::HTTP ]\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [Net::HTTP, ::RestClient]\n", "RestClient"));
+        assert!(names_constant("msg = \"via #{RestClient}\"\n", "RestClient"));
+        assert!(!names_constant("NAMES = %w[RestClient]\n", "RestClient"));
+        assert!(!names_constant("NAMES = %i[RestClient]\n", "RestClient"));
+        assert!(!names_constant("msg = \"[RestClient]\"\n", "RestClient"));
+    }
+
+    /// A test body that alone names a `lower::ruby_family_gems` gem declares
+    /// and requires it.
+    #[test]
+    fn a_test_body_naming_a_ruby_family_gem_declares_it() {
+        for (body, gem) in [
+            ("Retryable.retryable(tries: 2) { 1 }", "retryable"),
+            ("JWT.encode({ a: 1 }, \"k\", \"HS256\")", "jwt"),
+            ("RestClient.get(\"http://example.test\")", "rest-client"),
+            ("client = ::RestClient", "rest-client"),
+        ] {
+            let mut files = vec![
+                ("test/test_helper.rb".to_string(), "require_relative \"../boot\"\n".to_string()),
+                (
+                    "test/models/article_test.rb".to_string(),
+                    format!("class ArticleTest < TestBase\n  def test_x\n    {body}\n  end\nend\n"),
+                ),
+                ("Gemfile".to_string(), "source \"https://rubygems.org\"\n".to_string()),
+            ];
+            apply_test_gem_wiring(&mut files);
+            let gemfile = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
+            assert!(gemfile.contains(&format!("{gem:?}")), "{gem}: {gemfile}");
+            let helper = &files.iter().find(|(p, _)| p == "test/test_helper.rb").unwrap().1;
+            assert!(helper.contains(&format!("require {gem:?}")), "{gem}: {helper}");
+        }
     }
 
     /// `require "vips"` after boot. ruby-vips pulls in the system

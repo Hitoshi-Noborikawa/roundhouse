@@ -89,6 +89,7 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "jwt",
     // Not the gem's entry file: it loads the Railtie whenever `Rails::VERSION` is defined, which this tree's is, with no `Rails::Railtie` under it.
     "mini_profiler",
+    "rest-client",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -228,6 +229,8 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // moderator: the real gem on this lane, its package
         // (`GEM_PACKAGES`) on spinel.
         (Marker::Constant("Rack::MiniProfiler"), "rack-mini-profiler"),
+        // RestClient, the same way.
+        (Marker::Constant("RestClient"), "rest-client"),
     ];
     &RUNTIME_GEMS
 }
@@ -700,6 +703,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("pushover", GemFate::Modeled),    // catalog/gems: Pushover
     ("rack-mini-profiler", GemFate::Modeled), // catalog/gems: Rack::MiniProfiler
     ("representable", GemFate::Modeled), // ingest/representable: Decorator + JSON, property/collection subset
+    ("rest-client", GemFate::Modeled), // catalog/gems: RestClient; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("retryable", GemFate::Modeled),   // catalog/gems: Retryable; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("rotp", GemFate::Modeled),        // catalog/gems: ROTP::*
     ("rqrcode", GemFate::Modeled),     // catalog/gems: RQRCode::QRCode

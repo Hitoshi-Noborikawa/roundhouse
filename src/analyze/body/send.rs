@@ -2614,15 +2614,16 @@ impl<'a> BodyTyper<'a> {
     /// found on the receiver's class, its mixins, or a parent. The
     /// runtime's `Rails::Cache#fetch` is one by construction: its body
     /// is `yield`, and a hit answers what an earlier miss's block
-    /// stored. Only an INFORMATIVE block type is adopted, as for
-    /// `transaction`; otherwise the registered answer stands.
+    /// stored. A block typed `Untyped` answers `Untyped`: the registered
+    /// answer is what the call returns without a block. A `Var` block is
+    /// not known yet, so the registered answer stands.
     pub(crate) fn block_value_return(
         &self,
         recv_ty: Option<&Ty>,
         method: &Symbol,
         block_ret: Option<&Ty>,
     ) -> Option<Ty> {
-        let ret = block_ret.filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))?;
+        let ret = block_ret.filter(|t| !matches!(t, Ty::Var { .. }))?;
         let Some(Ty::Class { id, .. }) = recv_ty else { return None };
         if id.0.as_str() == "Rails::Cache" && method.as_str() == "fetch" {
             return Some(ret.clone());

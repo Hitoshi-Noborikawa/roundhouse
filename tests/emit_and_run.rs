@@ -4689,6 +4689,152 @@ fn digest_uuid_v4_runs_as_a_random_uuid() {
         .assert_passes();
 }
 
+const REST_CLIENT_LIB: &str = "class Remote
+  def self.fetch(base, path)
+    response = RestClient.get(base + path, params: { q: \"x\" })
+    [response.code, response.body]
+  rescue RestClient::NotFound => e
+    [e.http_code, :not_found]
+  end
+
+  def self.send_form(base)
+    RestClient.post(base + \"/echo\", { name: \"a\" }).body
+  end
+
+  def self.execute(base)
+    RestClient::Request.execute(method: :get, url: base + \"/ok\", timeout: 5).body
+  end
+
+  def self.status_of(base, path)
+    RestClient.get(base + path) { |response, _request, _result| [response.code, response.body] }.first
+  end
+
+  CLIENT = ::RestClient
+
+  def self.built(base)
+    ::RestClient::Request.new(method: :get, url: base + \"/built\").execute.body
+  end
+end
+";
+
+/// RestClient runs as the real gem on Ruby: requests against a local
+/// server, a 404 rescued as `RestClient::NotFound`, and a verb with a
+/// block answering the block's value, a 404 included.
+#[test]
+fn rest_client_runs_as_the_real_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("lib/remote.rb", REST_CLIENT_LIB)
+        .run_ruby(
+            r##"require "socket"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+Thread.new do
+  loop do
+    client = server.accept
+    line = client.gets.to_s
+    headers = {}
+    while (header = client.gets) && header != "\r\n"
+      name, value = header.split(":", 2)
+      headers[name.downcase] = value.strip
+    end
+    body = client.read(headers["content-length"].to_i)
+    reply = if line.include?("/missing") then nil elsif line.include?("/echo") then body else line.split(" ")[1] end
+    if reply
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: #{reply.bytesize}\r\nConnection: close\r\n\r\n#{reply}"
+    else
+      client.write "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    end
+    client.close
+  end
+end
+base = "http://127.0.0.1:#{port}"
+r = Remote.fetch(base, "/ok")
+raise r.inspect unless r == [200, "/ok?q=x"]
+r = Remote.fetch(base, "/missing")
+raise r.inspect unless r == [404, :not_found]
+raise Remote.send_form(base) unless Remote.send_form(base) == "name=a"
+raise Remote.execute(base) unless Remote.execute(base) == "/ok"
+raise Remote.built(base) unless Remote.built(base) == "/built"
+raise "block 200" unless Remote.status_of(base, "/ok") == 200
+raise "block 404" unless Remote.status_of(base, "/missing") == 404
+"##,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"rest-client\""), "Gemfile does not declare rest-client:\n{gemfile}");
+}
+
+/// Off Ruby and JRuby, each RestClient reference is refused.
+#[test]
+fn rest_client_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-rest-client-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/remote.rb", REST_CLIENT_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: Remote.fetch(\"http://example.test\", \"/\").inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            !errors.iter().any(|e| e.contains("RestClient")),
+            "{target:?} refused a gem it ships:\n{}",
+            errors.join("\n")
+        );
+        let gemfile = files.get("Gemfile").map(String::as_str).unwrap_or("");
+        assert!(gemfile.contains("gem \"rest-client\""), "{target:?} Gemfile:\n{gemfile}");
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`RestClient.get`", "`RestClient::NotFound`", "`RestClient::Request`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| {
+                !path.ends_with(".map") && path.contains("remote") && text.contains("RestClient")
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a RestClient reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// No other target has an HTTP client behind `Faraday`: each call and
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]
