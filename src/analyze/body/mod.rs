@@ -1170,7 +1170,7 @@ impl<'a> BodyTyper<'a> {
                             unknown()
                         }
                     }
-                    Some(Some(ResolvedConstant::Value { declaration, name, runtime, runtime_decl })) => {
+                    Some(Some(ResolvedConstant::Value { declaration, name, runtime, runtime_decl, singleton })) => {
                         // Concern splices retain the resolved value owner.
                         // Test-helper splice lifts a foreign module's
                         // constant onto the test class as a bare name
@@ -1198,6 +1198,9 @@ impl<'a> BodyTyper<'a> {
                                 .is_some_and(|(enc, owner)| enc != owner);
                         if !keep_bare_splice {
                             qualify_resolved_path(path, name);
+                            if *singleton {
+                                expr.decisions |= crate::expr::SINGLETON_CONSTANT_REF;
+                            }
                         }
                         let value = self.typed_constants
                             .and_then(|values| values.get(declaration))
@@ -2227,6 +2230,9 @@ impl<'a> BodyTyper<'a> {
                     args,
                     block.as_ref(),
                 ) {
+                    return t;
+                }
+                if let Some(t) = recv.as_ref().and_then(|recv| send::literal_array_extreme_ty(recv, method, args, block.is_some())) {
                     return t;
                 }
                 if let Some(t) = self.relation_extreme_ty(

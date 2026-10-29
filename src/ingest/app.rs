@@ -2648,6 +2648,7 @@ end
     // controllers' clearing methods are typed like source.
     crate::lower::controller_test_case::prepare(&mut app);
     super::app_extension_calls::mark(&mut app);
+    super::body_statements::mark(&mut app);
     report_unmodelled_records(&app);
     super::unreachable_views::mark(&mut app);
     super::uncalled_helper_copies::mark(&mut app);

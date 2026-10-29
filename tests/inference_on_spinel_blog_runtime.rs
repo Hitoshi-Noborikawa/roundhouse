@@ -516,7 +516,11 @@ fn untyped_subexpressions_baseline() {
     // The five additional sites are all in Base#assign_attributes; every
     // other method's count is unchanged. Both totals include the same
     // 3 sanitize_sql_like sites, excluded from this ceiling (1141 -> 1126).
-    const CEILING: usize = 1126;
+    // MEASURED 1111 after merging main f7ec7427 with the current analyzer:
+    // the same collector measures 1109 total on main and 1114 here.
+    // Only Base#assign_attributes adds sites (+5). Both totals include
+    // the same 3 sanitize_sql_like sites, excluded here (1126 -> 1111).
+    const CEILING: usize = 1111;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

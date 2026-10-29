@@ -17,6 +17,35 @@ use crate::ty::Ty;
 
 use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 
+pub(super) fn literal_array_extreme_ty(recv: &Expr, method: &Symbol, args: &[Expr], has_block: bool) -> Option<Ty> {
+    if !matches!(method.as_str(), "max" | "min") || !args.is_empty() || has_block {
+        return None;
+    }
+    let array = match &*recv.node {
+        ExprNode::Array { .. } => recv,
+        ExprNode::Send { recv: Some(array), method, args, block: None, .. }
+            if method.as_str() == "compact" && args.is_empty() => array,
+        _ => return None,
+    };
+    let ExprNode::Array { elements, .. } = &*array.node else { return None };
+    if elements.is_empty() || elements.iter().any(|element| matches!(&*element.node, ExprNode::Splat { .. })) {
+        return None;
+    }
+    if !elements.iter().any(|element| element.ty.as_ref().is_some_and(definitely_present)) {
+        return None;
+    }
+    let Some(Ty::Array { elem }) = recv.ty.as_ref() else { return None };
+    Some((**elem).clone().strip_nil())
+}
+
+fn definitely_present(ty: &Ty) -> bool {
+    match ty {
+        Ty::Nil | Ty::Bottom | Ty::Untyped | Ty::Var { .. } => false,
+        Ty::Union { variants } => variants.iter().all(definitely_present),
+        _ => true,
+    }
+}
+
 /// Hash methods that yield one `[key, value]` pair (CRuby 4.0.5). The
 /// others `block_params_for` types for a Hash (`select`, `filter`,
 /// `reject`) yield two values, so a lone parameter gets the key.

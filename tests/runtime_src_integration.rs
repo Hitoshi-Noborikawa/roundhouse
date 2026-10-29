@@ -1261,6 +1261,10 @@ fn every_runtime_method_body_concretely_typed() {
     // adds 2. Every other method's count is unchanged.
     // MEASURED 904 on 2026-10-29 (on 903): merge_seedable_scope reads a
     // record value's id, and a where value is untyped (relation.rb).
+    // MEASURED 904 after merging main f7ec7427 with the current analyzer:
+    // the same counter measures 901 on main and 904 with assignment.
+    // Only Base#assign_attributes (+1) and UnknownAttributeError#initialize
+    // (+2) differ; every other method's count is unchanged.
     const CEILING: usize = 904;
     assert!(
         total_gradual <= CEILING,

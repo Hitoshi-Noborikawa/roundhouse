@@ -31,6 +31,12 @@ thread_local! {
     /// fail-loud — an app meant to run on its own should not silently
     /// swallow a mixin it could not resolve.
     static FUTAMURA_BOX: Cell<bool> = const { Cell::new(false) };
+    /// True while emitting a CRuby or JRuby tree, whose interpreters run
+    /// a body statement where the source has it (`expr::BODY_STATEMENT`)
+    /// and have singleton classes (`expr::SINGLETON_BODY`). Off for the
+    /// Spinel tree, which keeps those constants on the class and drops
+    /// the statements.
+    static BODY_STATEMENTS: Cell<bool> = const { Cell::new(false) };
     /// Direct, locked unknown-gem namespaces admitted by the Ruby project
     /// emitter. Other targets retain their constant refusal.
     static EXTERNAL_GEM_NAMESPACES: RefCell<std::collections::BTreeSet<String>> = const {
@@ -110,6 +116,18 @@ pub(super) fn in_futamura_box() -> bool {
     FUTAMURA_BOX.with(Cell::get)
 }
 
+/// Run `f` while emitting a CRuby or JRuby tree. See `BODY_STATEMENTS`.
+pub(crate) fn with_body_statements<R>(f: impl FnOnce() -> R) -> R {
+    let prev = BODY_STATEMENTS.with(|c| c.replace(true));
+    let r = f();
+    BODY_STATEMENTS.with(|c| c.set(prev));
+    r
+}
+
+pub(crate) fn carries_body_statements() -> bool {
+    BODY_STATEMENTS.with(Cell::get)
+}
+
 pub(super) fn with_external_gem_namespaces<R>(
     namespaces: &std::collections::BTreeSet<String>,
     includes: std::collections::BTreeMap<String, Vec<String>>,
@@ -144,6 +162,15 @@ pub(crate) fn external_gem_namespace_is_enabled(namespace: &str) -> bool {
 pub fn emit_expr(e: &Expr) -> String {
     if is_locked_external_gem_constant(e) {
         return emit_node(&e.node);
+    }
+    // A constant of `X`'s `class << self` lives on its singleton class.
+    if e.decisions & crate::expr::SINGLETON_CONSTANT_REF != 0
+        && carries_body_statements()
+        && let ExprNode::Const { path } = &*e.node
+        && let [owner @ .., name] = &path[..]
+        && !owner.is_empty()
+    {
+        return format!("{}.singleton_class::{}", emit_const_path(owner), name.as_str());
     }
     // `self.class::KINDS`, which ingest gave the analysis as `const_get`.
     if e.decisions & crate::expr::CONST_PATH != 0
