@@ -557,22 +557,27 @@ module ActiveSupport
   # the transpiled runtimes cannot host, and a REGEX the targets do not
   # all lower, so the scan is spelled out the way `to_sentence` below
   # is. Match each character against Rails' POSIX whitespace class,
-  # including Unicode whitespace.
+  # including Unicode whitespace. The walk is over `chars`, not
+  # `text[i]`: on a multibyte String CRuby finds the i-th character from
+  # the start, so indexing the String made the scan quadratic. The
+  # result grows in place for the same reason.
   #
   # campfire's `content_filters_test` writes `<<~HTML.squish` to put a
   # multi-line fixture body on one line before handing it to a filter.
   def self.squish(text)
     out = +""
     pending_space = false
+    chars = text.chars
+    n = chars.length
     i = 0
-    while i < text.length
-      c = text[i]
+    while i < n
+      c = chars[i]
       if c.match?(/[[:space:]]/)
         pending_space = !out.empty?
       else
-        out = out + " " if pending_space
+        out << " " if pending_space
         pending_space = false
-        out = out + c
+        out << c
       end
       i = i + 1
     end
