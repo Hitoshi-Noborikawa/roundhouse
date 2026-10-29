@@ -629,7 +629,11 @@ impl<'a> BodyTyper<'a> {
             }
             return Some(vec![recv_ty.clone()]);
         }
-        if method.as_str() == "in_batches" {
+        // The batch iterators run on a model's rows, from the class
+        // (`Post.find_each`), a relation or a has_many reader. Each yields
+        // its own shape: `find_each` a record, `find_in_batches` an Array
+        // of records, `in_batches` a relation.
+        if matches!(method.as_str(), "find_each" | "find_in_batches" | "in_batches") {
             let is_model = |id: &ClassId| self.classes().get(id).is_some_and(|c| c.table.is_some());
             let of = match recv_ty {
                 Ty::Relation { of } => Some(of.clone()),
@@ -641,7 +645,12 @@ impl<'a> BodyTyper<'a> {
                 _ => None,
             };
             if let Some(of) = of {
-                return Some(vec![Ty::Relation { of }]);
+                let record = Ty::Class { id: of.clone(), args: vec![].into() };
+                return Some(vec![match method.as_str() {
+                    "find_each" => record,
+                    "find_in_batches" => Ty::Array { elem: std::sync::Arc::new(record) },
+                    _ => Ty::Relation { of },
+                }]);
             }
         }
         if let Ty::Tuple { elems } = recv_ty {
