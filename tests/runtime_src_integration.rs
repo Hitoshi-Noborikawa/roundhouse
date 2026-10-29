@@ -1259,7 +1259,9 @@ fn every_runtime_method_body_concretely_typed() {
     // analyzer and counter measure 903 on main and 906 with assignment.
     // Base#assign_attributes adds 1 site and UnknownAttributeError#initialize
     // adds 2. Every other method's count is unchanged.
-    const CEILING: usize = 906;
+    // MEASURED 904 on 2026-10-29 (on 903): merge_seedable_scope reads a
+    // record value's id, and a where value is untyped (relation.rb).
+    const CEILING: usize = 904;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

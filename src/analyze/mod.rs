@@ -1974,7 +1974,7 @@ impl Analyzer {
                 query_class_objects: Default::default(),
                 constants: Default::default(),
                 annotate_self_dispatch: false,
-                in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
                 view_name: None,
             };
             self.body_typer().analyze_expr(&mut helper.body, &ctx);
@@ -2310,7 +2310,7 @@ impl Analyzer {
                     query_class_objects: Default::default(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
-                    in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                    in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
                     view_name: None,
                 };
                 let ty = typer.analyze_expr(value, &ctx);
@@ -2509,6 +2509,10 @@ impl Analyzer {
             layout: LayoutDecl,
         }
         let mut meta_by_name: HashMap<ClassId, ControllerMeta> = HashMap::default();
+        let mut action_meta_cache: HashMap<
+            ClassId,
+            (HashMap<Symbol, HashMap<Symbol, Ty>>, HashMap<Symbol, Expr>),
+        > = HashMap::default();
         // Parent links and concern-module tables are cloned once in
         // `analyze` and reused every round — they do not depend on the
         // refined registry.
@@ -2582,7 +2586,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
             };
             for item in model.body.iter_mut() {
                 if let ModelBodyItem::Unknown { expr, .. } = item {
@@ -2600,7 +2604,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -2671,7 +2675,7 @@ impl Analyzer {
                     class_objects: Default::default(),
                     query_class_objects: Default::default(),
                     constants: class_constants.clone(),
-                    annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                    annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
                 };
 
                 // The class body has run before any class method does, so its writes are not nilable there.
@@ -2732,7 +2736,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
             };
             if retype {
                 for item in controller.body.iter_mut() {
@@ -2754,7 +2758,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
             };
 
             // Snapshot this controller's own segment of the filter chain
@@ -2939,10 +2943,9 @@ impl Analyzer {
                     action_bindings.insert(name.clone(), ivars);
                 }
                 if retype {
-                    self.controller_action_meta_cache.insert(
-                        controller.name.clone(),
-                        (action_bindings.clone(), action_bodies.clone()),
-                    );
+                    let (bindings, bodies) = action_meta_cache.entry(controller.name.clone()).or_default();
+                    bindings.extend(action_bindings.clone());
+                    bodies.extend(action_bodies.clone());
                 }
             }
 
@@ -2966,6 +2969,10 @@ impl Analyzer {
             );
         }
         drop(_typing_controllers_a);
+
+        // Publish once per class after all reopenings have contributed.
+        // A namespace-only part must not erase a sibling's memoized ivars.
+        self.controller_action_meta_cache.extend(action_meta_cache);
 
         // Controller→layout-view ivar channel: every action that
         // renders also flows its ivars into whatever layout wraps it
@@ -3297,7 +3304,7 @@ impl Analyzer {
                             class_objects: Default::default(),
                             query_class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
-                            annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                            annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
                         };
                         // Seed helper-method params from the inferred-params
                         // table too, so `period(query)`'s body resolves on
@@ -3848,7 +3855,7 @@ impl Analyzer {
                         query_class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
-                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
                         view_name: None,
                     };
                     let origin = app
@@ -3920,7 +3927,7 @@ impl Analyzer {
                         query_class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
-                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
                         view_name: None,
                     };
                     let inner_ctx = self.seed_action_params(
@@ -4100,7 +4107,7 @@ impl Analyzer {
                 local_bindings: HashMap::default(),
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
-                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: self.helper_modules.contains(&lc.name),
             };
 
             if retype {
@@ -4246,7 +4253,7 @@ impl Analyzer {
                     local_bindings: HashMap::default(),
                     class_objects: Default::default(),
                     query_class_objects: Default::default(),
-                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: class_ctx.helper_body,
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);
@@ -8191,6 +8198,35 @@ impl<'a> SourceMethodIndex<'a> {
 }
 
 #[cfg(test)]
+mod controller_meta_cache_tests {
+    use super::*;
+
+    #[test]
+    fn a_reopening_does_not_erase_cached_concern_ivar_bindings() {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+            ("app/controllers/concerns/memoized.rb", "module Memoized\n  def token\n    @token ||= \"ready\"\n  end\nend\n"),
+            ("app/controllers/cache_controller.rb", "class CacheController < ActionController::Base\n  include Memoized\n  def show\n    token\n  end\nend\n"),
+        ]
+        .into_iter()
+        .map(|(path, source)| (std::path::PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let mut reopening = app.controllers.iter().find(|c| c.name.0.as_str() == "CacheController").unwrap().clone();
+        reopening.parent = None;
+        reopening.parent_span = Default::default();
+        reopening.body.clear();
+        app.controllers.push(reopening);
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        let (bindings, bodies) = &analyzer.controller_action_meta_cache[&ClassId("CacheController".into())];
+        assert_eq!(bindings.get(&Symbol::from("token")).and_then(|b| b.get(&Symbol::from("token"))), Some(&Ty::Str));
+        assert!(bodies.contains_key(&Symbol::from("token")));
+        assert!(bodies.contains_key(&Symbol::from("show")));
+    }
+}
+
+#[cfg(test)]
 mod source_method_index_tests {
     use super::*;
     use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, ModelBodyItem};
@@ -8273,6 +8309,7 @@ mod source_method_index_tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            conditional_definitions: Vec::new(),
             unknown_calls: Vec::new(),
             class_ivar_initializers: Vec::new(),
         };
@@ -10336,6 +10373,7 @@ mod concern_method_snapshot_tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            conditional_definitions: Vec::new(),
             unknown_calls: Vec::new(),
             class_ivar_initializers: Vec::new(),
         }

@@ -2066,11 +2066,12 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
     }
     // The longest-matching gem across the whole lockfile, so `Rack::Utils` stays rack's while `Rack::MiniProfiler` is rack-mini-profiler's
     let ported = crate::gems::spinel_runtime_constants();
+    let ownership = crate::gems::LockGemIndex::new(lock);
     let owner = |path: &str| -> Option<String> {
         if ported.contains(path) {
             return None;
         }
-        let owners = crate::gems::lock_gems_owning_constant(lock, path);
+        let owners = ownership.owners(path);
         (!owners.is_empty() && owners.iter().all(|g| unknown.contains(g))).then(|| owners.join(", "))
     };
     let report = |span: crate::span::Span, path: &str, ns: &str| {
@@ -2536,6 +2537,9 @@ fn target_files_inner(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    if !matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        refuse_conditional_definitions(app, target);
+    }
     let without_auto_sources;
     let app = match without_auto_source_gems(app, target) {
         Some(trimmed) => {
@@ -2815,7 +2819,9 @@ fn target_files_inner(
         BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
             spinel_relation_model_handle(&mut files)?;
             widen_spinel_hash_config_arrays(&mut files);
-            spin_shape(files)
+            let mut files = spin_shape(files)?;
+            apply_spinel_int_overflow(&mut files, app);
+            Ok(files)
         }),
         // The ruby family gets the bundled-library requires too: the
         // table used to live inside `spin_shape` and so reached only
@@ -4439,8 +4445,59 @@ fn ruby_family_runtime_files(
     if flavor == RubyFlavor::CRuby && crate::emit::shared::schema_sql::Dialect::current() == crate::emit::shared::schema_sql::Dialect::Postgres {
         apply_postgresql_tree(&mut files, app)?;
     }
+    apply_conditional_declarations(&mut files, app);
     apply_file_programs(&mut files, app);
     Ok(files)
+}
+
+/// A class or module a load-time conditional declares
+/// (`ConditionalArm::declarations`) loads where its branch runs, from the
+/// `require_relative` the conditional writes there; nothing else loads its
+/// file: not app/models.rb, nor another file's dependency require at its
+/// top. One whose file belongs to an enclosing class (a class declared in
+/// a conditional inside a class) cannot load apart from it, and is an
+/// error.
+fn apply_conditional_declarations(files: &mut Vec<(String, String)>, app: &App) {
+    let mut anchors: crate::det::HashSet<String> = Default::default();
+    for lc in &app.library_classes {
+        for conditional in &lc.conditional_definitions {
+            for name in conditional.declared_names() {
+                let anchor = crate::emit::ruby::library_file_anchor(name.0.as_str(), app);
+                if anchor != format!("models/{}", crate::naming::underscore(name.0.as_str())) {
+                    report_program_error(
+                        conditional.span,
+                        "conditional_declaration",
+                        &format!(
+                            "`{}` is declared in a load-time conditional inside a class, whose file it shares; it is not carried",
+                            name.0.as_str()
+                        ),
+                    );
+                    continue;
+                }
+                anchors.insert(anchor);
+            }
+        }
+    }
+    if anchors.is_empty() {
+        return;
+    }
+    for (path, content) in files.iter_mut() {
+        let Some(rel) = path.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")) else { continue };
+        let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        let kept: Vec<&str> = content
+            .lines()
+            .filter(|line| {
+                let target = line
+                    .strip_prefix("require_relative \"")
+                    .and_then(|l| l.strip_suffix('"'))
+                    .map(|r| normalize_source(&if dir.is_empty() { r.to_string() } else { format!("{dir}/{r}") }));
+                !target.is_some_and(|t| anchors.contains(&t))
+            })
+            .collect();
+        if kept.len() != content.lines().count() {
+            *content = kept.join("\n") + "\n";
+        }
+    }
 }
 
 /// Each gem-source file's file-level program (`App::file_programs`) as
@@ -4513,7 +4570,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
     // and the program it loads.
     let mut autoloaded: Vec<(String, String)> = Vec::new();
     for program in &app.file_programs {
-        for item in &program.items {
+        for item in all_program_items(&program.items) {
             let crate::app::ProgramItem::Autoload { owner, name, feature, .. } = item else { continue };
             let Some(target) = resolve(&normalize_source(&program.source), feature, false).filter(|t| programs.contains_key(t)) else {
                 continue;
@@ -4541,8 +4598,22 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         // Ruby's autoload when the file raises.
         let header = std::mem::take(&mut out);
         let mut loaded: crate::det::HashSet<String> = Default::default();
-        for item in &program.items {
+        let mut steps = Vec::new();
+        program_steps(&program.items, 0, &mut steps);
+        for (depth, step) in steps {
+            let item = match step {
+                ProgramStep::Line(line) => {
+                    writeln!(out, "{}{line}", "  ".repeat(depth)).unwrap();
+                    continue;
+                }
+                ProgramStep::Item(item) => item,
+            };
+            // Inside a branch: indented to it, and what it loads is loaded
+            // again in another branch.
+            let start = out.len();
+            let saved = (depth > 0).then(|| loaded.clone());
             match item {
+                crate::app::ProgramItem::Branch { .. } => unreachable!("flattened by program_steps"),
                 crate::app::ProgramItem::Declared(names) => {
                     for name in names {
                         let anchor = crate::emit::ruby::library_file_anchor(name.0.as_str(), app);
@@ -4618,6 +4689,17 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                     report_program_error(*span, "file_statement_unsupported", &text);
                     writeln!(out, "$stderr.puts {text:?}").unwrap();
                 }
+            }
+            if depth > 0 {
+                let written: String = out[start..]
+                    .lines()
+                    .map(|line| if line.is_empty() { "\n".to_string() } else { format!("{}{line}\n", "  ".repeat(depth)) })
+                    .collect();
+                out.truncate(start);
+                out.push_str(&written);
+            }
+            if let Some(saved) = saved {
+                loaded = saved;
             }
         }
         let body = std::mem::take(&mut out);
@@ -4791,7 +4873,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
     let gem_names: crate::det::HashSet<&str> = app
         .file_programs
         .iter()
-        .flat_map(|p| p.items.iter())
+        .flat_map(|p| all_program_items(&p.items))
         .filter_map(|item| match item {
             crate::app::ProgramItem::Declared(names) => Some(names.iter().map(|n| n.0.as_str())),
             _ => None,
@@ -4808,7 +4890,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         .file_programs
         .iter()
         .filter(|p| booted_libs.iter().any(|lib| normalize_source(&p.source).starts_with(lib.as_str())))
-        .flat_map(|p| p.items.iter())
+        .flat_map(|p| all_program_items(&p.items))
         .filter_map(|item| match item {
             crate::app::ProgramItem::Declared(names) => Some(names.iter().map(|n| n.0.as_str())),
             _ => None,
@@ -4836,6 +4918,68 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         let heading = if boot.is_empty() { "" } else { "# Bundler.require: the gems' entry files.\n" };
         *models = format!("{preamble}{heading}{boot}{}{models}", if boot.is_empty() { "" } else { "\n" });
     }
+}
+
+/// A class-body load-time conditional (`dialect::ConditionalDefinitions`)
+/// is written as the source has it only by the Ruby family; another
+/// target would define every branch's methods, the last one winning, so
+/// each such statement is an error there.
+fn refuse_conditional_definitions(app: &App, target: BuildTarget) {
+    for lc in &app.library_classes {
+        for conditional in &lc.conditional_definitions {
+            let diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                conditional.span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "conditional_definition",
+                format!(
+                    "`{}` defines methods in a load-time `if`/`unless`, which only the Ruby and JRuby targets carry",
+                    lc.name.0.as_str()
+                ),
+            );
+            emit::diagnostics::push(diagnostic);
+        }
+    }
+}
+
+/// One line or item of a program as written, branches flattened
+/// (`program_steps`).
+enum ProgramStep<'a> {
+    Line(String),
+    Item(&'a crate::app::ProgramItem),
+}
+
+/// A program's items with each branch as its `if` / `else` / `end` lines
+/// around its items, one level deeper, as `(depth, step)`.
+fn program_steps<'a>(items: &'a [crate::app::ProgramItem], depth: usize, out: &mut Vec<(usize, ProgramStep<'a>)>) {
+    for item in items {
+        match item {
+            crate::app::ProgramItem::Branch { condition, negated, then_items, else_items } => {
+                let keyword = if *negated { "unless" } else { "if" };
+                out.push((depth, ProgramStep::Line(format!("{keyword} {}", crate::emit::ruby::emit_expr(condition)))));
+                program_steps(then_items, depth + 1, out);
+                if !else_items.is_empty() {
+                    out.push((depth, ProgramStep::Line("else".to_string())));
+                    program_steps(else_items, depth + 1, out);
+                }
+                out.push((depth, ProgramStep::Line("end".to_string())));
+            }
+            other => out.push((depth, ProgramStep::Item(other))),
+        }
+    }
+}
+
+/// Every item of a program, those in its branches too.
+fn all_program_items(items: &[crate::app::ProgramItem]) -> Vec<&crate::app::ProgramItem> {
+    let mut out = Vec::new();
+    for item in items {
+        if let crate::app::ProgramItem::Branch { then_items, else_items, .. } = item {
+            out.extend(all_program_items(then_items));
+            out.extend(all_program_items(else_items));
+        } else {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// A path with `.` and `..` segments folded, as a require resolves it.
@@ -9742,8 +9886,9 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     let census = crate::gems::GemCensus::of(lock);
     // Not only the gem's conventional namespace spelled exactly: svg-graph's is `SVG::Graph`.
     let mut owned = crate::det::HashSet::default();
+    let ownership = crate::gems::LockGemIndex::new(lock);
     for_each_app_constant(app, &mut |_, path| {
-        owned.extend(crate::gems::lock_gems_owning_constant(lock, path).into_iter().map(str::to_string));
+        owned.extend(ownership.owners(path).into_iter().map(str::to_string));
     });
     let needed: Vec<_> = census
         .unknown()
@@ -10886,6 +11031,22 @@ fn apply_image_processor_wiring(files: &mut [(String, String)]) -> Result<bool, 
                 is not in the file set")?;
     stub.1 = real;
     Ok(true)
+}
+
+/// `roundhouse.yml`'s `spinel.int_overflow` on every compile the Makefile
+/// runs: the app binary through `spin build` (which passes what follows
+/// `--` to the compiler) or the raw compiler, and each test binary.
+fn apply_spinel_int_overflow(files: &mut [(String, String)], app: &App) {
+    let Some(mode) = app.spinel_int_overflow.as_deref() else { return };
+    let flag = format!("--int-overflow={mode}");
+    let Some((_, makefile)) = files.iter_mut().find(|(p, _)| p == "Makefile") else { return };
+    for (from, to) in [
+        ("\t$(SPIN) build\n".to_string(), format!("\t$(SPIN) build -- {flag}\n")),
+        ("\t$(SPINEL) main.rb $(RBS_FLAG) -o $@".to_string(), format!("\t$(SPINEL) main.rb $(RBS_FLAG) {flag} -o $@")),
+        ("$(SPINEL_TEST_FLAGS) $< -o $@".to_string(), format!("$(SPINEL_TEST_FLAGS) {flag} $< -o $@")),
+    ] {
+        *makefile = makefile.replace(&from, &to);
+    }
 }
 
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
@@ -13531,6 +13692,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            conditional_definitions: Vec::new(),
             unknown_calls: Vec::new(),
             class_ivar_initializers: Vec::new(),
         };
@@ -13705,6 +13867,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            conditional_definitions: Vec::new(),
             unknown_calls: Vec::new(),
             class_ivar_initializers: Vec::new(),
         });

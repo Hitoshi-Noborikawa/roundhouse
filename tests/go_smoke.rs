@@ -146,6 +146,7 @@ fn module_singleton_shape() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -276,6 +277,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -406,6 +408,7 @@ fn raise_panic_peephole() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -500,6 +503,7 @@ fn time_now_utc_iso8601_peephole() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -588,6 +592,7 @@ fn include_array_recv_routes_to_slices_contains() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -670,6 +675,7 @@ fn negative_index_rewrites_to_len_minus_n() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -841,6 +847,7 @@ fn class_reflection_rewrites() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -935,6 +942,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -1087,6 +1095,7 @@ fn implicit_self_method_call_resolution() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -1185,6 +1194,7 @@ fn each_array_block_shape() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -1273,6 +1283,7 @@ fn each_hash_block_shape() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -1358,6 +1369,7 @@ fn map_array_block_shape() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -1465,6 +1477,7 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -1581,6 +1594,7 @@ fn typed_empty_literals_back_propagate() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -1872,6 +1886,7 @@ fn nil_check_to_comma_ok_rewrites_pair() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };
@@ -1967,6 +1982,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     };

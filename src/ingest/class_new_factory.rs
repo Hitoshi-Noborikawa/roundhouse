@@ -51,7 +51,7 @@ pub(super) fn constant_classes(
             constants,
             unknown_calls,
             class_initializers,
-            class_attributes: _,
+            class_attributes: _, conditional_definitions,
         }) = walk_decl_body(block_body, &id, file, DeclBodyMode::Instance)
         else {
             continue;
@@ -69,6 +69,7 @@ pub(super) fn constant_classes(
                 nullable_columns: Vec::new(),
                 origin: None,
                 constants,
+                conditional_definitions,
                 unknown_calls,
                 class_ivar_initializers: class_initializers,
             },

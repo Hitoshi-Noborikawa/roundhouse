@@ -26,6 +26,7 @@
 # `test/test_helper.rb` can load the app without loading this one,
 # which starts a server.
 require_relative "boot"
+require_relative "runtime/cgi_io"
 
 module Main
   # Spinel's class reflection needs a lexical class receiver.
@@ -147,6 +148,13 @@ module Main
         merged[inner] = file
         out[outer] = merged
       end
+    end
+    nil
+  end
+
+  def self.nest_upload_parts(out, parts)
+    parts.each do |part|
+      CgiIo.assign_form_pair(out, part.name, part.file)
     end
     nil
   end
@@ -490,7 +498,7 @@ module Main
     end
     controller.params = params
     controller.path_parameters = matched.path_params
-    Main.nest_uploads(controller.params, req.uploads) if req.uploads.length > 0
+    Main.nest_upload_parts(controller.params, req.upload_parts) if req.upload_parts.length > 0
     # Typed request object + per-request context statics. Helpers are
     # module functions with no controller in scope; the emit rewrites
     # their bare `request` reads to `ActionController::Current.request`

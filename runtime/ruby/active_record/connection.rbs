@@ -162,9 +162,9 @@ module ActiveRecord
     def self.having: (String condition, *untyped args) -> Relation
     def self.ids: () -> Array[Integer]
     def self.includes: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
-    def self.joins: (String | Symbol spec) -> Relation
-    def self.left_joins: (String | Symbol spec) -> Relation
-    def self.left_outer_joins: (String | Symbol spec) -> Relation
+    def self.joins: (*(String | Symbol) specs) -> Relation
+    def self.left_joins: (*(String | Symbol) specs) -> Relation
+    def self.left_outer_joins: (*(String | Symbol) specs) -> Relation
     def self.limit: (Integer | Float | String | nil n) -> Relation
     def self.many?: () -> bool
     def self.maximum: (String | Symbol expr) -> untyped

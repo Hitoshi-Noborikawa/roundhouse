@@ -323,6 +323,7 @@ mod tests {
                 nullable_columns: Vec::new(),
                 origin: None,
                 constants: Vec::new(),
+                conditional_definitions: Vec::new(),
                 unknown_calls: Vec::new(),
                 class_ivar_initializers: Vec::new(),
             });

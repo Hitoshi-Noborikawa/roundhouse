@@ -168,11 +168,12 @@ module ActiveRecord
     def group_parts!: (Array[String | Symbol] parts) -> Relation
     def having: (String condition, *untyped args) -> Relation
     def having_args!: (String condition, Array[untyped] args) -> Relation
-    def joins: (String | Symbol spec) -> Relation
+    def joins: (*(String | Symbol) specs) -> Relation
+    def joins_specs!: (String method, Array[String | Symbol] specs) -> Relation
     def joins!: (String | Symbol spec) -> Relation
     def join_fragment: (String | Symbol spec) -> String
-    def left_outer_joins: (String | Symbol spec) -> Relation
-    def left_joins: (String | Symbol spec) -> Relation
+    def left_outer_joins: (*(String | Symbol) specs) -> Relation
+    def left_joins: (*(String | Symbol) specs) -> Relation
     # Two methods sharing a name: field args PROJECT columns and keep
     # the Relation; a block is Enumerable's filter over the loaded
     # records and answers an Array (zero args means the block form —

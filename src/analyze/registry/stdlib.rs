@@ -1235,6 +1235,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // require; on Spinel by its fileutils / openssl package.
     register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
     register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+    // `OpenSSL::HMAC.digest(OpenSSL::Digest.new("sha1"), key, data)`: rotp's one-time codes.
+    let openssl_digest = Ty::Class { id: ClassId(Symbol::from("OpenSSL::Digest")), args: vec![].into() };
+    register_stdlib_class(classes, "OpenSSL::Digest", &[("new", openssl_digest)], &[
+        ("name", Ty::Str),
+        ("digest", Ty::Str),
+        ("hexdigest", Ty::Str),
+    ]);
     let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![].into() };
     let lazy = Ty::Class { id: ClassId(Symbol::from("Enumerator::Lazy")), args: vec![].into() };
     register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[

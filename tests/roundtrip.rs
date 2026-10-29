@@ -53,6 +53,7 @@ fn tiny_blog_round_trips() {
             indexes: vec![],
             foreign_keys: vec![],
             virtual_module: None,
+            known_keyless: false,
         },
     );
     let schema = Schema { tables };
@@ -230,6 +231,7 @@ fn tiny_blog_round_trips() {
         source_index_required: false,
         root: String::new(),
         app_roots: vec!["app".to_string()],
+        spinel_int_overflow: None,
     };
 
     let json = serde_json::to_string_pretty(&app).expect("serialize");

@@ -55,7 +55,6 @@ const VISITOR: &str = "module Gqlc\n  class Visitor\n    def initialize(doc)\n  
 const QUERY_TYPENAME: &str = "require \"gqlc/visitor\"\n\nmodule Gqlc\n  module QueryTypename\n    if ENV[\"GQLC_LEGACY\"].nil?\n      class InsertVisitor < Gqlc::Visitor\n        def initialize(doc, types:)\n          @types = types\n          super(doc)\n        end\n\n        def visit = [:insert, @types, *super]\n      end\n\n      def self.insert(doc) = InsertVisitor.new(doc, types: 1).visit\n    else\n      def self.insert(doc) = [:legacy, doc]\n    end\n\n    def self.flatten = 1\n  end\nend\n";
 
 #[test]
-#[ignore = "fork spec: conditional declarations"]
 fn a_class_declared_in_a_module_body_conditional_exists_only_in_its_branch() {
     same_as_native(
         &[("gqlc/visitor.rb", VISITOR), ("gqlc/query_typename.rb", QUERY_TYPENAME)],
@@ -74,7 +73,6 @@ fn a_class_declared_in_a_module_body_conditional_exists_only_in_its_branch() {
 const SHAPES: &str = "module Gqlc\n  module Shapes\n    if ENV[\"GQLC_SHAPE\"] == \"a\"\n      class Alpha\n        def self.tag = :alpha\n      end\n    elsif ENV[\"GQLC_SHAPE\"] == \"b\"\n      module Beta\n        def self.tag = :beta\n      end\n    else\n      class Gamma\n        def self.tag = :gamma\n      end\n\n      def self.fallback = Gamma.tag\n    end\n\n    unless ENV[\"GQLC_SHAPE\"] == \"a\"\n      class Delta\n        def self.tag = :delta\n      end\n    end\n\n    def self.names = constants.sort\n  end\nend\n";
 
 #[test]
-#[ignore = "fork spec: conditional declarations"]
 fn elsif_else_and_unless_arms_declare_what_their_branch_runs() {
     same_as_native(
         &[("gqlc.rb", "require \"gqlc/shapes\"\n"), ("gqlc/shapes.rb", SHAPES)],
@@ -92,7 +90,6 @@ fn elsif_else_and_unless_arms_declare_what_their_branch_runs() {
 const TOP: &str = "if ENV[\"GQLC_TOP\"]\n  module Gqlc\n    class Top\n      def self.tag = :top\n    end\n  end\nend\n\nmodule Gqlc\n  def self.top = const_defined?(:Top) ? Top.tag : nil\nend\n";
 
 #[test]
-#[ignore = "fork spec: conditional declarations"]
 fn a_class_declared_in_a_file_body_conditional_exists_only_in_its_branch() {
     same_as_native(
         &[("gqlc/top.rb", TOP)],

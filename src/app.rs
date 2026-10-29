@@ -181,6 +181,12 @@ pub struct App {
     /// when it lists none.
     #[serde(default, skip_serializing_if = "crate::extensions::Extensions::is_empty")]
     pub extensions: crate::extensions::Extensions,
+    /// `roundhouse.yml`'s `spinel.int_overflow` (`promote`, `wrap`), handed
+    /// to Spinel as `--int-overflow`. Provisional: an app should not have
+    /// to choose this, and the setting is to go once the need is decided
+    /// without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spinel_int_overflow: Option<String>,
     /// Attributes the app (and its gems) add to Action Text's sanitizer
     /// allow-list at boot — `ActionText::ContentHelper.allowed_attributes`
     /// as the initializers leave it, minus the framework defaults the
@@ -1145,6 +1151,7 @@ impl App {
             assume_ssl_envs: Vec::new(),
             gem_boundary: Default::default(),
             extensions: Default::default(),
+            spinel_int_overflow: None,
             content_helper_allowed_attributes: Vec::new(),
             content_helper_allowed_tags: Vec::new(),
             inferred_method_params: HashMap::default(),
@@ -1335,6 +1342,15 @@ pub enum ProgramItem {
     /// top level): Ruby loads the file the first time `owner::Name` is
     /// read.
     Autoload { span: crate::span::Span, owner: String, name: String, feature: String },
+    /// A file-level `if`/`unless` holding declarations: its branches'
+    /// items run only where Ruby runs the branch (an `elsif` is a branch
+    /// in the `else` items).
+    Branch {
+        condition: crate::expr::Expr,
+        negated: bool,
+        then_items: Vec<ProgramItem>,
+        else_items: Vec<ProgramItem>,
+    },
     /// A statement the ingest cannot carry, reported as
     /// `file_statement_unsupported` and named when the file loads.
     NotCarried { span: crate::span::Span, message: String },

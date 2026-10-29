@@ -53,8 +53,22 @@ pub(super) fn file_program(
         let loc = node.location();
         Span { file: super::sources::file_id(file), start: loc.start_offset() as u32, end: loc.end_offset() as u32 }
     };
+    let statements: Vec<ruby_prism::Node<'_>> = program.statements().body().iter().collect();
+    let items = program_items(&statements, file, carried, list_dir, &span_of);
+    Some(FileProgram { source: file.to_string(), items })
+}
+
+/// The items of a run of top-level statements (`file_program`'s, or a
+/// file-level branch's).
+fn program_items(
+    statements: &[ruby_prism::Node<'_>],
+    file: &str,
+    carried: &HashSet<String>,
+    list_dir: &dyn Fn(&std::path::Path) -> Vec<(String, bool)>,
+    span_of: &dyn Fn(&ruby_prism::Node<'_>) -> Span,
+) -> Vec<ProgramItem> {
     let mut items = Vec::new();
-    for stmt in program.statements().body().iter() {
+    for stmt in statements {
         if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
             // In source order, as Ruby evaluates them; an enclosing
             // declaration starts before what it nests, so it loads first.
@@ -140,6 +154,10 @@ pub(super) fn file_program(
                 continue;
             }
         }
+        if let Some(branch) = file_branch(&stmt, file, carried, list_dir, span_of) {
+            items.push(branch);
+            continue;
+        }
         if is_file_return(&stmt) {
             items.push(ProgramItem::NotCarried {
                 span: span_of(&stmt),
@@ -162,7 +180,75 @@ pub(super) fn file_program(
             }),
         }
     }
-    Some(FileProgram { source: file.to_string(), items })
+    items
+}
+
+/// A file-level `if` / `unless` (not a modifier or ternary) whose
+/// branches declare a class, module or method: a branch item, each arm's
+/// statements its own items, an `elsif` a branch in the `else` items.
+fn file_branch(
+    stmt: &ruby_prism::Node<'_>,
+    file: &str,
+    carried: &HashSet<String>,
+    list_dir: &dyn Fn(&std::path::Path) -> Vec<(String, bool)>,
+    span_of: &dyn Fn(&ruby_prism::Node<'_>) -> Span,
+) -> Option<ProgramItem> {
+    if !declares_inside(stmt) || super::visibility::console_only_node(stmt) {
+        return None;
+    }
+    let items = |stmts: &[ruby_prism::Node<'_>]| program_items(stmts, file, carried, list_dir, span_of);
+    if let Some(branch) = stmt.as_if_node() {
+        branch.if_keyword_loc()?;
+        branch.end_keyword_loc()?;
+        let condition = ingest_expr(&branch.predicate(), file).ok()?;
+        let then_items = items(&statements(branch.statements()));
+        let else_items = match branch.subsequent() {
+            None => Vec::new(),
+            Some(sub) => {
+                if let Some(other) = sub.as_else_node() {
+                    items(&statements(other.statements()))
+                } else if sub.as_if_node().is_some() {
+                    // `elsif`: a branch of its own, in the `else`.
+                    vec![file_branch_elsif(&sub, file, carried, list_dir, span_of)?]
+                } else {
+                    return None;
+                }
+            }
+        };
+        return Some(ProgramItem::Branch { condition, negated: false, then_items, else_items });
+    }
+    let branch = stmt.as_unless_node()?;
+    branch.end_keyword_loc()?;
+    let condition = ingest_expr(&branch.predicate(), file).ok()?;
+    let then_items = items(&statements(branch.statements()));
+    let else_items = branch.else_clause().map(|e| items(&statements(e.statements()))).unwrap_or_default();
+    Some(ProgramItem::Branch { condition, negated: true, then_items, else_items })
+}
+
+/// A branch's statements.
+fn statements<'pr>(s: Option<ruby_prism::StatementsNode<'pr>>) -> Vec<ruby_prism::Node<'pr>> {
+    s.map(|s| s.body().iter().collect()).unwrap_or_default()
+}
+
+/// An `elsif` node as a branch item (it has no `if` keyword of its own).
+fn file_branch_elsif(
+    node: &ruby_prism::Node<'_>,
+    file: &str,
+    carried: &HashSet<String>,
+    list_dir: &dyn Fn(&std::path::Path) -> Vec<(String, bool)>,
+    span_of: &dyn Fn(&ruby_prism::Node<'_>) -> Span,
+) -> Option<ProgramItem> {
+    let branch = node.as_if_node()?;
+    let condition = ingest_expr(&branch.predicate(), file).ok()?;
+    let then_items = program_items(&statements(branch.statements()), file, carried, list_dir, span_of);
+    let else_items = match branch.subsequent() {
+        None => Vec::new(),
+        Some(sub) if sub.as_else_node().is_some() => {
+            program_items(&statements(sub.as_else_node()?.statements()), file, carried, list_dir, span_of)
+        }
+        Some(sub) => vec![file_branch_elsif(&sub, file, carried, list_dir, span_of)?],
+    };
+    Some(ProgramItem::Branch { condition, negated: false, then_items, else_items })
 }
 
 /// `Dir[File.join(__dir__, "x/**/*.rb")].each { |f| require_relative f }`

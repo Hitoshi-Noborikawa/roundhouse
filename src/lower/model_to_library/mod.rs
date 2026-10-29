@@ -22,6 +22,7 @@
 //! that haven't migrated.
 
 mod adapter_emit;
+pub(crate) mod primary_key_guard;
 pub(crate) mod accessor_surface;
 pub(crate) mod schema;
 pub use schema::col_storage_name;
@@ -627,6 +628,7 @@ fn model_class(model: &Model, mut methods: Vec<MethodDef>, table: Option<&Table>
             }
             constants
         },
+        conditional_definitions: Vec::new(),
         unknown_calls: replayed_class_body(model),
         class_ivar_initializers: collect_class_attr_initializers(model),
     }

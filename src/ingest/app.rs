@@ -349,6 +349,15 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let _source_root = super::sources::set_root(dir);
     let config = roundhouse_config(vfs, dir)?;
     let extensions = project_extensions(vfs, dir, &config)?;
+    if let Some(mode) = config.spinel.int_overflow.as_deref()
+        && !matches!(mode, "raise" | "wrap" | "promote")
+    {
+        return Err(IngestError::Parse {
+            file: dir.join("roundhouse.yml").display().to_string(),
+            message: format!("spinel.int_overflow must be raise, wrap or promote, not {mode:?}"),
+        });
+    }
+    let spinel_int_overflow = config.spinel.int_overflow.clone().filter(|mode| mode != "raise");
     let lock = vfs.read_to_string(&dir.join("Gemfile.lock")).ok().map(|text| {
         let mut lock = crate::gems::Lockfile::parse(&text);
         if let Ok(gemfile) = vfs.read_to_string(&dir.join("Gemfile")) {
@@ -403,6 +412,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     };
     let mut app = App::new();
     app.extensions = extensions;
+    app.spinel_int_overflow = spinel_int_overflow;
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
     // until the splice folds them into each including model's own
@@ -867,6 +877,10 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                         }
                     }
                     if gem_libs.iter().any(|lib| entry.starts_with(lib)) {
+                        if let Ok(branched) = super::library_class::ingest_file_branch_classes(&source, &path_str) {
+                            let branched: Vec<_> = branched.into_iter().filter(|m| !classes.iter().any(|c| c.name == m.name)).collect();
+                            classes.extend(branched);
+                        }
                         if let Ok(empty) = super::library_class::ingest_empty_modules(&source, &path_str) {
                             let empty: Vec<_> = empty.into_iter().filter(|m| !classes.iter().any(|c| c.name == m.name)).collect();
                             classes.extend(empty);
@@ -1507,6 +1521,7 @@ end
                 nullable_columns: Vec::new(),
                 origin: None,
                 constants,
+                conditional_definitions: Vec::new(),
                 unknown_calls: Vec::new(),
                 class_ivar_initializers: Vec::new(),
             });
@@ -1531,6 +1546,7 @@ end
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            conditional_definitions: Vec::new(),
             unknown_calls: Vec::new(),
             class_ivar_initializers: Vec::new(),
         });
@@ -4097,33 +4113,157 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
     for lc in &app.library_classes {
         module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.clone());
     }
-    let mut controllers = HashMap::default();
+    // A class can have several declarations, including an empty reopening
+    // used only as a namespace. Its includes and superclass belong to the
+    // whole class, not whichever declaration was visited last.
+    let mut parts: HashMap<_, Vec<_>> = HashMap::default();
     for controller in &app.controllers {
+        parts.entry(&controller.name).or_default().push(controller);
+    }
+    let mut controllers = HashMap::default();
+    for name in parts.keys() {
         let mut direct_includes = Vec::new();
-        let mut inherited = Vec::new();
-        let mut cur = Some(controller);
+        let mut include_groups = Vec::new();
+        let mut inherited_groups = Vec::new();
+        let mut cur = Some(*name);
         let mut seen = crate::det::HashSet::default();
         while let Some(c) = cur {
-            if !seen.insert(&c.name) {
+            if !seen.insert(c) {
                 break;
             }
-            for inc in crate::analyze::controller_includes(c) {
-                if c.name != controller.name && !inherited.contains(&inc) {
-                    inherited.push(inc.clone());
-                }
-                if !direct_includes.contains(&inc) {
-                    direct_includes.push(inc);
+            let Some(declarations) = parts.get(c) else { break };
+            let mut groups = Vec::new();
+            for part in declarations {
+                for group in crate::analyze::controller_include_groups(part) {
+                    for inc in &group {
+                        if !direct_includes.contains(inc) {
+                            direct_includes.push(inc.clone());
+                        }
+                    }
+                    groups.push(group);
                 }
             }
-            cur = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
+            // Ancestors register before descendants; each class's statements
+            // retain source order, with only a statement's arguments reversed.
+            if c != *name {
+                inherited_groups.splice(0..0, groups.iter().cloned());
+            }
+            include_groups.splice(0..0, groups);
+            cur = declarations.iter().find_map(|part| part.parent.as_ref());
         }
-        controllers.insert(controller.name.clone(), ControllerConcernSurface {
-            includes: filter_registration_order(&[direct_includes.clone()], &module_includes),
-            inherited_includes: filter_registration_order(&[inherited], &module_includes),
+        controllers.insert((*name).clone(), ControllerConcernSurface {
+            includes: filter_registration_order(&include_groups, &module_includes),
+            inherited_includes: filter_registration_order(&inherited_groups, &module_includes),
             direct_includes,
         });
     }
     ControllerConcernSurfaces { module_includes, controllers }
+}
+
+#[cfg(test)]
+mod controller_concern_surface_tests {
+    use super::*;
+
+    #[test]
+    fn reopened_concern_filters_keep_include_statement_order() {
+        for (initial, reopened, expected) in [
+            ("include FirstConcern", "include SecondConcern", vec!["first", "second"]),
+            ("include FirstConcern, SecondConcern", "include ThirdConcern", vec!["second", "first", "third"]),
+        ] {
+            let mut tree: crate::vfs::FileTree = [
+                ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n".to_string()),
+                ("app/controllers/a_order_controller.rb", format!("class OrderController < ActionController::Base\n  {initial}\nend\n")),
+                ("app/controllers/b_order_extra.rb", format!("class OrderController\n  {reopened}\nend\n")),
+                ("app/controllers/child_controller.rb", "class ChildController < OrderController\n  include ThirdConcern\nend\n".to_string()),
+            ]
+            .into_iter()
+            .map(|(path, source)| (std::path::PathBuf::from(path), source.into_bytes()))
+            .collect();
+            for (name, target) in [("FirstConcern", "first"), ("SecondConcern", "second"), ("ThirdConcern", "third")] {
+                tree.insert(
+                    format!("app/controllers/concerns/{target}.rb").into(),
+                    format!("module {name}\n  extend ActiveSupport::Concern\n  included {{ before_action :{target} }}\nend\n").into_bytes(),
+                );
+            }
+            let app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+            let surfaces = controller_concern_surfaces(&app);
+            let filters = |name: &str| -> Vec<_> {
+                surfaces.controllers[&crate::ident::ClassId(name.into())]
+                    .includes.iter()
+                    .flat_map(|module| app.concern_filters.get(module).into_iter().flatten())
+                    .map(|filter| filter.target.as_str())
+                    .collect()
+            };
+            assert_eq!(filters("OrderController"), expected);
+            let mut inherited = expected;
+            if !inherited.contains(&"third") {
+                inherited.push("third");
+            }
+            assert_eq!(filters("ChildController"), inherited);
+        }
+    }
+
+    #[test]
+    fn a_namespace_reopening_keeps_own_and_inherited_includes() {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+            ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\n  include ParentConcern\nend\n"),
+            ("app/controllers/child_controller.rb", "class ChildController < BaseController\n  include ChildConcern\nend\n"),
+        ]
+        .into_iter()
+        .map(|(path, source)| (std::path::PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        // Opening a class just to declare a nested constant contributes no
+        // superclass or includes of its own.
+        let mut reopening = app.controllers.iter().find(|c| c.name.0.as_str() == "BaseController").unwrap().clone();
+        reopening.parent = None;
+        reopening.parent_span = Default::default();
+        reopening.body.clear();
+        app.controllers.push(reopening);
+        for _ in 0..2 {
+            let surfaces = controller_concern_surfaces(&app);
+            let parent = &surfaces.controllers[&crate::ident::ClassId("BaseController".into())];
+            assert_eq!(parent.direct_includes, vec![crate::ident::ClassId("ParentConcern".into())]);
+            let child = &surfaces.controllers[&crate::ident::ClassId("ChildController".into())];
+            assert_eq!(child.direct_includes, vec![
+                crate::ident::ClassId("ChildConcern".into()),
+                crate::ident::ClassId("ParentConcern".into()),
+            ]);
+            assert_eq!(child.inherited_includes, vec![crate::ident::ClassId("ParentConcern".into())]);
+            app.controllers.reverse();
+        }
+    }
+
+    #[test]
+    fn a_namespaced_source_reopening_keeps_own_and_inherited_includes() {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+            ("app/controllers/a_base_controller.rb", "module Review\n  class BaseController < ActionController::Base\n    include ParentConcern\n  end\nend\n"),
+            ("app/controllers/b_base_extra.rb", "module Review\n  class BaseController\n    include ExtraConcern\n  end\nend\n"),
+            ("app/controllers/c_base_nested.rb", "module Review\n  class BaseController\n    class Nested; end\n  end\nend\n"),
+            ("app/controllers/d_child_controller.rb", "module Review\n  class ChildController < BaseController\n    include ChildConcern\n  end\nend\n"),
+        ]
+        .into_iter()
+        .map(|(path, source)| (std::path::PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let base = crate::ident::ClassId("Review::BaseController".into());
+        let child = crate::ident::ClassId("Review::ChildController".into());
+        assert_eq!(app.controllers.iter().filter(|c| c.name == base).count(), 3);
+        for _ in 0..2 {
+            let surfaces = controller_concern_surfaces(&app);
+            let parent = &surfaces.controllers[&base];
+            let child = &surfaces.controllers[&child];
+            for included in ["ParentConcern", "ExtraConcern"] {
+                let id = crate::ident::ClassId(included.into());
+                assert!(parent.direct_includes.contains(&id));
+                assert!(child.inherited_includes.contains(&id));
+            }
+            assert!(child.direct_includes.contains(&crate::ident::ClassId("ChildConcern".into())));
+            app.controllers.reverse();
+        }
+    }
 }
 
 /// Rails' `remove_duplicates`: declaring `before_action :set_room` a
@@ -7588,6 +7728,13 @@ struct RoundhouseConfig {
     test_paths: Vec<PathBuf>,
     /// Extension directories (`crate::extensions`), in listing order.
     extensions: Vec<PathBuf>,
+    spinel: SpinelConfig,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SpinelConfig {
+    int_overflow: Option<String>,
 }
 
 /// Read and parse the app's `roundhouse.yml`.
@@ -10159,6 +10306,7 @@ fn lift_read_framework_settings<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut 
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     });

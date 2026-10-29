@@ -128,6 +128,8 @@ mod strong_params;
 mod params_wrapper;
 #[path = "spinel_toolchain/json_request_values.rs"]
 mod json_request_values;
+#[path = "spinel_toolchain/multipart_file_parts.rs"]
+mod multipart_file_parts;
 #[path = "support/default_format_dispatch.rs"]
 mod default_format_dispatch;
 #[path = "spinel_toolchain/route_default_format.rs"]

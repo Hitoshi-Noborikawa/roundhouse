@@ -178,6 +178,7 @@ pub(super) fn collect(
                 declaration_span: node_span(&call.as_node(), file),
             }),
             constants: Vec::new(),
+            conditional_definitions: Vec::new(),
             unknown_calls: Vec::new(),
         });
     }

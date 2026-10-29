@@ -139,6 +139,17 @@ pub(super) fn ingest_model_with_enum_constants(
     let mut enum_defaults: IndexMap<Symbol, Literal> = IndexMap::new();
     let mut class_attr_defaults: IndexMap<Symbol, Expr> = IndexMap::new();
     let mut primary_key: Option<Symbol> = None;
+    // A model body's load-time conditional definitions are not carried
+    // (the model lowering writes no conditional), so the model stays
+    // refused for one, as before the library walk admitted them.
+    if let Some(body) = class.body() {
+        if flatten_statements(body).iter().any(|stmt| super::visibility::conditional_definition(stmt).is_some()) {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "conditional or dynamic visibility declarations are not modeled".into(),
+            });
+        }
+    }
     let visibility = Visibility::resolve_carrying_inherited(class.body().as_ref(), file, None)?;
     let mut carried_markers: crate::det::HashSet<usize> = crate::det::HashSet::default();
     if let Some(class_body) = class.body() {

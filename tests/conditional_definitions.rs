@@ -13,7 +13,6 @@ use std::process::Command;
 const LAZY: &str = "Rails.application.configure do\n  config.eager_load = false\nend\n";
 
 #[test]
-#[ignore = "fork spec: conditional declarations"]
 fn the_branch_ruby_selects_at_load_defines_the_method() {
     let run = emit_and_run::empty_app()
         .write("config/environments/development.rb", LAZY)
@@ -82,7 +81,6 @@ end
 }
 
 #[test]
-#[ignore = "fork spec: conditional declarations"]
 fn an_accessor_in_the_branch_ruby_selects_at_load_is_defined() {
     let run = emit_and_run::empty_app()
         .write(
@@ -261,7 +259,6 @@ end
 }
 
 #[test]
-#[ignore = "fork spec: conditional declarations"]
 fn a_conditional_nested_in_a_load_time_branch_runs_as_ruby_runs_it() {
     const GEM: &str = r#"module Vc
   LEVEL = Gem::Version.new("8.2.0")

@@ -82,6 +82,7 @@ pub mod unported_rails_subclasses;
 pub mod pathname_ctor;
 pub mod assoc_pluck;
 pub mod try_guard;
+mod core_method_names;
 pub mod class_body_new;
 pub mod mocha;
 pub mod stub_const;
@@ -1785,6 +1786,7 @@ pub fn module_funcs_to_library_class(
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     }
