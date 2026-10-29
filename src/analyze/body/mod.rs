@@ -190,6 +190,10 @@ pub struct Ctx {
     /// Locals bound to a class the program already has (a constant, or
     /// `self` on the class side), not one `Class.new` is building.
     pub live_class_locals: crate::det::HashSet<Symbol>,
+    /// Typing an `app/helpers` module's body. Its `self` may be the
+    /// module's sole includer (a controller), but the emitted body runs
+    /// in the view, where a bare `render` is ActionView's String.
+    pub helper_body: bool,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -2339,6 +2343,14 @@ impl<'a> BodyTyper<'a> {
                     && (1..=2).contains(&args.len())
                     && block.is_none()
                     && matches!(dispatched, Ty::Var { .. })
+                    && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body)
+                {
+                    return Ty::Str;
+                }
+                if recv.is_none()
+                    && matches!(method.as_str(), "render" | "render_to_string")
+                    && ctx.helper_body
+                    && !ctx.class_side
                     && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body)
                 {
                     return Ty::Str;

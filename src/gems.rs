@@ -74,6 +74,8 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "faraday/retry",
     "retryable",
     "jwt",
+    // Not the gem's entry file: it loads the Railtie whenever `Rails::VERSION` is defined, which this tree's is, with no `Rails::Railtie` under it.
+    "mini_profiler",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -91,7 +93,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 22] = [
+    const RUNTIME_GEMS: [(Marker, &str); 23] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -209,6 +211,10 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // refused on the strict targets (`lower::ruby_family_gems`).
         (Marker::Constant("Retryable"), "retryable"),
         (Marker::Constant("JWT"), "jwt"),
+        // lobsters' `Rack::MiniProfiler.authorize_request` for every
+        // moderator: the real gem on this lane, the gate alone in
+        // gem_facades.rb on spinel.
+        (Marker::Constant("Rack::MiniProfiler"), "rack-mini-profiler"),
     ];
     &RUNTIME_GEMS
 }
@@ -1675,6 +1681,16 @@ pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path
 mod tests {
     use super::*;
 
+    /// rotp's façade only raises, so the gem is compiled from source; WebPush's
+    /// also raises in gem_facades.rb, but the Spinel tree ports it, and a
+    /// sourced gem would drop the port's stub slots with the façade.
+    #[test]
+    fn a_ported_namespace_is_not_a_stub_facade() {
+        let stubs = stub_facade_namespaces();
+        assert!(stubs.contains("ROTP"), "{stubs:?}");
+        assert!(!stubs.contains("WebPush"), "{stubs:?}");
+    }
+
     #[test]
     fn gemfile_requires_reads_each_spelling() {
         let found = gemfile_requires(
@@ -2077,6 +2093,31 @@ pub(crate) fn spinel_runtime_constants() -> &'static crate::det::HashSet<String>
 pub(crate) fn ported_runtime_constants() -> &'static crate::det::HashSet<String> {
     static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
     NAMES.get_or_init(|| declared_runtime_constants(&["runtime/spinel", "runtime/ruby"]))
+}
+
+/// Top-level namespaces whose façade in `runtime/ruby/gem_facades.rb`
+/// answers a call by `GemFacade.fail!` (rotp's `ROTP`): the Spinel tree
+/// has no working body for them.
+pub(crate) fn stub_facade_namespaces() -> &'static crate::det::HashSet<String> {
+    static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut out = crate::det::HashSet::default();
+        let Ok(text) = crate::runtime_files::read_to_string("runtime/ruby/gem_facades.rb") else { return out };
+        let mut current: Option<String> = None;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("module ").or_else(|| line.strip_prefix("class ")) {
+                let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                current = (!name.is_empty() && name != "GemFacade").then_some(name);
+            } else if line.contains("GemFacade.fail!")
+                && let Some(name) = &current
+            {
+                out.insert(name.clone());
+            }
+        }
+        // Not one the Spinel tree ports (`runtime/spinel/web_push.rb`): the sourced gem would drop the whole façade, and the port's stub slots with it.
+        out.retain(|name| !spinel_runtime_constants().contains(name));
+        out
+    })
 }
 
 fn declared_runtime_constants(dirs: &[&str]) -> crate::det::HashSet<String> {

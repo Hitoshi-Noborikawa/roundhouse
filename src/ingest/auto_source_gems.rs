@@ -59,6 +59,8 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
         let needed_by_source = from_gem && lock.source.iter().any(|s| lock.spec_deps.get(s).is_some_and(|deps| deps.iter().any(|d| d == gem)));
         match crate::gems::fate_of(gem) {
             GemFate::Unknown if direct || needed_by_source => {}
+            // Not left to its façade: rotp's `ROTP` raises there, so two-factor sign-in failed on Spinel while the installed gem is plain Ruby.
+            GemFate::Modeled if direct && crate::gems::stub_facade_namespaces().contains(&crate::gems::namespace_of(gem)) => {}
             // Not Ruby's standard library, gem-packaged or not: the Spinel side supplies that (a package or a port), not the app's tree.
             _ => return,
         }

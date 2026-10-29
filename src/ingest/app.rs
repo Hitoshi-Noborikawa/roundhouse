@@ -349,6 +349,15 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let _source_root = super::sources::set_root(dir);
     let config = roundhouse_config(vfs, dir)?;
     let extensions = project_extensions(vfs, dir, &config)?;
+    if let Some(mode) = config.spinel.int_overflow.as_deref()
+        && !matches!(mode, "raise" | "wrap" | "promote")
+    {
+        return Err(IngestError::Parse {
+            file: dir.join("roundhouse.yml").display().to_string(),
+            message: format!("spinel.int_overflow must be raise, wrap or promote, not {mode:?}"),
+        });
+    }
+    let spinel_int_overflow = config.spinel.int_overflow.clone().filter(|mode| mode != "raise");
     let lock = vfs.read_to_string(&dir.join("Gemfile.lock")).ok().map(|text| {
         let mut lock = crate::gems::Lockfile::parse(&text);
         if let Ok(gemfile) = vfs.read_to_string(&dir.join("Gemfile")) {
@@ -403,6 +412,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     };
     let mut app = App::new();
     app.extensions = extensions;
+    app.spinel_int_overflow = spinel_int_overflow;
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
     // until the splice folds them into each including model's own
@@ -7718,6 +7728,13 @@ struct RoundhouseConfig {
     test_paths: Vec<PathBuf>,
     /// Extension directories (`crate::extensions`), in listing order.
     extensions: Vec<PathBuf>,
+    spinel: SpinelConfig,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SpinelConfig {
+    int_overflow: Option<String>,
 }
 
 /// Read and parse the app's `roundhouse.yml`.

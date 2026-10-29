@@ -17,6 +17,8 @@ extensions:
 - [`test_paths`](#test_paths) adds test folders to the default list.
 - [`extensions`](#extensions) lists directories that describe the app's
   gems and class-body DSLs.
+- [`spinel`](#spinel) passes a compiler mode the Spinel target needs
+  (provisional).
 
 Roundhouse reads the file during ingest, so every tool sees it:
 [`roundhouse check`](check.md), the [editor](editor.md), the
@@ -319,3 +321,23 @@ extensions.
 
 Extension facts belong to the app that lists them. An app that lists no
 extensions behaves as before.
+
+## `spinel`
+
+```yaml
+spinel:
+  int_overflow: promote
+```
+
+`int_overflow` is handed to Spinel as `--int-overflow` on every compile
+the emitted Makefile runs: the app binary and each test binary. Ruby's
+Integer never overflows; Spinel's default (`raise`) stops with a
+`RangeError` when a value passes 64 bits, `promote` turns it into a
+big integer as Ruby does, and `wrap` wraps it. An app needs `promote`
+when it, or a gem compiled from source, computes past 64 bits: rotp
+builds its Base32 secret in one shifted integer, so lobsters' two-factor
+sign-in needs it. `promote` with the emitted RBS needs Spinel with
+matz/spinel#10494.
+
+This setting is provisional. Whether a program needs the mode should be
+decided without asking the app, and the setting will go once it is.

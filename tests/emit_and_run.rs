@@ -20102,3 +20102,15 @@ mod helper_param_after_views;
 
 #[path = "emit_and_run/layout_ivar_unset.rs"]
 mod layout_ivar_unset;
+
+#[path = "emit_and_run/stub_facade_source_gem.rs"]
+mod stub_facade_source_gem;
+
+#[path = "emit_and_run/helper_render_partial.rs"]
+mod helper_render_partial;
+
+#[path = "emit_and_run/where_record_seed_redirect_back.rs"]
+mod where_record_seed_redirect_back;
+
+#[path = "emit_and_run/joins_several_associations.rs"]
+mod joins_several_associations;
