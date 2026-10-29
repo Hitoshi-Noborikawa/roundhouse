@@ -717,3 +717,6 @@ puts "named captures passed"
     run.assert_passes();
     assert!(run.stdout.contains("named captures passed"));
 }
+
+#[path = "spinel_toolchain/db_binary_literal.rs"]
+mod db_binary_literal;
