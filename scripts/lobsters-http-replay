@@ -252,8 +252,8 @@ steps.each do |step|
   locations[name] = location if location
   File.write(File.join(opts[:dump], name), body) unless st == :EXC
   ok = step.expect ? st == step.expect : st.is_a?(Integer) && (200..399).cover?(st)
-  # Not for a step that names its status: a POST answering `ok` is the whole response.
-  thin = !step.expect && st == 200 && body.bytesize < THIN_BYTES
+  # Not for a POST that names its status: one answering `ok` is the whole response.
+  thin = !(step.method == "POST" && step.expect) && st == 200 && body.bytesize < THIN_BYTES
   failures += 1 if !ok || thin
   next if opts[:quiet] && ok && !thin
   note = thin ? " THIN" : ""
