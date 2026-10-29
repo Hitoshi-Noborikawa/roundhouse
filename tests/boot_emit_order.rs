@@ -431,7 +431,6 @@ end
 )];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_class_body_write_through_a_writer_an_included_hook_defines_runs_as_native() {
     gem_same_as_native(
         "hooked",

@@ -2778,6 +2778,19 @@ fn walk_decl_body_with_visibility<'pr>(
             out.unknown_calls.push(ingest_expr(&stmt, file)?);
             continue;
         }
+        // `self.strict ||= :on`: a compound write through a class-side
+        // writer, captured like `self.strict = :on` below rather than
+        // dropped without a word.
+        let self_receiver = |r: Option<ruby_prism::Node<'_>>| r.is_some_and(|r| receiver_rooted_at_self(&r));
+        if stmt.as_call_or_write_node().is_some_and(|w| self_receiver(w.receiver()))
+            || stmt.as_call_and_write_node().is_some_and(|w| self_receiver(w.receiver()))
+            || stmt.as_call_operator_write_node().is_some_and(|w| self_receiver(w.receiver()))
+        {
+            if let Ok(e) = ingest_expr(&stmt, file) {
+                out.unknown_calls.push(e);
+            }
+            continue;
+        }
         // Retain native nil initialization in source order. Only a declared
         // cattr/mattr storage approximation may drop it, after the whole body
         // has been walked. Non-nil initializers remain outside this slice.

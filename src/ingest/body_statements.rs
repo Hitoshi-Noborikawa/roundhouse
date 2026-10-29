@@ -9,7 +9,12 @@
 //! * a call to a core `Module` method (`freeze`, `self.define_method`);
 //! * a write through a class-side writer the class or an app ancestor
 //!   defines (`self.require_name = true` below `class << self;
-//!   attr_accessor :require_name; end`, and in a subclass);
+//!   attr_accessor :require_name; end`, and in a subclass), or
+//!   `self.strict ||= :on`;
+//! * such a write in a class whose own or an app ancestor's include
+//!   names an app module with an `included` hook, which may define the
+//!   writer at run time (`base.singleton_class.send(:attr_accessor,
+//!   *NAMES)`), when no runtime base answers the class side;
 //! * any of these, or `delegate`, in the class's own `class << self`
 //!   ([`crate::expr::SINGLETON_BODY`]) of a module or of a class no
 //!   runtime base gives class methods to.
@@ -83,15 +88,42 @@ pub(super) fn mark(app: &mut App) {
             .or_default()
             .extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Class).map(|m| m.name.as_str().to_string()));
         if !lc.is_module {
-            let parent = lc.parent.as_ref().map(|p| p.0.as_str().trim_start_matches("::").to_string());
+            let parent = lc.parent.as_ref().map(|p| p.0.as_str().to_string());
             let entry = parents.entry(name).or_insert(None);
             if entry.is_none() {
                 *entry = parent;
             }
         }
     }
+    // Each superclass as the app names it, looked up from the namespace
+    // the class is declared in.
+    let parents: std::collections::BTreeMap<String, Option<String>> = parents
+        .iter()
+        .map(|(name, parent)| {
+            let parent = parent.as_ref().map(|p| match p.strip_prefix("::") {
+                Some(absolute) => absolute.to_string(),
+                None => resolve(&class_side, p, name.rsplit_once("::").map(|(ns, _)| ns)).unwrap_or(p.clone()),
+            });
+            (name.clone(), parent)
+        })
+        .collect();
+    // The classes that include one of the app's modules with an
+    // `included` hook, which may define class-side writers at run time.
+    let hooked: HashSet<String> = app
+        .library_classes
+        .iter()
+        .filter(|lc| lc.origin.is_none() && !lc.is_module)
+        .filter(|lc| {
+            let name = lc.name.0.as_str();
+            lc.includes.iter().any(|i| {
+                resolve(&class_side, i.0.as_str().trim_start_matches("::"), Some(name))
+                    .is_some_and(|m| class_side.get(&m).is_some_and(|methods| methods.contains("included")))
+            })
+        })
+        .map(|lc| lc.name.0.as_str().to_string())
+        .collect();
     let models: HashSet<String> = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
-    let index = Index { class_side: &class_side, parents: &parents, models: &models };
+    let index = Index { class_side: &class_side, parents: &parents, models: &models, hooked: &hooked };
     for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
         let name = lc.name.0.as_str().to_string();
         let singleton_ok = lc.is_module || index.answered_by_app(&name);
@@ -111,10 +143,26 @@ pub(super) fn mark(app: &mut App) {
     }
 }
 
+/// `name` as the app names it, looked up from `scope`'s nesting
+/// outward (`Settings` in `Hooked::Gateway` is `Hooked::Settings`).
+fn resolve(class_side: &std::collections::BTreeMap<String, HashSet<String>>, name: &str, scope: Option<&str>) -> Option<String> {
+    let mut prefix: Vec<&str> = scope.map(|s| s.split("::").collect()).unwrap_or_default();
+    loop {
+        let candidate = if prefix.is_empty() { name.to_string() } else { format!("{}::{name}", prefix.join("::")) };
+        if class_side.contains_key(&candidate) {
+            return Some(candidate);
+        }
+        if prefix.pop().is_none() {
+            return None;
+        }
+    }
+}
+
 struct Index<'a> {
     class_side: &'a std::collections::BTreeMap<String, HashSet<String>>,
     parents: &'a std::collections::BTreeMap<String, Option<String>>,
     models: &'a HashSet<String>,
+    hooked: &'a HashSet<String>,
 }
 
 impl Index<'_> {
@@ -129,6 +177,24 @@ impl Index<'_> {
             }
             seen.push(class);
             if self.class_side.get(class).is_some_and(|methods| methods.contains(method)) {
+                return true;
+            }
+            at = self.parents.get(class).and_then(|p| p.as_deref());
+        }
+        false
+    }
+
+    /// Whether `name` or an app ancestor of it includes a module whose
+    /// `included` hook may define its class-side writers.
+    fn hooked(&self, name: &str) -> bool {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut at = Some(name);
+        while let Some(class) = at {
+            if seen.contains(&class) {
+                return false;
+            }
+            seen.push(class);
+            if self.hooked.contains(class) {
                 return true;
             }
             at = self.parents.get(class).and_then(|p| p.as_deref());
@@ -168,11 +234,20 @@ impl Check<'_> {
         MODULE_METHODS.contains(&method) || self.index.defines(self.owner, method)
     }
 
+    /// A class-side writer the class or an app ancestor defines, or one
+    /// an included module's hook may define on a class no runtime base
+    /// answers (`base.singleton_class.send(:attr_accessor, *NAMES)`).
+    fn writer(&self, name: &str) -> bool {
+        self.answered(&format!("{name}="))
+            || (self.index.hooked(self.owner) && self.index.answered_by_app(self.owner))
+    }
+
     fn statement(&self, expr: &Expr) -> bool {
         match &*expr.node {
             // `self.require_name = true`, `self.strict ||= :on`.
-            ExprNode::Assign { target: LValue::Attr { recv, name }, value } => {
-                matches!(&*recv.node, ExprNode::SelfRef) && self.answered(&format!("{}=", name.as_str())) && self.walk(value)
+            ExprNode::Assign { target: LValue::Attr { recv, name }, value }
+            | ExprNode::OpAssign { target: LValue::Attr { recv, name }, value, .. } => {
+                matches!(&*recv.node, ExprNode::SelfRef) && self.writer(name.as_str()) && self.walk(value)
             }
             // A call on the class is one of Ruby's own `Module` methods. One
             // to its own class methods is `app_extension_calls`' (without
@@ -183,8 +258,12 @@ impl Check<'_> {
                 // `self.require_name = true`, through a writer the class or
                 // an app ancestor defines.
                 Some(r) if matches!(&*r.node, ExprNode::SelfRef) => {
-                    let writer = method.as_str().ends_with('=') && block.is_none();
-                    (MODULE_METHODS.contains(&method.as_str()) || writer) && self.walk(expr)
+                    match method.as_str().strip_suffix('=') {
+                        Some(name) if block.is_none() && !MODULE_METHODS.contains(&method.as_str()) => {
+                            self.writer(name) && args.iter().all(|a| self.walk(a))
+                        }
+                        _ => MODULE_METHODS.contains(&method.as_str()) && self.walk(expr),
+                    }
                 }
                 // A loop: a block over an inert receiver.
                 Some(r) => {

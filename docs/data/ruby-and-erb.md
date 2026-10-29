@@ -120,7 +120,11 @@ following statements back where the source has them, among the class's methods (
 - a call to one of Ruby's own `Module` methods (`freeze`,
   `self.define_method`);
 - a write through a class-side writer the class or an app ancestor
-  defines (`self.require_name = true`).
+  defines (`self.require_name = true`, `self.strict ||= :on`);
+- such a write in a class that, itself or through an app ancestor,
+  includes an app module with an `included` hook, which may define the
+  writer at run time, when its superclasses are the app's own up to a
+  core class.
 
 Each statement must call nothing on the class but Ruby's own `Module`
 methods, `delegate` (the Ruby family's runtime defines it) and class
