@@ -211,7 +211,6 @@ end
 fn included_callback_that_only_calls_a_macro_on_the_receiver_keeps_keywords() {
     for body in [
         "base.before_action(:load_tag) if base.methods.include?(:before_action)",
-        "base.instance_eval do\n      before_action(:load_tag) if base.methods.include?(:before_action)\n    end",
     ] {
         let source = format!(
             r#"
@@ -249,6 +248,12 @@ fn included_eval_block_that_replaces_new_still_refuses() {
         "base.class_eval { |klass| klass.extend(Unknown::Factory) }",
         "base.instance_eval { it.define_singleton_method(:new) { |**o| o } }",
         "base.instance_eval { _1.define_singleton_method(:new) { |**o| o } }",
+        // Any literal eval block on the receiver refuses, as on `main`: even a
+        // bare macro call, a numbered parameter of a nested block, or `self`
+        // through a local (CodeRabbit on #1525).
+        "base.instance_eval do\n      before_action(:load_tag) if base.methods.include?(:before_action)\n    end",
+        "base.instance_eval { [1].map { _1 } }",
+        "base.instance_eval do\n      target = self\n      target.define_singleton_method(:new) { |**o| o }\n    end",
     ] {
         let source = format!(
             r#"
@@ -287,6 +292,7 @@ fn included_callback_calling_an_extended_constructor_installer_still_refuses() {
         ("base.extend(Factory)\n    base.public_send(\"install_factory\")", ""),
         ("base.extend(Factory)\n    base.__send__(:install_factory)", ""),
         ("base.extend(Factory)\n    base.send(installer)", ""),
+        ("base.extend(Factory)\n    base.instance_eval { install_factory }", ""),
     ] {
         let source = format!(
             r#"

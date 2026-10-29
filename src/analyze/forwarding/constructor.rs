@@ -607,24 +607,6 @@ pub(super) fn scan_constructor_mutations(
             _ => false,
         }
     }
-    // An eval block that names its argument (`|klass|`, `it`, `_1`) reaches
-    // the receiver through a name this scan doesn't follow, so only a block
-    // without one is scanned; the rest keep the eval's refusal.
-    fn parameterless_block(block: &Expr) -> bool {
-        fn reads_numbered(expr: &Expr) -> bool {
-            if matches!(&*expr.node, ExprNode::Var { name, .. } if name.as_str() == "_1") {
-                return true;
-            }
-            let mut found = false;
-            expr.node.for_each_child(&mut |child| found |= reads_numbered(child));
-            found
-        }
-        matches!(
-            &*block.node,
-            ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }
-                if params.is_empty() && extra_params.is_empty() && !reads_numbered(body)
-        )
-    }
     fn contains_callback(expr: &Expr, callback_receiver: &Symbol) -> bool {
         if matches!(&*expr.node, ExprNode::Var { name, .. } if name == callback_receiver) {
             return true;
@@ -643,38 +625,19 @@ pub(super) fn scan_constructor_mutations(
         result: &mut ConstructorMutationScan,
     ) {
         if let ExprNode::Send {
-            recv, method, args, block, ..
+            recv, method, args, ..
         } = &*expr.node
         {
-            // `base.instance_eval { ... }` / `base.class_eval do ... end`
-            // with a literal, parameterless block and no string: the block runs with
-            // `self` = the callback receiver, so its own sends are what can
-            // change the lookup, and the walk below scans them as
-            // receiverless sends on the owner. A string body stays unknown.
-            // A `def` in the block has no IR node: ingest reports it as
-            // `nested def not supported` and the site raises, so it cannot
-            // replace `new` in the emitted program.
-            let scanned_eval = callback_receiver.is_some_and(|callback_receiver| {
-                matches!(
-                    method.as_str(),
-                    "class_eval" | "module_eval" | "instance_eval" | "class_exec" | "instance_exec"
-                ) && args.is_empty()
-                    && block.as_ref().is_some_and(parameterless_block)
-                    && recv.as_ref().is_some_and(|recv| {
-                        matches!(&*recv.node, ExprNode::Var { name, .. } if name == callback_receiver)
-                    })
-            });
-            let mutates_lookup = !scanned_eval
-                && mutates_constructor_lookup_method(
-                    method.as_str(),
-                    args,
-                    context.modules_with_custom_new,
-                    context.modules_with_custom_initialize,
-                    context.known_modules,
-                    context.modules_with_mutating_hooks,
-                    context.hook_targets,
-                    context.question,
-                );
+            let mutates_lookup = mutates_constructor_lookup_method(
+                method.as_str(),
+                args,
+                context.modules_with_custom_new,
+                context.modules_with_custom_initialize,
+                context.known_modules,
+                context.modules_with_mutating_hooks,
+                context.hook_targets,
+                context.question,
+            );
             // A send on the callback receiver mutates its lookup only when
             // the method is one that can (`mutates_lookup`) or one the app
             // defines, whose body may (`base.install_factory` after
