@@ -225,6 +225,9 @@ pub struct ClassInfo {
     /// Catalog entries and source methods can have the same gradual
     /// return type, so a call-site refinement needs their provenance.
     pub source_class_methods: crate::det::HashSet<Symbol>,
+    /// Instance methods a model or library class defines in source, known
+    /// before the first harvest registers their returns.
+    pub source_instance_methods: crate::det::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
     /// A source `new` that calls `super` still needs the inherited constructor.
