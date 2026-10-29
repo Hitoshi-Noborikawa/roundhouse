@@ -4088,7 +4088,8 @@ impl Analyzer {
             if !retype && !mailer_names.contains(&lc_name) {
                 continue;
             }
-            let self_id = if lc.is_module {
+            // Not a helper module's sole includer: its emitted bodies run in the view (the controller keeps its own copy), so `render` is ActionView's String, not the controller's nil.
+            let self_id = if lc.is_module && !self.helper_modules.contains(&lc.name) {
                 sole_includer.get(&lc.name).cloned().unwrap_or_else(|| lc.name.clone())
             } else {
                 lc.name.clone()

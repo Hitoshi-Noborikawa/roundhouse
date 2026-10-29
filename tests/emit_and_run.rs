@@ -20036,3 +20036,6 @@ mod layout_ivar_unset;
 
 #[path = "emit_and_run/stub_facade_source_gem.rs"]
 mod stub_facade_source_gem;
+
+#[path = "emit_and_run/helper_render_partial.rs"]
+mod helper_render_partial;

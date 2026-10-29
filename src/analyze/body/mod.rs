@@ -2343,6 +2343,15 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Str;
                 }
+                if recv.is_none()
+                    && matches!(method.as_str(), "render" | "render_to_string")
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && !ctx.class_side
+                    && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if self.helper_modules.is_some_and(|h| h.contains(id)))
+                    && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body)
+                {
+                    return Ty::Str;
+                }
                 // Kernel.Array is a container even for scalar params.
                 // App methods (including inherited/included overrides)
                 // have already dispatched above and must win.
