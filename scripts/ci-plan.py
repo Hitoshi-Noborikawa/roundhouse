@@ -75,6 +75,7 @@ JRUBY_BIND_INPUTS = {
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
     "date_columns_spinel",
+    "temporal_initialize_spinel",
     "framework_tests_spinel",
     "spinel_web_push_crypto",
     "sponge_random",
@@ -98,6 +99,7 @@ SPINEL_TESTS = [
     "open_telemetry_stub_spinel",
     "around_block_filter_spinel",
     "after_initialize_bare_new_spinel",
+    "find_or_create_bang_records",
     "before_action_return_spinel",
     "plain_class_optional_keywords_spinel",
     "jbuilder_array_value_spinel",
@@ -491,6 +493,9 @@ def native_coverage(path):
         suites.add(focused[1])
     if path == "tests/support/db_concurrency_spinel.rb":
         suites.add("db_sqlite_concurrency")
+    # The fixture app beside its harness selects the same suite.
+    if path.startswith("tests/find_or_create_bang_records/"):
+        suites.add("find_or_create_bang_records")
     if (
         path in GENERATED_COLUMNS_SPINEL_INPUTS
         or path.startswith("tests/support/generated_columns_")

@@ -73,6 +73,7 @@ module ActionMailer
       @headers = {}
       @mailer = nil
       @null = false
+      @perform_deliveries = true
       @text_body = text_body
       @html_body = html_body
       given = opts[:body]
@@ -191,8 +192,18 @@ module ActionMailer
     # mail) is not collected and answers nil.
     def __push
       return nil if @null
-      ActionMailer::Base.deliveries.push(self)
+      ActionMailer::Base.deliveries.push(self) if @perform_deliveries
       self
+    end
+
+    # Mail's switch: a mail an after_action turns off still runs its
+    # delivery callbacks, and is not sent (lobsters' blocklist check).
+    def perform_deliveries
+      @perform_deliveries
+    end
+
+    def perform_deliveries=(value)
+      @perform_deliveries = value
     end
 
     def __link(mailer)
@@ -221,8 +232,11 @@ module ActionMailer
 
     # The mail is kept as `message`, for the after callbacks; headers
     # given before it was built are added to it.
-    def mail(opts, text_body = nil, html_body = nil)
-      built = Message.new(opts, text_body, html_body).__link(self)
+    def mail(opts = nil, text_body = nil, html_body = nil)
+      current = @_message
+      # Not rebuilt by a bare `mail` once the action built one: Rails answers that mail, which an after_action reads (lobsters' blocklist check).
+      return current if opts.nil? && current
+      built = Message.new(opts || {}, text_body, html_body).__link(self)
       __headers.each { |name, value| built.add_header(name, value) }
       @_message = built
       built

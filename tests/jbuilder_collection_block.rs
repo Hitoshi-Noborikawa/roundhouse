@@ -116,6 +116,49 @@ const SORTED: &str = r#"json.sorted @widgets.sort_by(&:name) do |widget|
 end
 "#;
 
+/// A trailing options Hash after the collection: `set!` takes it as
+/// `*args` and, with a block, never reads it.
+const OPTIONS: &str = r#"json.count @widgets.size
+json.widgets(@widgets, cache: true) do |widget|
+  json.label widget.name
+end
+"#;
+
+/// A trailing option that is a call. Jbuilder evaluates it before
+/// `set!` drops it (Rails 8.1.4 + jbuilder 2.15.1 raise here), so the
+/// statement is not lowered to an array that never runs it.
+const OPTIONS_CALL: &str = r#"json.count @widgets.size
+json.widgets(@widgets, cache: raise("bad")) do |widget|
+  json.label widget.name
+end
+"#;
+
+/// The inline-partial Hash followed by another argument. Jbuilder checks
+/// the first argument after the collection whatever the arity, so this
+/// renders the partial, not an array built by the block.
+const PARTIAL_EXTRA: &str = r#"json.count @widgets.size
+json.widgets(@widgets, { partial: "widgets/widget", as: :widget }, :extra) do |widget|
+  json.label widget.name
+end
+"#;
+
+/// An explicit `set!` with a key, a collection and a block. The method
+/// name is `set!`, not the key, and the first argument is the key, not
+/// the collection: the key-with-a-collection shape must not take it.
+const SET_BANG: &str = r#"json.count @widgets.size
+json.set!(:widgets, @widgets) { |widget| json.label widget.name }
+"#;
+
+/// An inline partial whose `partial:` is not a literal. JbuilderTemplate's
+/// `set!` checks that the `partial:` and `as:` keys are present, not
+/// their values, so this is still the inline partial, not an array
+/// built by the block.
+const PARTIAL_VAR: &str = r#"json.count @widgets.size
+json.widgets @widgets, partial: @partial, as: :widget do |widget|
+  json.label widget.name
+end
+"#;
+
 fn emitted() -> Vec<(String, String)> {
     let files: HashMap<PathBuf, Vec<u8>> = [
         ("db/schema.rb", SCHEMA),
@@ -133,6 +176,11 @@ fn emitted() -> Vec<(String, String)> {
         ("app/views/widgets/mixed.json.jbuilder", MIXED),
         ("app/views/widgets/nested_mixed.json.jbuilder", NESTED_MIXED),
         ("app/views/widgets/sorted.json.jbuilder", SORTED),
+        ("app/views/widgets/options.json.jbuilder", OPTIONS),
+        ("app/views/widgets/set_bang.json.jbuilder", SET_BANG),
+        ("app/views/widgets/options_call.json.jbuilder", OPTIONS_CALL),
+        ("app/views/widgets/partial_extra.json.jbuilder", PARTIAL_EXTRA),
+        ("app/views/widgets/partial_var.json.jbuilder", PARTIAL_VAR),
     ]
     .iter()
     .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
@@ -268,7 +316,7 @@ fn render(name: &str, body: &str) -> String {
     }
     std::fs::write(dir.join("app/views.rb"), "").unwrap();
     let mut requires = String::new();
-    for name in ["_widget_json.rb", "items_json.rb", "inline_json.rb", "names_json.rb", "sorted_json.rb"] {
+    for name in ["_widget_json.rb", "items_json.rb", "inline_json.rb", "names_json.rb", "sorted_json.rb", "options_json.rb"] {
         let file = dir.join("app/views/widgets").join(name);
         requires.push_str(&format!("require {:?}\n", file.display().to_string()));
     }
@@ -341,5 +389,77 @@ puts Views::Widgets.sorted_json(widgets)
     assert_eq!(
         out,
         r#"{"sorted":[{"id":2,"meta":{"size":null}},{"id":1,"meta":{"size":5}},{"id":3,"meta":{"size":null}}]}"#
+    );
+}
+
+/// Options after the collection do not change the array: the block is
+/// still run once per element, and the key is not dropped.
+#[test]
+fn a_collection_with_options_and_a_block_is_still_an_array_of_objects() {
+    let files = emitted();
+    let src = view(&files, "widgets/options_json.rb");
+    assert!(
+        src.contains("__col0 = widgets") && src.contains("__col0.map") && src.contains("\\\"label\\\":"),
+        "the block's pairs are emitted per element:\n{src}"
+    );
+    assert!(src.contains("\\\"widgets\\\":"), "the key is written:\n{src}");
+}
+
+#[test]
+fn a_collection_with_options_and_a_block_renders_what_jbuilder_renders() {
+    let out = render(
+        "options",
+        r#"widgets = [Widget.new(1, "b", 5), Widget.new(2, "a", nil)]
+puts Views::Widgets.options_json(widgets)
+"#,
+    );
+    assert_eq!(out, r#"{"count":2,"widgets":[{"label":"b"},{"label":"a"}]}"#);
+}
+
+/// `json.set!(:widgets, col) { … }` is not a key named `set!` mapped
+/// over the Symbol `:widgets`.
+#[test]
+fn an_explicit_set_bang_with_a_block_is_not_a_key_with_a_collection() {
+    let files = emitted();
+    let src = view(&files, "widgets/set_bang_json.rb");
+    assert!(!src.contains("\\\"set!\\\":"), "`set!` is not the key:\n{src}");
+    assert!(!src.contains("__col0 = :widgets"), "the key is not the collection:\n{src}");
+}
+
+/// `partial:` + `as:` with a non-literal `partial:` value is still the
+/// inline partial, not an array built by the block.
+#[test]
+fn an_inline_partial_with_a_variable_path_is_not_an_array_of_blocks() {
+    let files = emitted();
+    let src = view(&files, "widgets/partial_var_json.rb");
+    assert!(
+        !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
+        "the block is not run per element:\n{src}"
+    );
+}
+
+/// Literal options (`cache: true`, `OPTIONS`) still become the array;
+/// an option that is a call does not, because the array would drop it
+/// unevaluated.
+#[test]
+fn a_collection_with_a_call_in_its_options_is_not_an_array_of_blocks() {
+    let files = emitted();
+    let src = view(&files, "widgets/options_call_json.rb");
+    assert!(
+        !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
+        "the block is not run per element:\n{src}"
+    );
+    let literal = view(&files, "widgets/options_json.rb");
+    assert!(literal.contains("__col0.map"), "a literal option still lowers:\n{literal}");
+}
+
+/// The inline-partial Hash is checked whatever follows it.
+#[test]
+fn an_inline_partial_hash_before_another_argument_is_not_an_array_of_blocks() {
+    let files = emitted();
+    let src = view(&files, "widgets/partial_extra_json.rb");
+    assert!(
+        !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
+        "the block is not run per element:\n{src}"
     );
 }

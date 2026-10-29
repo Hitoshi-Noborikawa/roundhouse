@@ -3622,7 +3622,8 @@ fn range_condition_fragment(
     // The registry's table, not a second derivation of it — see
     // `AssocRegistry::tables`.
     let table = ctx.assocs.table_for(model);
-    let col = format!("{table}.{key}");
+    // Not bare: a column named like a keyword (`order`) is a syntax error unquoted, and the Hash form the runtime renders quotes it.
+    let col = format!("\"{table}\".\"{key}\"");
     let mut binds: Vec<Expr> = Vec::new();
     let sql = match &*v.node {
         ExprNode::Range { .. } => range_clause(&col, v, &mut binds)?,
@@ -3673,13 +3674,11 @@ fn range_clause(col: &str, e: &Expr, binds: &mut Vec<Expr>) -> Option<String> {
     let ExprNode::Range { begin, end, exclusive } = &*e.node else { return None };
     let mut clauses: Vec<String> = Vec::new();
     if let Some(b) = begin {
-        clauses.push(format!("{col} >= ?"));
-        binds.push(b.clone());
+        clauses.push(bound_clause(col, ">=", b, binds)?);
     }
     if let Some(x) = end {
         // `a...b` excludes its end; `a..b` includes it.
-        clauses.push(format!("{col} {} ?", if *exclusive { "<" } else { "<=" }));
-        binds.push(x.clone());
+        clauses.push(bound_clause(col, if *exclusive { "<" } else { "<=" }, x, binds)?);
     }
     if clauses.is_empty() {
         return None;
@@ -3691,6 +3690,27 @@ fn range_clause(col: &str, e: &Expr, binds: &mut Vec<Expr>) -> Option<String> {
     } else {
         format!("({})", clauses.join(" AND "))
     })
+}
+
+/// One end's comparison. An end that may be nil at run time is no bound
+/// there, as Rails reads `nil..b`: `(? IS NULL OR col >= ?)`, which binds
+/// it twice, so only a plain read takes it and any other declines.
+fn bound_clause(col: &str, op: &str, bound: &Expr, binds: &mut Vec<Expr>) -> Option<String> {
+    let nilable = match bound.ty.as_ref() {
+        Some(crate::ty::Ty::Nil) => true,
+        Some(crate::ty::Ty::Union { variants }) => variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil)),
+        _ => false,
+    };
+    if !nilable {
+        binds.push(bound.clone());
+        return Some(format!("{col} {op} ?"));
+    }
+    if !matches!(&*bound.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+        return None;
+    }
+    binds.push(bound.clone());
+    binds.push(bound.clone());
+    Some(format!("(? IS NULL OR {col} {op} ?)"))
 }
 
 /// One `joins` argument as SQL, or None when any hop is unresolvable.
@@ -3925,12 +3945,16 @@ fn lower_relation_args(
                     // IS NULL. One statically-known case keeps a typed
                     // narrowing — a collection-typed value maps to ids
                     // here so the emitted SQL shape is visible.
+                    // Not an Array of scalars: a list of plain ids (`find_by(article: ids)`) has no `.id` to read, and the runtime predicate takes it as is.
                     if matches!(&*v.node, ExprNode::Var { .. } | ExprNode::Ivar { .. })
-                        && matches!(
-                            v.ty.as_ref(),
-                            Some(crate::ty::Ty::Array { .. })
-                                | Some(crate::ty::Ty::Relation { .. })
-                        )
+                        && match v.ty.as_ref() {
+                            Some(crate::ty::Ty::Array { elem }) => !matches!(
+                                &**elem,
+                                crate::ty::Ty::Int | crate::ty::Ty::Str | crate::ty::Ty::Float | crate::ty::Ty::Sym | crate::ty::Ty::Bool
+                            ),
+                            Some(crate::ty::Ty::Relation { .. }) => true,
+                            _ => false,
+                        }
                     {
                         let val = std::mem::replace(
                             v,
@@ -5220,6 +5244,33 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return Some(mr);
                 }
+                // Not passed through as written, nor lowered in place: the condition keys off the target's associations (`comments.user` was read), and a lowered range or record list needs `where`'s binds, which a one-argument terminal does not take.
+                let after_where = match method.as_str() {
+                    "find_by" => Some("first"),
+                    "find_by!" => Some("first!"),
+                    "find_sole_by" => Some("sole"),
+                    "destroy_by" => Some("destroy_all"),
+                    "delete_by" => Some("delete_all"),
+                    "exists?" => Some("exists?"),
+                    _ => None,
+                };
+                if let Some(terminal) = after_where
+                    && block.is_none()
+                    && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. }))
+                {
+                    let where_name = Symbol::from("where");
+                    let aliases = lower_relation_args(&mr, &where_name, &mut args, ctx);
+                    let mut r = r;
+                    let unapplied = apply_join_aliases(&mut r, &mr, &aliases, ctx);
+                    key_unapplied_aliases_by_table(&mut args, &mr, &unapplied, ctx);
+                    if matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. })) {
+                        *expr = put(span, Some(r), method, args, block, parenthesized);
+                        return None;
+                    }
+                    let filtered = put(span, Some(r), where_name, args, None, true);
+                    *expr = put(span, Some(filtered), Symbol::from(terminal), vec![], None, false);
+                    return None;
+                }
                 *expr = put(span, Some(r), method, args, block, parenthesized);
                 return None;
             }
@@ -6117,7 +6168,7 @@ mod tests {
         .expect("both ends");
         assert_eq!(
             fragment_sql(&sql),
-            "(memberships.connected_at >= ? AND memberships.connected_at <= ?)"
+            r#"("memberships"."connected_at" >= ? AND "memberships"."connected_at" <= ?)"#
         );
         assert_eq!(binds.len(), 2);
 
@@ -6137,7 +6188,7 @@ mod tests {
             &ctx,
         )
         .expect("endless");
-        assert_eq!(fragment_sql(&sql), "memberships.connected_at >= ?");
+        assert_eq!(fragment_sql(&sql), r#""memberships"."connected_at" >= ?"#);
         assert_eq!(binds.len(), 1);
 
         // Neither end has no comparison to make.
@@ -6145,6 +6196,24 @@ mod tests {
             range_condition_fragment(&m, &cond_hash("connected_at", range(None, None, false)), &ctx)
                 .is_none()
         );
+    }
+
+    /// An end that may be nil at run time is no bound there (`nil..b` is
+    /// beginless in Rails), not `col >= NULL`, which matches nothing.
+    #[test]
+    fn a_nilable_range_end_is_no_bound_when_nil() {
+        let m = ClassId(Symbol::from("Membership"));
+        let (sc, md, ac) = (ScopeRegistry::default(), HashSet::default(), AssocRegistry::default());
+        let ctx = fragment_ctx(&sc, &md, &ac);
+        let mut since = cutoff("since");
+        since.ty = Some(crate::ty::Ty::Union { variants: vec![crate::ty::Ty::Int, crate::ty::Ty::Nil].into() });
+        let (sql, binds) = range_condition_fragment(&m, &cond_hash("connected_at", range(Some(since), Some(cutoff("b")), false)), &ctx)
+            .expect("nilable begin");
+        assert_eq!(
+            fragment_sql(&sql),
+            r#"((? IS NULL OR "memberships"."connected_at" >= ?) AND "memberships"."connected_at" <= ?)"#
+        );
+        assert_eq!(binds.len(), 3);
     }
 
     /// `where(connected_at: [ nil, ...cutoff ])` — Rails ORs the
@@ -6171,7 +6240,7 @@ mod tests {
             .expect("nil + range");
         assert_eq!(
             fragment_sql(&sql),
-            "(memberships.connected_at IS NULL OR memberships.connected_at < ?)"
+            r#"("memberships"."connected_at" IS NULL OR "memberships"."connected_at" < ?)"#
         );
         assert_eq!(binds.len(), 1);
     }

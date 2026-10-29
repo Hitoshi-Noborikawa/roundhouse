@@ -16,6 +16,7 @@
 //! cross-cutting Prism AST helpers live in [`util`].
 
 mod alba;
+mod conditional_permit;
 mod unreachable_views;
 mod uncalled_helper_copies;
 mod written_names;
@@ -80,6 +81,7 @@ pub mod thread_mattr;
 pub mod model;
 mod delegated_type;
 mod app_extension_calls;
+mod body_statements;
 mod class_macros;
 mod column_accessors;
 mod model_macros;

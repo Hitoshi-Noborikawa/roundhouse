@@ -74,6 +74,8 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "faraday/retry",
     "retryable",
     "jwt",
+    // Not the gem's entry file: it loads the Railtie whenever `Rails::VERSION` is defined, which this tree's is, with no `Rails::Railtie` under it.
+    "mini_profiler",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -91,7 +93,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 22] = [
+    const RUNTIME_GEMS: [(Marker, &str); 23] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -209,6 +211,10 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // refused on the strict targets (`lower::ruby_family_gems`).
         (Marker::Constant("Retryable"), "retryable"),
         (Marker::Constant("JWT"), "jwt"),
+        // lobsters' `Rack::MiniProfiler.authorize_request` for every
+        // moderator: the real gem on this lane, the gate alone in
+        // gem_facades.rb on spinel.
+        (Marker::Constant("Rack::MiniProfiler"), "rack-mini-profiler"),
     ];
     &RUNTIME_GEMS
 }
@@ -1013,6 +1019,75 @@ pub fn lock_gems_owning_constant<'a>(lock: &'a Lockfile, constant_path: &str) ->
     best
 }
 
+/// Namespace candidates of one immutable lockfile. Repeated constant asks
+/// inspect only gems sharing the path's first segment, without rebuilding
+/// every gem's candidate spellings. Bucket order is lock order.
+pub(crate) struct LockGemIndex<'a> {
+    entries: Vec<LockGemNamespaces<'a>>,
+    by_head: crate::det::HashMap<String, Vec<usize>>,
+}
+
+struct LockGemNamespaces<'a> {
+    name: &'a str,
+    nested: String,
+    alternatives: Vec<String>,
+}
+
+impl<'a> LockGemIndex<'a> {
+    pub(crate) fn new(lock: &'a Lockfile) -> Self {
+        let entries: Vec<_> = lock.specs.iter().map(|(name, _)| LockGemNamespaces {
+            name,
+            nested: name.split('-').map(camelize).collect::<Vec<_>>().join("::"),
+            alternatives: namespace_candidates(name),
+        }).collect();
+        let mut by_head: crate::det::HashMap<String, Vec<usize>> = Default::default();
+        for (i, entry) in entries.iter().enumerate() {
+            let mut heads = Vec::new();
+            for ns in std::iter::once(&entry.nested).chain(&entry.alternatives) {
+                let head = ns.split("::").next().unwrap_or("").to_ascii_lowercase();
+                if !heads.contains(&head) {
+                    by_head.entry(head.clone()).or_default().push(i);
+                    heads.push(head);
+                }
+            }
+        }
+        Self { entries, by_head }
+    }
+
+    pub(crate) fn owners(&self, constant_path: &str) -> Vec<&'a str> {
+        let path = constant_path.trim_start_matches("::");
+        let head = path.split("::").next().unwrap_or("").to_ascii_lowercase();
+        let under = |ns: &str| {
+            path.len() >= ns.len()
+                && path.is_char_boundary(ns.len())
+                && path[..ns.len()].eq_ignore_ascii_case(ns)
+                && (path.len() == ns.len() || path[ns.len()..].starts_with("::"))
+        };
+        let mut best = Vec::new();
+        let mut best_rank = (0usize, false);
+        for &i in self.by_head.get(&head).into_iter().flatten() {
+            let entry = &self.entries[i];
+            // Nested spelling wins over this gem's alternatives, even if
+            // an alternative is longer, exactly as in the original scan.
+            let rank = if under(&entry.nested) {
+                (entry.nested.len(), true)
+            } else if let Some(ns) = entry.alternatives.iter().filter(|ns| under(ns)).max_by_key(|ns| ns.len()) {
+                (ns.len(), false)
+            } else {
+                continue;
+            };
+            if rank > best_rank {
+                best_rank = rank;
+                best.clear();
+            }
+            if rank == best_rank && !best.contains(&entry.name) {
+                best.push(entry.name);
+            }
+        }
+        best
+    }
+}
+
 /// The unique resolved unknown gem whose namespace `constant_path`
 /// sits under, if any. Ambiguous prefixes must not pick lockfile order.
 pub fn gem_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Option<&'a str> {
@@ -1606,6 +1681,16 @@ pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path
 mod tests {
     use super::*;
 
+    /// rotp's façade only raises, so the gem is compiled from source; WebPush's
+    /// also raises in gem_facades.rb, but the Spinel tree ports it, and a
+    /// sourced gem would drop the port's stub slots with the façade.
+    #[test]
+    fn a_ported_namespace_is_not_a_stub_facade() {
+        let stubs = stub_facade_namespaces();
+        assert!(stubs.contains("ROTP"), "{stubs:?}");
+        assert!(!stubs.contains("WebPush"), "{stubs:?}");
+    }
+
     #[test]
     fn gemfile_requires_reads_each_spelling() {
         let found = gemfile_requires(
@@ -1670,6 +1755,31 @@ mod tests {
         assert_eq!(lock_gems_owning_constant(&lock, "OmniAuth::Strategies"), ["omniauth"]);
         assert_eq!(lock_gems_owning_constant(&lock, "Sentry"), ["sentry-rails", "sentry-ruby"]);
         assert!(lock_gems_owning_constant(&lock, "Devise").is_empty());
+    }
+
+    #[test]
+    fn lock_namespace_index_matches_the_ordered_scan() {
+        let mut names = vec!["caxlsx", "rubyzip", "sorbet-runtime", "net-http-persistent",
+            "polars-df", "ruby_llm", "svg-graph", "twilio-ruby", "sqlite3", "jwt", "zip_kit"];
+        names.extend(["rack", "rack-attack", "rack-cors", "rack_attack", "sentry-rails", "sentry-ruby",
+            "aws-sdk-s3", "a", "a-b", "a-b-c", "a_b", "A-b", "é", "é-b", "", "-", "--"]);
+        let mut paths = vec!["NotAGem".to_string(), "Rackette::Attack".into(), "::".into(), ":".into()];
+        for name in &names {
+            let nested = name.split('-').map(camelize).collect::<Vec<_>>().join("::");
+            for ns in std::iter::once(nested).chain(namespace_candidates(name)) {
+                paths.extend([ns.clone(), format!("::{ns}::Child"), ns.to_ascii_lowercase(),
+                    format!("{ns}ish"), format!("{ns}:Child"), format!("{ns}::")]);
+            }
+        }
+        let mut specs: Vec<_> = names.iter().map(|n| (n.to_string(), "1.0".to_string())).collect();
+        specs.push(("rack-attack".into(), "1.0-platform".into()));
+        for specs in [specs.clone(), specs.into_iter().rev().collect()] {
+            let lock = Lockfile { specs, ..Default::default() };
+            let index = LockGemIndex::new(&lock);
+            for path in &paths {
+                assert_eq!(index.owners(path), lock_gems_owning_constant(&lock, path), "{path:?}");
+            }
+        }
     }
 
     #[test]
@@ -1983,6 +2093,31 @@ pub(crate) fn spinel_runtime_constants() -> &'static crate::det::HashSet<String>
 pub(crate) fn ported_runtime_constants() -> &'static crate::det::HashSet<String> {
     static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
     NAMES.get_or_init(|| declared_runtime_constants(&["runtime/spinel", "runtime/ruby"]))
+}
+
+/// Top-level namespaces whose façade in `runtime/ruby/gem_facades.rb`
+/// answers a call by `GemFacade.fail!` (rotp's `ROTP`): the Spinel tree
+/// has no working body for them.
+pub(crate) fn stub_facade_namespaces() -> &'static crate::det::HashSet<String> {
+    static NAMES: std::sync::OnceLock<crate::det::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut out = crate::det::HashSet::default();
+        let Ok(text) = crate::runtime_files::read_to_string("runtime/ruby/gem_facades.rb") else { return out };
+        let mut current: Option<String> = None;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("module ").or_else(|| line.strip_prefix("class ")) {
+                let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                current = (!name.is_empty() && name != "GemFacade").then_some(name);
+            } else if line.contains("GemFacade.fail!")
+                && let Some(name) = &current
+            {
+                out.insert(name.clone());
+            }
+        }
+        // Not one the Spinel tree ports (`runtime/spinel/web_push.rb`): the sourced gem would drop the whole façade, and the port's stub slots with it.
+        out.retain(|name| !spinel_runtime_constants().contains(name));
+        out
+    })
 }
 
 fn declared_runtime_constants(dirs: &[&str]) -> crate::det::HashSet<String> {

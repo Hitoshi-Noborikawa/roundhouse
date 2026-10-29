@@ -342,6 +342,11 @@ RULES = [
 RELATIVE_TIME = /\A\s*(about |almost |over |less than |a |an )?(\d+|a|an) (second|minute|hour|day|week|month|year)s? ago\s*\z/i
 COUNTDOWN     = /\bin -?\d+ (second|minute|hour|day|week|month|year)s?\b/i
 ISO_TIMESTAMP = /\A\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/
+# The same instants inside markup a response carries as text (a comment
+# partial in a JS/Turbo body): `title=\"…\"`, `datetime=\"…\"`,
+# `data-at-unix=\"…\"`.
+EMBEDDED_TIME = /\b(title|datetime)=(\\?")(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}[^"\\]*)/
+EMBEDDED_UNIX = /\bdata-at-unix=(\\?")(\d+)/
 
 def normalize!(toks, counts, fold_known)
   toks.each do |t|
@@ -353,6 +358,11 @@ def normalize!(toks, counts, fold_known)
       elsif t.text =~ COUNTDOWN
         t.text = t.text.gsub(/\bin -?\d+ (second|minute|hour|day|week|month|year)/i, 'in N \1')
         counts["clock-countdown"] += 1
+      end
+      if t.text =~ EMBEDDED_TIME || t.text =~ EMBEDDED_UNIX
+        t.text = t.text.gsub(EMBEDDED_TIME) { "#{$1}=#{$2}#{$3.gsub(/\d/, "#")}" }
+                       .gsub(EMBEDDED_UNIX) { "data-at-unix=#{$1}#{$2.gsub(/\d/, "#")}" }
+        counts["timestamp-value"] += 1
       end
     when :open
       name_attr = t.attrs.assoc("name")&.last
@@ -366,6 +376,10 @@ def normalize!(toks, counts, fold_known)
         when "value"
           if name_attr == "authenticity_token"
             pair[1] = "«csrf»"; counts["csrf-token"] += 1
+          end
+        when "data-at-unix"
+          if v =~ /\A\d+\z/
+            pair[1] = v.gsub(/\d/, "#"); counts["timestamp-value"] += 1
           end
         when "title", "datetime"
           # Digits masked, punctuation kept: a wrong FORMAT (".595725" vs

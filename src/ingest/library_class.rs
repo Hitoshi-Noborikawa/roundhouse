@@ -2778,6 +2778,19 @@ fn walk_decl_body_with_visibility<'pr>(
             out.unknown_calls.push(ingest_expr(&stmt, file)?);
             continue;
         }
+        // `self.strict ||= :on`: a compound write through a class-side
+        // writer, captured like `self.strict = :on` below rather than
+        // dropped without a word.
+        let self_receiver = |r: Option<ruby_prism::Node<'_>>| r.is_some_and(|r| receiver_rooted_at_self(&r));
+        if stmt.as_call_or_write_node().is_some_and(|w| self_receiver(w.receiver()))
+            || stmt.as_call_and_write_node().is_some_and(|w| self_receiver(w.receiver()))
+            || stmt.as_call_operator_write_node().is_some_and(|w| self_receiver(w.receiver()))
+        {
+            if let Ok(e) = ingest_expr(&stmt, file) {
+                out.unknown_calls.push(e);
+            }
+            continue;
+        }
         // Retain native nil initialization in source order. Only a declared
         // cattr/mattr storage approximation may drop it, after the whole body
         // has been walked. Non-nil initializers remain outside this slice.
@@ -2884,11 +2897,23 @@ fn walk_decl_body_with_visibility<'pr>(
         // `class << self ... end` — singleton class block. Body
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
+            let own = mode == DeclBodyMode::Instance && sc.expression().as_self_node().is_some();
             let mode = DeclBodyMode::SingletonClass {
                 included_hook: mode == DeclBodyMode::Instance,
                 has_class_methods: mode == DeclBodyMode::Instance && has_class_methods,
             };
-            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, mode, visibility)?);
+            let mut inner = walk_decl_body_with_visibility(sc.body(), owner, file, mode, visibility)?;
+            // The class's own singleton: its statements run, and its
+            // constants live, there (`expr::SINGLETON_BODY`).
+            if own {
+                for call in &mut inner.unknown_calls {
+                    call.decisions |= crate::expr::SINGLETON_BODY;
+                }
+                for (_, value) in &mut inner.constants {
+                    value.decisions |= crate::expr::SINGLETON_BODY;
+                }
+            }
+            out.extend(inner);
             continue;
         }
         // `module ClassMethods … end` — ActiveSupport::Concern's OTHER
@@ -3359,6 +3384,16 @@ fn walk_decl_body_with_visibility<'pr>(
                 // reported as dropped rather than lost without a word. A
                 // call with a block is not one the replay carries whole
                 // (a require loop is the file program's).
+                if let Ok(e) = ingest_expr(&stmt, file) {
+                    out.unknown_calls.push(e);
+                }
+            } else if call.block().is_some_and(|b| b.as_block_node().is_some()) && !requires_files(&stmt) {
+                // A loop (`%w(month year).each do |m| class_eval … end`):
+                // Ruby runs it as the body loads. Captured for the Ruby
+                // family, which writes it back where it stands when what
+                // it runs on the class is Ruby's own (`body_statements`);
+                // reported where it is dropped. A loop of requires is the
+                // file program's.
                 if let Ok(e) = ingest_expr(&stmt, file) {
                     out.unknown_calls.push(e);
                 }
@@ -5825,4 +5860,23 @@ fn constant_write_unless_defined<'pr>(stmt: &ruby_prism::Node<'pr>) -> Option<ru
     let write = only.as_constant_write_node()?;
     let tested = unless.predicate().as_defined_node()?.value().as_constant_read_node()?;
     (tested.name().as_slice() == write.name().as_slice()).then_some(write)
+}
+
+/// Whether `stmt` calls `require`, `require_relative`, `load` or
+/// `autoload` anywhere in it: a loop that loads files.
+fn requires_files(stmt: &ruby_prism::Node<'_>) -> bool {
+    struct Requires(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Requires {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if node.receiver().is_none()
+                && matches!(constant_id_str(&node.name()), "require" | "require_relative" | "load" | "autoload")
+            {
+                self.0 = true;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let mut found = Requires(false);
+    ruby_prism::Visit::visit(&mut found, stmt);
+    found.0
 }

@@ -70,7 +70,7 @@
 //! against `COMMENTABLE_DAYS.days.ago`); views rejoin when the view
 //! pipeline migrates to shared lowerings.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
@@ -81,7 +81,9 @@ use crate::ty::Ty;
 /// hook owns (models, library classes, controllers, seeds — not views).
 pub fn apply_duration_lowering(app: &mut App) {
     let temporal_predicates = !app_defines_temporal_predicates(app);
-    super::for_each_hook_body(app, &mut |body| {
+    let duration_constants = named_duration_constants(app);
+    super::for_each_owned_hook_body(app, &mut |owner, body| {
+        type_duration_constants(body, owner, &duration_constants);
         apply_duration_rewrites(body, temporal_predicates)
     });
     // TEST BODIES TOO. `1.day.ago` is not a method on any target's
@@ -96,8 +98,54 @@ pub fn apply_duration_lowering(app: &mut App) {
     // runtime answers, rather than leaning on a CRuby overlay the
     // strict-target test lanes do not ship.
     super::for_each_test_body(app, &mut |body| {
+        type_duration_constants(body, None, &duration_constants);
         apply_duration_rewrites(body, temporal_predicates)
     });
+}
+
+fn named_duration_constants(app: &App) -> BTreeSet<Vec<Symbol>> {
+    let mut candidates = BTreeMap::new();
+    let mut record = |path: Vec<Symbol>, value: &Expr| {
+        let mut value = value.clone();
+        rewrite_durations(&mut value);
+        candidates.entry(path)
+            .and_modify(|duration| *duration = false)
+            .or_insert_with(|| is_duration_const_call(&value));
+    };
+    for class in app.library_classes.iter().chain(app.rails_application.iter()) {
+        for (name, value) in &class.constants {
+            let mut path: Vec<_> = class.name.0.as_str().split("::").map(Symbol::from).collect();
+            path.push(name.clone());
+            record(path, value);
+        }
+    }
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Assign { target: LValue::Const { path }, value } = &*expr.node else { continue };
+            let [name] = path.as_slice() else { continue };
+            let mut path: Vec<_> = model.name.0.as_str().split("::").map(Symbol::from).collect();
+            path.push(name.clone());
+            record(path, value);
+        }
+    }
+    candidates.into_iter().filter_map(|(path, duration)| duration.then_some(path)).collect()
+}
+
+fn type_duration_constants(expr: &mut Expr, owner: Option<&ClassId>, constants: &BTreeSet<Vec<Symbol>>) {
+    expr.node.for_each_child_mut(&mut |child| type_duration_constants(child, owner, constants));
+    let ExprNode::Const { path } = &*expr.node else { return };
+    let scoped = owner.map(|owner| {
+        let mut scoped: Vec<_> = owner.0.as_str().split("::").map(Symbol::from).collect();
+        scoped.extend(path.iter().cloned());
+        scoped
+    });
+    if constants.contains(path) || scoped.as_ref().is_some_and(|path| constants.contains(path)) {
+        expr.ty = Some(Ty::Class {
+            id: ClassId(Symbol::from("ActiveSupport::Duration")),
+            args: vec![].into(),
+        });
+    }
 }
 
 /// The pass order the view vestige must mirror
@@ -356,8 +404,11 @@ fn rewrite_time_duration_arith(expr: &mut Expr) {
         ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
             if args.len() == 1
                 && matches!(method.as_str(), "-" | "+")
-                && is_duration_const_call(&args[0])
+                && (is_duration_const_call(&args[0])
+                    || (is_typed_duration(&args[0])
+                        && recv.ty.as_ref().is_some_and(Ty::contains_time)))
                 && !is_duration_const_call(recv)
+                && !is_typed_duration(recv)
     );
     if !is_arith {
         return;
@@ -376,6 +427,11 @@ fn rewrite_time_duration_arith(expr: &mut Expr) {
         },
     );
     args[0].ty = Some(Ty::Int);
+}
+
+fn is_typed_duration(expr: &Expr) -> bool {
+    matches!(expr.ty.as_ref(), Some(Ty::Class { id, .. })
+        if id.0.as_str() == "ActiveSupport::Duration")
 }
 
 /// Move `side` out, leaving the empty-`Seq` placeholder this file uses

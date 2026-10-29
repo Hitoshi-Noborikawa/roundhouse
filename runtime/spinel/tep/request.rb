@@ -65,10 +65,12 @@ module Tep
       # and `Main.request_params` / `Main.nest_uploads` fold both into the
       # controller's params.
       @uploads      = {}
+      @upload_parts = []
     end
 
     attr_accessor :passed
     attr_accessor :uploads
+    attr_accessor :upload_parts
     def set_passed; @passed = true; end
 
     # Sinatra-compat read aliases removed in the vendored copy.
@@ -217,6 +219,7 @@ module Tep
         form.files.each do |k, v|
           @uploads[k] = v
         end
+        @upload_parts = form.file_parts
       elsif json? && @raw_body.length > 0
         # Rails answers a malformed body 400 before the action runs:
         # the params stay empty and `json_body_malformed` makes the

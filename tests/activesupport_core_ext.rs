@@ -187,6 +187,67 @@ fn index_with_returns_a_hash_and_durations_stay_typed() {
     assert!(matches!(&decimal.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "BigDecimal"), "{:?}", decimal.ty);
 }
 
+/// `ActiveSupport.truncate_words` (the grounded module function) and the
+/// CRuby overlay's `String#truncate_words` against Rails' own, over
+/// strings with leading, trailing, tab and newline whitespace, an empty
+/// string and one word, for several counts and a custom omission.
+#[test]
+fn string_truncate_words_matches_rails_814() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require "active_support"
+require "active_support/core_ext/string/filters"
+load ARGV.fetch(0)
+
+def assert(value, message)
+  raise message unless value
+end
+
+texts = [
+  "one two three four",
+  "one two",
+  "one",
+  "",
+  "  leading and trailing  ",
+  "tab\tseparated\twords here",
+  "line one\nline two\n\nline three",
+  "trailing space ",
+  "a b c d e f g h i j k l",
+]
+expected = []
+texts.each do |text|
+  [1, 2, 3, 10].each do |n|
+    [nil, " (more)"].each do |omission|
+      rails = omission ? text.truncate_words(n, omission: omission) : text.truncate_words(n)
+      runtime = ActiveSupport.truncate_words(text, n, omission)
+      assert(runtime == rails, "ActiveSupport.truncate_words(#{text.inspect}, #{n}, #{omission.inspect}) = #{runtime.inspect}, Rails #{rails.inspect}")
+      expected << [text, n, omission, rails]
+    end
+  end
+end
+
+load ARGV.fetch(1)
+expected.each do |text, n, omission, rails|
+  overlay = omission ? text.truncate_words(n, omission: omission) : text.truncate_words(n)
+  assert(overlay == rails, "overlay #{text.inspect}.truncate_words(#{n}, #{omission.inspect}) = #{overlay.inspect}, Rails #{rails.inspect}")
+end
+puts "String#truncate_words 8.1.4 contracts passed"
+"#;
+    let output = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .arg(root.join("runtime/ruby/active_support_ext.rb"))
+        .arg(root.join("runtime/spinel/scaffold/ruby_overlay/runtime/active_support_core_ext.rb"))
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("contracts passed"),
+        "Rails 8.1.4 String#truncate_words contract failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+}
+
 /// `ActiveSupport.truncate` (the grounded module function) and the CRuby
 /// overlay's `String#truncate` against Rails' own `String#truncate`, case
 /// by case: the documented examples, a separator that does not occur, an

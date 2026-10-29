@@ -362,7 +362,9 @@ module ActiveRecord
         next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range) || val.is_a?(Bounds)
         name = key.is_a?(Symbol) ? key.to_s : key.to_s
         next if name.include?(".")
-        @scope_attributes = @scope_attributes.merge({ name.to_sym => val })
+        # Not the record itself: the key was renamed to the foreign key at lower time (`where(story: s)` → `story_id`), so the column wants its id.
+        seed = val.is_a?(Base) ? val._primary_key_value : val
+        @scope_attributes = @scope_attributes.merge({ name.to_sym => seed })
       end
     end
 
@@ -1016,8 +1018,14 @@ module ActiveRecord
     # `on_stories_not_authored_by.above_average` — render one INNER JOIN,
     # where appending both made SQLite reject every column of the joined
     # table as ambiguous.
-    def joins(spec)
-      spawn.joins!(spec)
+    def joins(*specs)
+      spawn.joins_specs!("joins", specs)
+    end
+
+    def joins_specs!(method, specs)
+      raise ArgumentError, "The method .#{method}() must contain arguments." if specs.empty?
+      specs.each { |spec| joins!(spec) }
+      self
     end
 
     def joins!(spec)
@@ -1028,8 +1036,8 @@ module ActiveRecord
       self
     end
 
-    def left_outer_joins(spec)
-      spawn.joins!(spec)
+    def left_outer_joins(*specs)
+      spawn.joins_specs!("left_outer_joins", specs)
     end
 
     def join_fragment(spec)
@@ -1042,8 +1050,8 @@ module ActiveRecord
     end
 
     # `left_joins` — Rails alias for `left_outer_joins`.
-    def left_joins(spec)
-      left_outer_joins(spec)
+    def left_joins(*specs)
+      spawn.joins_specs!("left_joins", specs)
     end
 
     # `select(:id, :username, "raw AS x")` — the PROJECTION, and the
@@ -1257,6 +1265,11 @@ module ActiveRecord
     # The model class this relation queries — Rails' Relation#klass
     # (lobsters' Search switches on it to pick per-model joins).
     def klass
+      @model
+    end
+
+    # Rails' `alias model klass`; lobsters' moderator pages read the table name off whichever relation they filter.
+    def model
       @model
     end
 
@@ -3043,7 +3056,7 @@ module ActiveRecord
         ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
         if ids.empty?
           "1=0"
-        elsif ids.any? { |x| x.is_a?(Range) || x.is_a?(Bounds) }
+        elsif ids.any? { |x| x.nil? || x.is_a?(Range) || x.is_a?(Bounds) }
           array_with_ranges_predicate(qcol, ids)
         else
           "#{qcol} IN (#{escape_list(ids)})"
@@ -3097,10 +3110,10 @@ module ActiveRecord
       bind_literal(bound)
     end
 
-    # Rails' Array value holding a Range (`where(score: [3, 6..9])`):
-    # the scalars as one IN list, a `nil` as IS NULL, and each Range as
-    # its own comparison, ORed. An Array with no Range keeps the IN
-    # list above.
+    # Rails' Array value holding a Range or a nil (`where(score: [3,
+    # 6..9])`, `where(user_id: [1, nil])`): the scalars as one IN list, a
+    # `nil` as IS NULL, and each Range as its own comparison, ORed. An
+    # Array of scalars alone keeps the IN list above.
     def array_with_ranges_predicate(qcol, vals)
       scalars = []
       arms = []

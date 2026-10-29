@@ -467,6 +467,24 @@ fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
         || body_has_included_block(m.body())
         || body_has_constant_decl(m.body())
         || body_has_route_helpers_include(m.body())
+        || body_runs_module_code(m.body())
+}
+
+/// A module whose body runs one of Ruby's own `Module` methods on itself
+/// (`freeze`, `self.freeze`, `module_eval <<~RUBY … RUBY`): the module
+/// exists, and the Ruby family runs the statement as it loads
+/// (`body_statements`).
+fn body_runs_module_code(body: Option<Node<'_>>) -> bool {
+    let Some(body) = body else { return false };
+    flatten_statements(body).iter().any(|stmt| {
+        stmt.as_call_node().is_some_and(|call| {
+            call.receiver().is_none_or(|r| r.as_self_node().is_some())
+                && matches!(
+                    constant_id_str(&call.name()),
+                    "freeze" | "class_eval" | "module_eval" | "class_exec" | "module_exec"
+                )
+        })
+    })
 }
 
 /// A module whose whole content is the route-helper mixin — core's

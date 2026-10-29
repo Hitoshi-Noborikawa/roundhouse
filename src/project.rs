@@ -1171,6 +1171,10 @@ fn app_uses_date(app: &App) -> bool {
             || matches!(&*e.node, crate::expr::ExprNode::Const { path }
                 if (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty()))
                     && path.last().is_some_and(|name| matches!(name.as_str(), "Date" | "DateTime")))
+            || matches!(&*e.node, crate::expr::ExprNode::Const { path }
+                if (path.len() == 2 || (path.len() == 3 && path[0].as_str().is_empty()))
+                    && path[path.len() - 2].as_str() == "Date"
+                    && path[path.len() - 1].as_str() == "Error")
         {
             return true;
         }
@@ -1838,6 +1842,40 @@ fn report_model_attribute_defaults(app: &App, target: BuildTarget) {
 }
 
 
+// These readers are the ruby family's uri library's and Spinel's
+// packages/uri's, not methods supplied by strict runtimes.
+fn report_uri_reader_sends(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda) {
+        return;
+    }
+    fn has_unported_uri(ty: &crate::ty::Ty, app: &App, reader: &str) -> bool {
+        use crate::ty::Ty;
+        match ty {
+            // Reopening a URI class supplies only the readers the app defines.
+            Ty::Class { id, .. } => matches!(id.0.as_str(), "URI::Generic" | "URI::HTTP" | "URI::HTTPS")
+                && !crate::analyze::source_instance_method(app, id, reader),
+            Ty::Union { variants } => variants.iter().any(|ty| has_unported_uri(ty, app, reader)),
+            _ => false,
+        }
+    }
+    fn visit(expr: &crate::expr::Expr, app: &App, target: BuildTarget) {
+        use crate::expr::ExprNode;
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && matches!(method.as_str(), "scheme" | "host" | "port" | "path" | "query" | "fragment"
+                | "userinfo" | "user" | "password" | "to_s" | "request_uri")
+            && recv.ty.as_ref().is_some_and(|ty| has_unported_uri(ty, app, method.as_str()))
+        {
+            let owner = if method.as_str() == "request_uri" { "URI::HTTP" } else { "URI::Generic" };
+            emit::diagnostics::report_unsupported(
+                expr.span, target.as_str(), format!("{owner}#{}", method.as_str()),
+                "this target's URI runtime does not implement this reader",
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, app, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, app, target));
+}
+
 fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
         | BuildTarget::Spinel | BuildTarget::Roda) {
@@ -2066,11 +2104,12 @@ fn report_spinel_unknown_gem_constants(app: &App, target: BuildTarget) {
     }
     // The longest-matching gem across the whole lockfile, so `Rack::Utils` stays rack's while `Rack::MiniProfiler` is rack-mini-profiler's
     let ported = crate::gems::spinel_runtime_constants();
+    let ownership = crate::gems::LockGemIndex::new(lock);
     let owner = |path: &str| -> Option<String> {
         if ported.contains(path) {
             return None;
         }
-        let owners = crate::gems::lock_gems_owning_constant(lock, path);
+        let owners = ownership.owners(path);
         (!owners.is_empty() && owners.iter().all(|g| unknown.contains(g))).then(|| owners.join(", "))
     };
     let report = |span: crate::span::Span, path: &str, ns: &str| {
@@ -2468,7 +2507,7 @@ pub fn target_files(
             (crate::gems::native_extension_gem_namespaces(app), Default::default())
         };
         return crate::emit::ruby::with_external_gem_namespaces(&namespaces, includes, || {
-            target_files_inner(app, fixture, target)
+            crate::emit::ruby::expr::with_body_statements(|| target_files_inner(app, fixture, target))
         });
     }
     target_files_inner(app, fixture, target)
@@ -2693,6 +2732,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_uri_reader_sends(app, target);
     report_descendant_ivar_reads(app, target);
     report_url_helpers_includes(app, target);
     report_partial_binops(app, target);
@@ -2818,7 +2858,9 @@ fn target_files_inner(
         BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
             spinel_relation_model_handle(&mut files)?;
             widen_spinel_hash_config_arrays(&mut files);
-            spin_shape(files)
+            let mut files = spin_shape(files)?;
+            apply_spinel_int_overflow(&mut files, app);
+            Ok(files)
         }),
         // The ruby family gets the bundled-library requires too: the
         // table used to live inside `spin_shape` and so reached only
@@ -7436,7 +7478,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
     }
     let bundled = matches!(
         name,
-        "URI::HTTP" | "URI::HTTPS" | "URI::Error" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+        "URI::Generic" | "URI::HTTP" | "URI::HTTPS" | "URI::Error" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
         | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
@@ -8007,13 +8049,15 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // `controller_to_library`, which runs at emit time after this gate.
     // Survey a throwaway lower so lowers-added exception Consts (now
     // typed) are still ledgered on strict targets (Thomas 2B).
-    let lowered_controllers =
+    // The throwaway lower is the strict-target shape whatever `target` is; its own reports belong to the target's real lower, which runs at emit.
+    let (lowered_controllers, _) = emit::diagnostics::scope(|| {
         crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
             &app.controllers,
             Vec::new(),
             Some(&app.schema),
             &app.views,
-        );
+        )
+    });
     for class in &lowered_controllers {
         for method in &class.methods {
             visit(&method.body);
@@ -9859,8 +9903,9 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     let census = crate::gems::GemCensus::of(lock);
     // Not only the gem's conventional namespace spelled exactly: svg-graph's is `SVG::Graph`.
     let mut owned = crate::det::HashSet::default();
+    let ownership = crate::gems::LockGemIndex::new(lock);
     for_each_app_constant(app, &mut |_, path| {
-        owned.extend(crate::gems::lock_gems_owning_constant(lock, path).into_iter().map(str::to_string));
+        owned.extend(ownership.owners(path).into_iter().map(str::to_string));
     });
     let needed: Vec<_> = census
         .unknown()
@@ -11003,6 +11048,22 @@ fn apply_image_processor_wiring(files: &mut [(String, String)]) -> Result<bool, 
                 is not in the file set")?;
     stub.1 = real;
     Ok(true)
+}
+
+/// `roundhouse.yml`'s `spinel.int_overflow` on every compile the Makefile
+/// runs: the app binary through `spin build` (which passes what follows
+/// `--` to the compiler) or the raw compiler, and each test binary.
+fn apply_spinel_int_overflow(files: &mut [(String, String)], app: &App) {
+    let Some(mode) = app.spinel_int_overflow.as_deref() else { return };
+    let flag = format!("--int-overflow={mode}");
+    let Some((_, makefile)) = files.iter_mut().find(|(p, _)| p == "Makefile") else { return };
+    for (from, to) in [
+        ("\t$(SPIN) build\n".to_string(), format!("\t$(SPIN) build -- {flag}\n")),
+        ("\t$(SPINEL) main.rb $(RBS_FLAG) -o $@".to_string(), format!("\t$(SPINEL) main.rb $(RBS_FLAG) {flag} -o $@")),
+        ("$(SPINEL_TEST_FLAGS) $< -o $@".to_string(), format!("$(SPINEL_TEST_FLAGS) {flag} $< -o $@")),
+    ] {
+        *makefile = makefile.replace(&from, &to);
+    }
 }
 
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {

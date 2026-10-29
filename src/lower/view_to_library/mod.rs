@@ -661,7 +661,11 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // defaults. Body refs to a declared local (`tag`, `comment`) resolve
     // as that param, not a same-named helper (`ApplicationHelper.tag`);
     // callers bind provided keyword locals by name, omitted ones default.
-    if let Some(sl) = view.strict_locals.as_ref().filter(|_| is_partial) {
+    // Not the declared form local of a bound partial: its `f.*` calls inline at compile time, and a caller has no builder to pass.
+    let strict_without_form = view.strict_locals.as_ref().map(|sl| {
+        sl.iter().filter(|p| form_binding.is_none_or(|b| p.name.as_str() != b.form_local)).cloned().collect::<Vec<Param>>()
+    });
+    if let Some(sl) = strict_without_form.as_ref().filter(|sl| is_partial && !sl.is_empty()) {
         use crate::ty::{Param as TyParam, ParamKind, Ty};
         // The record is a positional param, so a reserved-word name
         // (`for:`) goes through `safe_local`, as its reads do. The
@@ -2682,6 +2686,7 @@ pub(crate) fn partial_call_contracts(
     // so `flash_locals` sees one handed name across def and callers.
     let (collection_locals, _) = collection_element_locals_from_views(views);
     let request_context = request_context_views(views);
+    let form_bindings = partial_form_bindings(views);
     let mut out = crate::det::HashMap::default();
     for view in views {
         let (dir, base) = split_view_name(view.name.as_str());
@@ -2692,9 +2697,14 @@ pub(crate) fn partial_call_contracts(
         let key = (camelize_path(&snake_case(dir)), stem.to_string());
         // Strict locals declare the whole contract: the first local is
         // the positional record, the rest are keywords.
-        if let Some(sl) = view.strict_locals.as_ref().filter(|sl| !sl.is_empty()) {
-            let declared: Vec<String> =
-                sl.iter().map(|p| p.name.as_str().to_string()).collect();
+        let form_local = form_bindings.get(&key).map(|b| b.form_local.as_str());
+        if let Some(sl) = view.strict_locals.as_ref().filter(|sl| sl.iter().any(|p| Some(p.name.as_str()) != form_local)) {
+            // Not the declared form local: the def drops it (`strict_without_form`), so a caller passing it would hand over an unknown keyword.
+            let declared: Vec<String> = sl
+                .iter()
+                .map(|p| p.name.as_str().to_string())
+                .filter(|n| Some(n.as_str()) != form_local)
+                .collect();
             let closure: Vec<String> = closures
                 .get(&key)
                 .map(|ivs| {
@@ -2908,12 +2918,13 @@ pub(crate) fn view_uses_dynamic_url_hash(body: &Expr) -> bool {
 }
 
 /// The views that need the request's controller, action and path
-/// parameters for a [`dynamic_url_hash`] URL: those linking to one, and
-/// those rendering a partial that does, so the values reach the partial.
+/// parameters for a [`dynamic_url_hash`] URL or a recalled route segment
+/// (`route_param_recall`): those reading one, and those rendering a
+/// partial that does, so the values reach the partial.
 pub(crate) fn request_context_views(views: &[View]) -> crate::det::HashSet<String> {
     let mut out: crate::det::HashSet<String> = views
         .iter()
-        .filter(|v| view_uses_dynamic_url_hash(&v.body))
+        .filter(|v| view_uses_dynamic_url_hash(&v.body) || view_uses_bare_name(&v.body, "path_parameters"))
         .map(|v| v.name.as_str().to_string())
         .collect();
     let pools = crate::det::HashMap::default();
@@ -3501,11 +3512,17 @@ pub(crate) fn dynamic_partial_pools(
 /// ivars to suppress, and which names it binds by keyword. Consumers
 /// skip index 0 (the positional record) when binding keywords.
 fn strict_locals_by_key(views: &[View]) -> crate::det::HashMap<ViewKey, Vec<Param>> {
+    let bindings = partial_form_bindings(views);
     let mut out = crate::det::HashMap::default();
     for v in views {
         let Some(sl) = v.strict_locals.as_ref() else { continue };
         let Some(key) = view_key_of(v) else { continue };
-        out.insert(key, sl.clone());
+        let form_local = bindings.get(&key).map(|b| b.form_local.as_str());
+        let declared: Vec<_> = sl.iter().filter(|p| Some(p.name.as_str()) != form_local).cloned().collect();
+        // Not an empty contract: the definition skips strict lowering for one, and a caller reading it as strict would bind nothing.
+        if !declared.is_empty() {
+            out.insert(key, declared);
+        }
     }
     out
 }

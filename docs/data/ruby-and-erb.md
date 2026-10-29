@@ -108,6 +108,38 @@ conditional ends in `else`. A model body's conditional definitions, a
 visibility marker inside a branch, and any other statement in one stay
 refused.
 
+### Body statements only Ruby answers
+
+A library class or module body may run code as it loads that defines
+no method the walk can read. The Ruby and JRuby trees write the
+following statements back where the source has them, among the class's methods (`ingest::body_statements`,
+`expr::BODY_STATEMENT`):
+
+- a loop over a literal that `class_eval`s a heredoc or
+  `define_method`s per element;
+- a call to one of Ruby's own `Module` methods (`freeze`,
+  `self.define_method`);
+- a write through a class-side writer the class or an app ancestor
+  defines (`self.require_name = true`, `self.strict ||= :on`);
+- such a write in a class that, itself or through an app ancestor,
+  includes an app module with an `included` hook, which may define the
+  writer at run time, when its superclasses are the app's own up to a
+  core class.
+
+Each statement must call nothing on the class but Ruby's own `Module`
+methods, `delegate` (the Ruby family's runtime defines it) and class
+methods the app defines. A module whose body is only such a call
+(`module BooleanType; freeze; end`) is declared for it.
+
+The class's own `class << self` keeps its scope there
+(`expr::SINGLETON_BODY`): its constants live on the singleton class,
+and the analyzer qualifies a read of one to `X.singleton_class::NAME`.
+A statement in it runs inside a `class << self` when the class is a
+module, or a class whose superclasses are the app's own up to a core
+class. Spinel and the other targets keep the constants on the class.
+They drop the statements and report each one by name, as they report
+any other dropped class-body call.
+
 ## ERB → Ruby → IR
 
 ### Why compile to Ruby?

@@ -228,14 +228,14 @@ fn the_hash_valued_key_is_carried() {
     );
 }
 
-/// `attributes=` takes the Symbol-keyed attribute hash, not a params
-/// object — and this is the site that proves it, since nothing else in
-/// lobsters assigns a params object through `attributes=`.
+/// `attributes=` with a params object reaches the model's typed
+/// `assign_from_<class>` (no runtime defines `attributes=`), the
+/// `.except(…)` filter still applied to the record it is handed.
 #[test]
-fn attributes_assignment_converts_to_an_attribute_hash() {
+fn attributes_assignment_reaches_the_typed_assign() {
     let c = emitted("app/controllers/stories_controller.rb");
     assert!(
-        c.contains("@story.attributes = self.story_params.except(:url).to_attrs"),
-        "`to_attrs` goes outside the `.except(…)` filter:\n{c}"
+        c.contains("@story.assign_from_story_params(self.story_params.except(:url))"),
+        "the record, filtered, goes to the typed assign:\n{c}"
     );
 }

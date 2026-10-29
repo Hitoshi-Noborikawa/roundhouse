@@ -130,6 +130,10 @@ mod class_attribute;
 mod string_truncate;
 #[path = "emit_and_run/string_truncate.rs"]
 mod string_truncate_runs;
+#[path = "support/string_truncate_words.rs"]
+mod string_truncate_words;
+#[path = "emit_and_run/string_truncate_words.rs"]
+mod string_truncate_words_runs;
 #[path = "support/array_excluding.rs"]
 mod array_excluding;
 #[path = "emit_and_run/array_excluding.rs"]
@@ -20091,6 +20095,9 @@ mod hash_ivar_symbol_keys;
 #[path = "emit_and_run/date_time_package.rs"]
 mod date_time_package;
 
+#[path = "emit_and_run/date_error.rs"]
+mod date_error;
+
 #[path = "emit_and_run/data_point_shapes.rs"]
 mod data_point_shapes;
 
@@ -20102,3 +20109,27 @@ mod helper_param_after_views;
 
 #[path = "emit_and_run/layout_ivar_unset.rs"]
 mod layout_ivar_unset;
+
+#[path = "emit_and_run/stub_facade_source_gem.rs"]
+mod stub_facade_source_gem;
+
+#[path = "emit_and_run/helper_render_partial.rs"]
+mod helper_render_partial;
+
+#[path = "emit_and_run/where_record_seed_redirect_back.rs"]
+mod where_record_seed_redirect_back;
+
+#[path = "emit_and_run/joins_several_associations.rs"]
+mod joins_several_associations;
+
+#[path = "emit_and_run/chained_find_by_association_key.rs"]
+mod chained_find_by_association_key;
+
+#[path = "emit_and_run/bare_save_without_validation.rs"]
+mod bare_save_without_validation;
+
+#[path = "emit_and_run/route_param_recall.rs"]
+mod route_param_recall;
+
+#[path = "emit_and_run/params_write_assign.rs"]
+mod params_write_assign;

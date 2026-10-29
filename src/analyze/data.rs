@@ -1,12 +1,12 @@
-//! Class identities for literal Data.define constants on source library classes,
-//! and for library classes that a file-level Data.define creates.
+//! Class identities for literal Data.define constants on source library classes
+//! and models, and for library classes that a file-level Data.define creates.
 
 use crate::det::{HashMap, HashSet};
 
 use crate::App;
 use crate::diagnostic::Diagnostic;
-use crate::dialect::LibraryClassOrigin;
-use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
+use crate::dialect::{LibraryClassOrigin, ModelBodyItem};
+use crate::expr::{Expr, ExprNode, Literal, LValue, RESOLVED_DATA_FACTORY};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -84,6 +84,18 @@ pub(super) fn register(
     for class in &app.library_classes {
         for (name, value) in &class.constants {
             register(&class.name, name, value);
+        }
+    }
+    // Model assignments are absent from the library constant table.
+    // Qualified writes can name another owner, so keep them out of this path.
+    for model in &app.models {
+        for item in &model.body {
+            if let ModelBodyItem::Unknown { expr, .. } = item
+                && let ExprNode::Assign { target: LValue::Const { path }, value } = &*expr.node
+                && let [name] = path.as_slice()
+            {
+                register(&model.name, name, value);
+            }
         }
     }
     // A file-level `X = Data.define(…)` is already a library class of

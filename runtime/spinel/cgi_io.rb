@@ -71,7 +71,7 @@ module CgiIo
         body = stdin.read(length).to_s
         form = ActionDispatch::Http::Multipart.parse(body, ctype)
         form.fields.each { |k, v| assign_form_pair(body_params, k, v) }
-        form.files.each { |k, v| assign_form_pair(body_params, k, v) }
+        form.file_parts.each { |part| assign_form_pair(body_params, part.name, part.file) }
       elsif length > 0 && ctype.start_with?("application/json")
         # `@rails/request.js` with `contentType: "application/json"`
         # (campfire's link unfurl): Rails parses the object into params,
@@ -280,7 +280,13 @@ module CgiIo
     # of calls land here (every escape-free path segment, query key/val,
     # and cookie name) — returning the input as-is is byte-identical to
     # the scan below for `%`/`+`-free strings, at zero allocation.
-    return s unless s.include?("%") || s.include?("+")
+    # Not the input as-is: a request body is read as binary, and Rails hands every decoded param over as UTF-8 (commonmarker refuses ASCII-8BIT).
+    unless s.include?("%") || s.include?("+")
+      return s if s.encoding == Encoding::UTF_8
+      utf8 = s.dup.force_encoding(Encoding::UTF_8)
+      # Not retagged when the bytes are not UTF-8: a cookie name so tagged would raise at `to_sym`.
+      return utf8.valid_encoding? ? utf8 : s
+    end
     # Scan by byte: getbyte returns an Integer, so literal bytes cost no
     # per-character String allocation (the old `s[i]` allocated one for
     # every character, the dominant cost when decoding the ~124-char

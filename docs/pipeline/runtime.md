@@ -3296,6 +3296,22 @@ Rails with the gem installed and no `SENTRY_DSN` also transmits
 nothing, so the *delivery* half of this is not a divergence for an
 unconfigured deployment; the lost detail is.
 
+### rack-mini-profiler authorizes a request, and no profiler runs
+
+`Rack::MiniProfiler.authorize_request`, `deauthorize_request` and
+`request_authorized?` are the gem's own three bodies, a flag on
+`Thread.current`, in `runtime/ruby/gem_facades.rb` on the Spinel tree;
+the CRuby tree loads the real gem. lobsters authorizes every moderator's
+request, and without the constant each of their pages was a 500.
+
+**The middleware is not on either tree.** Nothing times the request,
+records its SQL, injects the panel into the page or serves
+`/mini-profiler-resources`. An authorized page is the page Rails renders
+minus the profiler's `<script>`, and the `__profilin` cookie is never
+set. The flame graph and memory views need CRuby internals and have no
+Spinel counterpart; request, SQL and render timing could be built on
+the runtime's own call sites.
+
 ### `ActionText::ContentHelper.allowed_attributes` answers the list, not `nil`
 
 Rails declares it `mattr_accessor(:allowed_attributes)` with no default
