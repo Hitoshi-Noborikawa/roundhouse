@@ -1088,20 +1088,32 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str), ("to_str", Ty::Str), ("inspect", Ty::Str),
         ("hash", Ty::Int), ("==", Ty::Bool), ("eql?", Ty::Bool),
     ]);
-    // `URI.parse` returns a URI object we don't model; `Untyped` lets
-    // chained `.scheme` / `.host` flow gradually instead of erroring.
+    // `URI.parse` can return scheme-specific classes beyond HTTP/HTTPS;
+    // keep it gradual while class guards recover the readers below.
     register_stdlib_class(classes, "URI", &[
         ("parse", Ty::Untyped), ("join", Ty::Untyped),
         ("escape", Ty::Str), ("unescape", Ty::Str),
         ("encode_www_form", Ty::Str), ("decode_www_form", Ty::Untyped),
     ], &[]);
-    // A class test such as `URI.parse(url).is_a?(URI::HTTP)` names the
-    // real bundled class, without claiming any extra instance methods.
     for parser in ["URI::RFC2396_Parser", "URI::RFC3986_Parser"] {
         register_stdlib_class(classes, parser, &[], &[("escape", Ty::Str), ("unescape", Ty::Str)]);
     }
-    register_stdlib_class(classes, "URI::HTTP", &[], &[]);
+    // A guard narrows the gradual parse result to this ancestry. Every
+    // component can be nil: relative/opaque URIs omit components, and
+    // public writers can clear even HTTP's default port and path.
+    let uri_string = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    register_stdlib_class(classes, "URI::Generic", &[], &[
+        ("scheme", uri_string()), ("host", uri_string()),
+        ("port", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+        ("path", uri_string()), ("query", uri_string()), ("fragment", uri_string()),
+        ("userinfo", uri_string()), ("user", uri_string()), ("password", uri_string()),
+        ("to_s", Ty::Str),
+    ]);
+    register_stdlib_class(classes, "URI::HTTP", &[], &[("request_uri", uri_string())]);
     register_stdlib_class(classes, "URI::HTTPS", &[], &[]);
+    for (owner, parent) in [("URI::HTTP", "URI::Generic"), ("URI::HTTPS", "URI::HTTP")] {
+        classes.entry(ClassId(Symbol::from(owner))).or_default().parent = Some(ClassId(Symbol::from(parent)));
+    }
     // `res.is_a?(Net::HTTPSuccess)` — lobsters' Github; spinel's
     // `packages/net` defines the same response family.
     for response in ["Net::HTTPRedirection", "Net::HTTPOK", "Net::HTTPSuccess"] {
@@ -1168,7 +1180,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // send special-cases (`body/send.rs`) — catalog entries would win
     // before those cases and kill unit-aware `clock_gettime` (Float for
     // `:millisecond`). Nested *namespace* Consts (`Process::CLOCK_*`)
-    // stay empty ClassIds the way `URI::HTTP` is. Value Consts
+    // stay empty ClassIds. Value Consts
     // (`IO::NULL` / `File::NULL`) are typed Strings via CORE_RBS — do
     // not also register them here or the ClassId fallback disagrees.
     // Instance methods on an `IO` handle still belong here. `winsize` /

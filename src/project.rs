@@ -1838,6 +1838,40 @@ fn report_model_attribute_defaults(app: &App, target: BuildTarget) {
 }
 
 
+// These readers are the ruby family's uri library's and Spinel's
+// packages/uri's, not methods supplied by strict runtimes.
+fn report_uri_reader_sends(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda) {
+        return;
+    }
+    fn has_unported_uri(ty: &crate::ty::Ty, app: &App, reader: &str) -> bool {
+        use crate::ty::Ty;
+        match ty {
+            // Reopening a URI class supplies only the readers the app defines.
+            Ty::Class { id, .. } => matches!(id.0.as_str(), "URI::Generic" | "URI::HTTP" | "URI::HTTPS")
+                && !crate::analyze::source_instance_method(app, id, reader),
+            Ty::Union { variants } => variants.iter().any(|ty| has_unported_uri(ty, app, reader)),
+            _ => false,
+        }
+    }
+    fn visit(expr: &crate::expr::Expr, app: &App, target: BuildTarget) {
+        use crate::expr::ExprNode;
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && matches!(method.as_str(), "scheme" | "host" | "port" | "path" | "query" | "fragment"
+                | "userinfo" | "user" | "password" | "to_s" | "request_uri")
+            && recv.ty.as_ref().is_some_and(|ty| has_unported_uri(ty, app, method.as_str()))
+        {
+            let owner = if method.as_str() == "request_uri" { "URI::HTTP" } else { "URI::Generic" };
+            emit::diagnostics::report_unsupported(
+                expr.span, target.as_str(), format!("{owner}#{}", method.as_str()),
+                "this target's URI runtime does not implement this reader",
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, app, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, app, target));
+}
+
 fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
         | BuildTarget::Spinel | BuildTarget::Roda) {
@@ -2694,6 +2728,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_uri_reader_sends(app, target);
     report_descendant_ivar_reads(app, target);
     report_url_helpers_includes(app, target);
     report_partial_binops(app, target);
@@ -7439,7 +7474,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
     }
     let bundled = matches!(
         name,
-        "URI::HTTP" | "URI::HTTPS" | "URI::Error" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+        "URI::Generic" | "URI::HTTP" | "URI::HTTPS" | "URI::Error" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
         | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
