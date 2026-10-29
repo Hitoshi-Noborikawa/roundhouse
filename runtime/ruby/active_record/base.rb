@@ -918,7 +918,8 @@ module ActiveRecord
       if was_new
         before_create
         fill_timestamps(true) if stamps_timestamps?
-        self.id = _adapter_insert
+        inserted_key = _adapter_insert
+        self.id = inserted_key unless self.class.primary_key.nil?
         @persisted = true
         __track_saved_changes(was_new)
         after_create

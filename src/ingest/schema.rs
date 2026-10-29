@@ -255,6 +255,23 @@ fn apply_migration_verb(
         });
     }
 
+    // Key changes cancel the evidence for a plain id:false table; they
+    // do not infer new constraints with adapter-specific semantics.
+    let changes_key = match verb {
+        "add_primary_key" | "remove_primary_key" => true,
+        "add_column" | "change_column" | "remove_column" | "remove_columns" | "rename_column" => {
+            args.iter().skip(1).any(|arg| {
+                name_value(arg).is_some_and(|name| name == "id" || name == "primary_key")
+            }) || kwarg_value(args.iter(), "primary_key").is_some()
+        }
+        _ => false,
+    };
+    if changes_key {
+        if let Some(table) = arg_name(0).and_then(|name| schema.tables.get_mut(&Symbol::from(name))) {
+            table.known_keyless = false;
+        }
+    }
+
     match verb {
         "create_table" => {
             let mut gaps: Vec<IngestError> = Vec::new();
@@ -919,6 +936,10 @@ fn table_from_create_table(
         }
     }
 
+    let table_options: Vec<_> = args.arguments().iter().skip(1).collect();
+    let mut known_keyless = !has_id
+        && !has_column_option_splats(&table_options)
+        && kwarg_value(table_options.iter(), "primary_key").is_none();
     let mut columns = Vec::new();
     let mut indexes: Vec<Index> = Vec::new();
     if has_id {
@@ -982,6 +1003,18 @@ fn table_from_create_table(
                 for stmt in flatten_statements(body) {
                     if let Some(call) = stmt.as_call_node() {
                         let call_name = constant_id_str(&call.name()).to_string();
+                        if call_name != "index" {
+                            let column_args: Vec<_> = call.arguments()
+                                .map(|args| args.arguments().iter().collect()).unwrap_or_default();
+                            if call_name == "primary_key"
+                                || column_args.iter().any(|arg| {
+                                    name_value(arg).is_some_and(|name| name == "id" || name == "primary_key")
+                                })
+                                || kwarg_value(column_args.iter(), "primary_key").is_some()
+                            {
+                                known_keyless = false;
+                            }
+                        }
                         if call_name == "index" {
                             match index_from_call(&call, &table_name, file) {
                                 Ok(Some(idx)) => indexes.push(idx),
@@ -1015,6 +1048,7 @@ fn table_from_create_table(
         indexes,
         foreign_keys: vec![],
         virtual_module: None,
+        known_keyless,
     };
     let invalid_generated = crate::schema::generated::validate_table_with_dialect(&table, dialect);
     for (column, reason) in &invalid_generated {
@@ -1080,6 +1114,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             indexes: vec![],
             foreign_keys: vec![],
             virtual_module: Some(crate::schema::VirtualModule { module, args: module_args }),
+            known_keyless: false,
         },
     ))
 }
@@ -1121,6 +1156,7 @@ fn view_from_create_view(
             indexes: vec![],
             foreign_keys: vec![],
             virtual_module: None,
+            known_keyless: false,
         },
     ))
 }

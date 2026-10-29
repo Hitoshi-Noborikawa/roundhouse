@@ -436,6 +436,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // and would get a `create` calling an absent `new`.
             if model_names.contains(lc.name.0.as_str()) {
                 materialize_inherited(&mut lc, &base_methods);
+                crate::lower::model_to_library::primary_key_guard::fold(&mut lc.methods);
                 // Pick up per-model dual methods (the synthesized `update`,
                 // dual by tail-call propagation to `save`) for the
                 // controller field-receiver call sites (`if @article.update`).

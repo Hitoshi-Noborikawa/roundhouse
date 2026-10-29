@@ -22,6 +22,7 @@
 //! that haven't migrated.
 
 mod adapter_emit;
+pub(crate) mod primary_key_guard;
 pub(crate) mod accessor_surface;
 pub(crate) mod schema;
 pub use schema::col_storage_name;
