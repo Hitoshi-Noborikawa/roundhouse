@@ -7704,6 +7704,22 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 );
             }
         }
+        // Spinel reads `x::CONST` through one of several classes, but not every
+        // explicit Module query on such a value (`const_get` raises there and
+        // `const_defined?` answers false), so it refuses them all.
+        if target == "spinel"
+            && expr.decisions & crate::expr::MODULE_QUERY != 0
+            && expr.decisions & crate::expr::CONST_PATH == 0
+            && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && matches!(recv.ty, Some(crate::ty::Ty::Union { .. }))
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "Module protocol",
+                format!("`{}` on one of several classes, which the spinel emit does not answer", method.as_str()),
+            );
+        }
         // Spinel matches this exception by its rescue name, but does not
         // expose its class as a constant. Keep the value guard below while
         // permitting the supported literal rescue clause, including ::JSON.

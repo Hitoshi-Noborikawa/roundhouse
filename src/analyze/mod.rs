@@ -5532,8 +5532,10 @@ impl Analyzer {
     /// the module's bodies call on implicit `self`, that the module
     /// does not define, and that EVERY includer resolves to the same
     /// type. Includers that disagree, or one that lacks the method,
-    /// leave the call as it was. Runs after the concern fold, so an
-    /// includer's surface already carries its other concerns' methods.
+    /// leave the call as it was, except that answers which are each a
+    /// class object lend their union, which a Module query reads. Runs
+    /// after the concern fold, so an includer's surface already carries
+    /// its other concerns' methods.
     fn fold_host_surfaces(&mut self, app: &App) {
         let modules: BTreeSet<&ClassId> =
             app.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
@@ -5587,14 +5589,21 @@ impl Analyzer {
                     {
                         continue; // the module's own answer
                     }
-                    let mut answers = hosts.iter().map(|h| {
+                    let answers: Vec<_> = hosts.iter().map(|h| {
                         self.classes.get(h).and_then(|c| c.instance_methods.get(&name))
-                    });
-                    let Some(Some(first)) = answers.next() else { continue };
-                    if first.is_unknown() || !answers.all(|a| a == Some(first)) {
+                    }).collect();
+                    let Some(Some(first)) = answers.first() else { continue };
+                    if first.is_unknown() {
                         continue;
                     }
-                    agreed.push((name, first.clone()));
+                    if answers.iter().all(|a| *a == Some(*first)) {
+                        agreed.push((name, (*first).clone()));
+                    } else if let Some(classes) = class_object_union(&answers) {
+                        // Each includer answers its own class (a hook such as
+                        // `def shape = Circle`): the call is one of those
+                        // class objects, which a Module query reads.
+                        agreed.push((name, classes));
+                    }
                 }
             }
             let cls = self.classes.entry(lc.name.clone()).or_default();
@@ -7930,6 +7939,29 @@ fn singleton_of(ty: Option<&Ty>) -> Option<&Ty> {
         Some(Ty::Class { id, args }) if id.0.as_str() == "Class" && args.len() == 1 => Some(&args[0]),
         _ => None,
     }
+}
+
+/// The union of answers that are each a class object (`Class[C]` or a
+/// union of them), or None when any answer is missing or not one.
+fn class_object_union(answers: &[Option<&Ty>]) -> Option<Ty> {
+    let mut classes: Vec<Ty> = Vec::new();
+    for answer in answers {
+        let variants = match (*answer)? {
+            Ty::Union { variants } => variants.iter().cloned().collect(),
+            ty => vec![ty.clone()],
+        };
+        for ty in variants {
+            singleton_of(Some(&ty))?;
+            if !classes.contains(&ty) {
+                classes.push(ty);
+            }
+        }
+    }
+    Ty::canonicalize_variants(&mut classes);
+    Some(match classes.len() {
+        1 => classes.pop().unwrap(),
+        _ => Ty::Union { variants: classes.into() },
+    })
 }
 
 // Recorded flat, a class object argument would type its parameter as an instance of that class.
