@@ -7538,6 +7538,76 @@ end
         .assert_passes();
 }
 
+/// A class method `ApplicationRecord` defines runs on a subclass's relation,
+/// as Rails' scoping runs it: a relation-returning one filters that
+/// relation, and one that maps `pluck` rows to indifferent hashes answers
+/// that Array (not a relation of the hash class), so `first[:title]` reads
+/// a hash. Called on the subclass directly, it queries the subclass. A
+/// model's own class method after `where(...)` runs on that relation too,
+/// rather than on the rows the chain would otherwise be folded into. An
+/// inherited `scope` chains on a subclass relation, and an inherited class
+/// method runs on an association of the subclass.
+#[test]
+fn an_inherited_class_method_runs_on_a_subclass_relation() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/application_record.rb",
+            "  primary_abstract_class\n",
+            "  primary_abstract_class\n\n  scope :newest_first, -> { order(id: :desc) }\n\n  def self.id_list\n    pluck(:id)\n  end\n\n  def self.titled\n    where.not(title: \"Quiet\")\n  end\n\n  def self.hash_titles\n    pluck(:id, :title).map { |id, title| { id: id, title: title }.with_indifferent_access }\n  end\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  def self.titled_count\n    order(:id).titled.to_a.size\n  end\n\n  def self.first_hash_title\n    order(:id).hash_titles.first[:title]\n  end\n\n  def self.hash_title_ids\n    all.hash_titles.map { |h| h[\"id\"] }\n  end\n\n  def self.direct_count\n    titled.count\n  end\n\n  def self.title_list\n    pluck(:title)\n  end\n\n  def self.where_titles\n    where(title: \"One\").title_list\n  end\n\n  def self.newest_title\n    where.not(title: nil).newest_first.first.title\n  end\n\n  def comment_ids\n    comments.id_list\n  end\n",
+        )
+        .run_ruby(
+            r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
+b = Article.create!(title: "Quiet", body: "A sufficiently long body.")
+raise Article.titled_count.inspect unless Article.titled_count == 1
+raise Article.direct_count.inspect unless Article.direct_count == 1
+raise Article.first_hash_title.inspect unless Article.first_hash_title == "One"
+raise Article.hash_title_ids.inspect unless Article.hash_title_ids.sort == [a.id, b.id].sort
+raise Article.where_titles.inspect unless Article.where_titles == ["One"]
+raise Article.newest_title.inspect unless Article.newest_title == "Quiet"
+c = Comment.create!(article: a, commenter: "Reader", body: "Comment body")
+raise a.comment_ids.inspect unless a.comment_ids == [c.id]"#,
+        )
+        .assert_passes();
+}
+
+/// The nearest definition wins across the model hierarchy: a subclass
+/// scope shadows an ancestor's class method on an association, and a
+/// subclass class method shadows an ancestor's scope on a relation.
+#[test]
+fn a_subclass_definition_shadows_an_ancestor_of_the_same_name() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/application_record.rb",
+            "  primary_abstract_class\n",
+            "  primary_abstract_class\n\n  scope :ordered, -> { order(id: :desc) }\n\n  def self.picked(value)\n    where(id: value)\n  end\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  def self.ordered\n    \"own\"\n  end\n\n  def self.picked_titles(value)\n    where.not(title: nil).picked(value).map(&:title)\n  end\n\n  def picked_commenters\n    comments.picked.map(&:commenter)\n  end\n",
+        )
+        .edit(
+            "app/models/comment.rb",
+            "  belongs_to :article\n",
+            "  belongs_to :article\n\n  scope :picked, -> { where(commenter: \"Reader\") }\n",
+        )
+        .run_ruby(
+            r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
+Article.create!(title: "Two", body: "A sufficiently long body.")
+raise Article.where.not(title: nil).ordered.inspect unless Article.where.not(title: nil).ordered == "own"
+raise Article.picked_titles(a.id).inspect unless Article.picked_titles(a.id) == ["One"]
+Comment.create!(article: a, commenter: "Reader", body: "Comment body")
+Comment.create!(article: a, commenter: "Other", body: "Comment body")
+raise a.picked_commenters.inspect unless a.picked_commenters == ["Reader"]"#,
+        )
+        .assert_passes();
+}
+
 /// `ActiveSupport::HashWithIndifferentAccess` reads and writes a Symbol
 /// key as its String, nested hashes included, and its conversions
 /// (`merge`, `reverse_merge`, `dup`, `to_hash`, `symbolize_keys`) answer

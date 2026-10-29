@@ -420,6 +420,25 @@ pub(crate) fn lower_models_inner_with_ruby_values(
         classes.insert(id, info);
     }
 
+    // A model class method chained on `all` / `where(...)` runs on that
+    // relation (Rails' scoping; the relation delegates it, see
+    // `emit_relation_scope_delegates`), so the chain under it is not
+    // folded into an Array. Only where a runtime Relation exists to
+    // carry it; elsewhere the fold stands.
+    let relation_class_methods: HashSet<Symbol> = if runtime_relation == RuntimeRelation::Present {
+        models
+            .iter()
+            .flat_map(|m| m.body.iter())
+            .filter_map(|item| match item {
+                crate::ModelBodyItem::Method { method, .. } if method.receiver == crate::dialect::MethodReceiver::Class => {
+                    Some(method.name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        HashSet::default()
+    };
     let mut out = Vec::new();
     for (mut methods, _, table, model) in all_methods {
         for method in &mut methods {
@@ -443,7 +462,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             if !unfold {
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
-                    &HashSet::default(),
+                    &relation_class_methods,
                     crate::lower::arel::SqliteVisitor { param_binds },
                 );
             }
