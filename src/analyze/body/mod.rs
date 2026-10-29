@@ -3214,11 +3214,16 @@ impl<'a> BodyTyper<'a> {
                                 for (name, ty) in widened {
                                     retype.local_bindings.insert(name, ty);
                                 }
+                                let first = match &*exprs[i].node {
+                                    ExprNode::Assign { target: LValue::Var { .. }, value } => value.ty.clone(),
+                                    _ => None,
+                                };
                                 last = self.analyze_expr(&mut exprs[i], &retype);
                                 // Not the binding the first typing exported: `values = xs.map { … prev … }` now answers the widened element.
+                                // Not over a refinement either: an accumulator scan may already have narrowed the binding past the first typing.
                                 if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*exprs[i].node {
                                     if let Some(ty) = value.ty.clone().filter(|t| !t.is_open()) {
-                                        if !nil_seed.contains_key(name) {
+                                        if !nil_seed.contains_key(name) && local_ctx.local_bindings.get(name) == first.as_ref() {
                                             local_ctx.local_bindings.insert(name.clone(), ty);
                                         }
                                     }
