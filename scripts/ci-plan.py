@@ -492,6 +492,9 @@ def native_coverage(path):
         suites.add(focused[1])
     if path == "tests/support/db_concurrency_spinel.rb":
         suites.add("db_sqlite_concurrency")
+    # The fixture app beside its harness selects the same suite.
+    if path.startswith("tests/find_or_create_bang_records/"):
+        suites.add("find_or_create_bang_records")
     if (
         path in GENERATED_COLUMNS_SPINEL_INPUTS
         or path.startswith("tests/support/generated_columns_")
