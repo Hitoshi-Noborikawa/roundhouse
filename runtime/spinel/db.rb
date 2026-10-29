@@ -126,6 +126,16 @@ module SQL
   ffi_func :sqlite3_column_int,        [:ptr, :int],                          :int
   ffi_func :sqlite3_column_double,     [:ptr, :int],                          :double
   ffi_func :sqlite3_column_text,       [:ptr, :int],                          :str
+  # Not `:str` for a BLOB: it stops at the first NUL and answers a UTF-8 String, where the sqlite3 gem answers every byte as ASCII-8BIT.
+  ffi_source <<~C
+    #include <sqlite3.h>
+    const char *rh_sqlite3_column_blob(void *stmt, int i) {
+      const void *p = sqlite3_column_blob((sqlite3_stmt *)stmt, i);
+      sp_ffi_bin_len = sqlite3_column_bytes((sqlite3_stmt *)stmt, i);
+      return p ? (const char *)p : "";
+    }
+  C
+  ffi_func :rh_sqlite3_column_blob,    [:ptr, :int],                          :binstr
   ffi_func :sqlite3_column_count,      [:ptr],                                :int
   ffi_func :sqlite3_column_name,       [:ptr, :int],                          :str
   ffi_func :sqlite3_errmsg,            [:ptr],                                :str
@@ -316,8 +326,8 @@ class QcEntry
   end
 
   # Copy the current row of a real stmt, every column, by storage class:
-  # 0 NULL, 1 INTEGER, 2 REAL, 3 TEXT (BLOB reads as text, as
-  # Db.column_value does).
+  # 0 NULL, 1 INTEGER, 2 REAL, 3 TEXT (a BLOB is kept as its binary
+  # String, as Db.column_value answers it).
   def record_row(stmt)
     i = 0
     while i < @ncols
@@ -341,7 +351,7 @@ class QcEntry
         @kinds.push(3)
         @ints.push(0)
         @floats.push(0.0)
-        v = SQL.sqlite3_column_text(stmt, i)
+        v = Db.cell_text(stmt, i)
         @texts.push(v.nil? ? "" : v)
       end
       i += 1
@@ -2252,8 +2262,13 @@ module Db
       return current_conn.qc_text(stmt, i) if p.nil?
       stmt = p
     end
-    s = SQL.sqlite3_column_text(stmt, i)
+    s = Db.cell_text(stmt, i)
     s.nil? ? "" : s
+  end
+
+  def self.cell_text(stmt, i)
+    return SQL.rh_sqlite3_column_blob(stmt, i) if SQL.sqlite3_column_type(stmt, i) == SQL::BLOB_TYPE
+    SQL.sqlite3_column_text(stmt, i)
   end
 
   # Raw typed column read — the driver's native value, the same contract
@@ -2307,7 +2322,7 @@ module Db
       # "builds the result String by strlen"), so nothing here reaches
       # sqlite's buffer after the call. The `+ ""` this used to carry
       # was a second copy of every text cell of every row.
-      SQL.sqlite3_column_text(stmt, i)
+      Db.cell_text(stmt, i)
     end
   end
 
@@ -2359,7 +2374,7 @@ module Db
       end
       stmt = p
     end
-    SQL.sqlite3_column_text(stmt, i)
+    Db.cell_text(stmt, i)
   end
 
   def self.column_bool_opt(stmt, i)
