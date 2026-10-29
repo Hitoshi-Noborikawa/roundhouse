@@ -74,6 +74,8 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "faraday/retry",
     "retryable",
     "jwt",
+    // Not the gem's entry file: it loads the Railtie whenever `Rails::VERSION` is defined, which this tree's is, with no `Rails::Railtie` under it.
+    "mini_profiler",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -91,7 +93,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 22] = [
+    const RUNTIME_GEMS: [(Marker, &str); 23] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -209,6 +211,10 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // refused on the strict targets (`lower::ruby_family_gems`).
         (Marker::Constant("Retryable"), "retryable"),
         (Marker::Constant("JWT"), "jwt"),
+        // lobsters' `Rack::MiniProfiler.authorize_request` for every
+        // moderator: the real gem on this lane, the gate alone in
+        // gem_facades.rb on spinel.
+        (Marker::Constant("Rack::MiniProfiler"), "rack-mini-profiler"),
     ];
     &RUNTIME_GEMS
 }
