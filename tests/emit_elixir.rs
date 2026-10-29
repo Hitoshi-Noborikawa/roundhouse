@@ -97,3 +97,31 @@ fn routes_table_lists_routes() {
         "got:\n{content}"
     );
 }
+
+#[test]
+fn save_primary_key_guards_are_folded_before_functionalization() {
+    let mut app = roundhouse::App::default();
+    app.schema = roundhouse::ingest::ingest_schema(
+        b"ActiveRecord::Schema.define do\n  create_table :widgets do |t|\n    t.integer :value\n  end\n  create_table :taggings, id: false do |t|\n    t.integer :tag_id\n  end\nend\n",
+        "db/schema.rb",
+    ).unwrap();
+    for name in ["Widget", "Tagging"] {
+        let source = format!("class {name} < ActiveRecord::Base\nend\n");
+        app.models.push(roundhouse::ingest::ingest_model(
+            source.as_bytes(), &format!("app/models/{}.rb", name.to_lowercase()),
+            &app.schema, &Default::default(),
+        ).unwrap().unwrap());
+    }
+    let files = elixir::emit(&app);
+    for (file, keyed) in [("lib/widget.ex", true), ("lib/tagging.ex", false)] {
+        let source = find(&files, file);
+        let save = source.split("  def save_after_validation(record) do\n").nth(1).expect("save body")
+            .split("\n  def ").next().unwrap();
+        assert!(!save.contains("is_nil(primary_key())"), "{file}: {save}");
+        assert_eq!(save.matches("_adapter_insert(record)").count(), 1, "{file}: {save}");
+        assert_eq!(save.contains("id: inserted_key"), keyed, "{file}: {save}");
+        if !keyed {
+            assert!(!save.contains("inserted_key"), "unused binding: {save}");
+        }
+    }
+}
