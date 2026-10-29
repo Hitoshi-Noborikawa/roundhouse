@@ -759,7 +759,15 @@ impl<'a> BodyTyper<'a> {
         };
         expr.ty = Some(ty.clone());
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
-        if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
+        if self.is_class_object(expr, ctx) {
+            expr.decisions |= crate::expr::CLASS_OBJECT_VALUE;
+            let runtime_class = matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "singleton_class")
+                || (matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "new")
+                    && !self.class_factories.is_some_and(|factories| factories.contains_key(&expr.span)));
+            if runtime_class {
+                expr.decisions |= crate::expr::RUNTIME_CLASS_OBJECT;
+            }
+        }
         diagnostic::detect_diagnostic(expr);
         ty
     }
@@ -959,6 +967,40 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
+    fn class_factory_receiver(&self, receiver: &Expr, method: &Symbol, ctx: &Ctx) -> bool {
+        if method.as_str() != "new" { return false; }
+        let ExprNode::Const { path } = &*receiver.node else { return false };
+        let names: Vec<_> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+        let [name @ ("Class" | "Module")] = names.as_slice() else { return false };
+        self.is_class_object(receiver, ctx)
+            && self.const_resolver.as_ref().is_none_or(|r| r.is_runtime_class(receiver.span, path, name))
+            && !self.owns_operator(receiver.ty.as_ref(), method, true)
+            && !self.owns_operator(receiver.ty.as_ref(), &Symbol::from("initialize"), false)
+    }
+
+    fn has_singleton_class(&self, ty: Option<&Ty>, class_object: bool, method: &Symbol) -> bool {
+        let instance = matches!(ty, Some(Ty::Class { id, .. })
+            if self.classes().contains_key(id)
+                && !matches!(id.0.as_str(), "Integer" | "Float" | "Symbol" | "Rational" | "Complex" | "NilClass" | "TrueClass" | "FalseClass")
+                && self.has_kernel(id));
+        (class_object || instance) && !self.owns_operator(ty, method, class_object)
+    }
+
+    // BasicObject instances do not answer Kernel#singleton_class unless
+    // their ancestry includes Kernel. An unknown parent proves neither.
+    fn has_kernel(&self, id: &ClassId) -> bool {
+        let mut current = Some(id);
+        for _ in 0..32 {
+            let Some(id) = current else { return true };
+            if id.0.as_str() == "Object" { return true; }
+            let Some(class) = self.classes.get(id) else { return false };
+            if class.includes.iter().any(|id| id.0.as_str() == "Kernel") { return true; }
+            if id.0.as_str() == "BasicObject" { return false; }
+            current = class.parent.as_ref();
+        }
+        false
+    }
+
     /// Identity evidence for Module protocol, independent of nominal instance type.
     fn is_class_object(&self, expr: &Expr, ctx: &Ctx) -> bool {
         if self.class_factories.is_some_and(|factories| factories.contains_key(&expr.span)) {
@@ -1002,21 +1044,16 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Send { recv: Some(r), method, args, block: None, .. }
                 if method.as_str() == "singleton_class" && args.is_empty() =>
             {
-                let class_object = self.is_class_object(r, ctx);
-                let instance = matches!(r.ty.as_ref(), Some(Ty::Class { id, .. })
-                    if self.classes().contains_key(id)
-                        && !matches!(id.0.as_str(), "Integer" | "Float" | "Symbol" | "Rational" | "Complex" | "NilClass" | "TrueClass" | "FalseClass"));
-                (class_object || instance) && !self.owns_operator(r.ty.as_ref(), method, class_object)
+                self.has_singleton_class(r.ty.as_ref(), self.is_class_object(r, ctx), method)
+            }
+            ExprNode::Send { recv: None, method, args, block: None, .. }
+                if method.as_str() == "singleton_class" && args.is_empty() =>
+            {
+                self.has_singleton_class(ctx.self_ty.as_ref(), ctx.class_side, method)
             }
             // `Module.new` / `Class.new(Parent)` answer a fresh module or
             // class, unless the app overrides `new` on them.
-            ExprNode::Send { recv: Some(r), method, .. }
-                if method.as_str() == "new"
-                    && matches!(&*r.node, ExprNode::Const { path } if matches!(path.as_slice(), [n] if matches!(n.as_str(), "Module" | "Class")))
-                    && self.is_class_object(r, ctx) =>
-            {
-                !self.owns_operator(r.ty.as_ref(), method, true)
-            }
+            ExprNode::Send { recv: Some(r), method, .. } => self.class_factory_receiver(r, method, ctx),
             _ => false,
         }
     }
@@ -1954,6 +1991,18 @@ impl<'a> BodyTyper<'a> {
                         detail: format!("{owner}.new lacks a shared runtime constructor implementation"),
                     }));
                 }
+                // A self known only as some class or module (a `Class.new`
+                // block, a singleton class): what its `new` builds has no name.
+                if ctx.class_side
+                    && matches!(method.as_str(), "new" | "allocate")
+                    && recv.as_ref().map_or(true, |r| matches!(&*r.node, ExprNode::SelfRef))
+                    && matches!(&recv_ty, Some(Ty::Class { id, args: targs }) if targs.is_empty() && matches!(id.0.as_str(), "Class" | "Module"))
+                {
+                    for a in args.iter_mut() {
+                        self.analyze_expr(a, ctx);
+                    }
+                    return Ty::Untyped;
+                }
                 // `new` on the implicit or explicit `self` of a class-side
                 // method builds an instance of the class that RECEIVED the
                 // call: `CurrencyDb.load` runs `YamlDb.load` with `self ==
@@ -2018,7 +2067,11 @@ impl<'a> BodyTyper<'a> {
                         class_object_receiver,
                         b,
                     );
-                    if matches!(method.as_str(), "instance_eval" | "instance_exec" | "class_eval" | "class_exec" | "module_eval" | "module_exec") {
+                    if matches!(method.as_str(), "instance_eval" | "instance_exec" | "class_eval" | "class_exec" | "module_eval" | "module_exec")
+                        && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver)
+                        && !(matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "Class" | "Module"))
+                            && self.owns_operator(recv_ty.as_ref(), method, false))
+                    {
                         if let Some(receiver) = recv.as_ref() {
                             block_ctx.self_ty = recv_ty.clone();
                             block_ctx.class_side = self.is_class_object(receiver, ctx);
@@ -2028,11 +2081,24 @@ impl<'a> BodyTyper<'a> {
                     }
                     *self.block_selector_param.borrow_mut() = self.iterated_selectors(recv.as_ref(), method, b);
                     // Not any `new` with a block: only `Class.new`/`Module.new` makes the block's self a class it is building
-                    if method.as_str() == "new"
-                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path }
-                            if matches!(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().as_slice(), ["Class"] | ["Module"])))
+                    if recv.as_ref().is_some_and(|r| self.class_factory_receiver(r, method, ctx))
                     {
+                        expr.decisions |= crate::expr::RUNTIME_CLASS_OBJECT;
+                        block_ctx.self_ty = recv_ty.clone();
+                        block_ctx.class_side = true;
+                        block_ctx.instance_body = false;
                         block_ctx.building_self = true;
+                    }
+                    // A method installed on that fresh class runs on its
+                    // instances, not on the class that evaluated the factory.
+                    if ctx.building_self && class_object_receiver && method.as_str() == "define_method"
+                        && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "Class" | "Module"))
+                        && !self.owns_operator(recv_ty.as_ref(), method, true)
+                    {
+                        block_ctx.self_ty = Some(Ty::Untyped);
+                        block_ctx.class_side = false;
+                        block_ctx.instance_body = true;
+                        block_ctx.building_self = false;
                     }
                     let method_ref_ty = self.analyze_expr(b, &block_ctx);
                     self.block_selector_param.borrow_mut().take();
@@ -2530,7 +2596,9 @@ impl<'a> BodyTyper<'a> {
                     return dispatched;
                 }
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
-                    && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
+                    && (recv.is_some() || (ctx.self_ty.is_some() && (send::is_module_protocol(method)
+                        || (method.as_str() == "singleton_class"
+                            && self.has_singleton_class(ctx.self_ty.as_ref(), ctx.class_side, method)))))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let class_object = class_object_receiver
                         || (send::is_module_query(method) && recv.as_ref().is_some_and(|r| self.answers_module_queries(r, recv_ty.as_ref(), ctx)));
