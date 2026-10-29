@@ -627,6 +627,7 @@ fn model_class(model: &Model, mut methods: Vec<MethodDef>, table: Option<&Table>
             }
             constants
         },
+        conditional_definitions: Vec::new(),
         unknown_calls: replayed_class_body(model),
         class_ivar_initializers: collect_class_attr_initializers(model),
     }

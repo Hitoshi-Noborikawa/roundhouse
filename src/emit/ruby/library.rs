@@ -7784,6 +7784,7 @@ fn synthesize_module_lc(
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     }
@@ -8496,7 +8497,52 @@ fn emit_library_class_decl_inner(
             }
         }
     };
+    // A method a load-time conditional defines is written inside it: the
+    // first of its members writes the whole statement where it stands,
+    // each branch's methods in that branch, and the others are skipped.
+    let written_conditionals: std::cell::RefCell<Vec<usize>> = Default::default();
+    let render_conditional = |s: &mut String, m: &MethodDef| -> bool {
+        let Some(index) = lc.conditional_definitions.iter().position(|c| c.contains(m)) else { return false };
+        if written_conditionals.borrow().contains(&index) {
+            return true;
+        }
+        written_conditionals.borrow_mut().push(index);
+        fn write(s: &mut String, conditional: &crate::dialect::ConditionalDefinitions, lc: &LibraryClass, pad: &str) {
+            let inner = format!("{pad}  ");
+            for (i, arm) in conditional.arms.iter().enumerate() {
+                match (&arm.condition, i) {
+                    (Some(cond), 0) => {
+                        let keyword = if conditional.negated { "unless" } else { "if" };
+                        writeln!(s, "{pad}{keyword} {}", super::emit_expr(cond)).unwrap();
+                    }
+                    (Some(cond), _) => writeln!(s, "{pad}elsif {}", super::emit_expr(cond)).unwrap(),
+                    (None, _) => writeln!(s, "{pad}else").unwrap(),
+                }
+                // The branch's methods and nested conditionals, in source order.
+                let mut parts: Vec<(u32, Result<&MethodDef, &crate::dialect::ConditionalDefinitions>)> = Vec::new();
+                for member in &arm.methods {
+                    if let Some(method) = lc.methods.iter().find(|m| member.is(m)) {
+                        parts.push((member.name_span.start, Ok(method)));
+                    }
+                }
+                parts.extend(arm.nested.iter().map(|n| (n.span.start, Err(n))));
+                parts.sort_by_key(|(start, _)| *start);
+                for (_, part) in parts {
+                    match part {
+                        Ok(method) => render_library_method(s, method, &inner),
+                        Err(nested) => write(s, nested, lc, &inner),
+                    }
+                }
+            }
+            writeln!(s, "{pad}end").unwrap();
+        }
+        write(s, &lc.conditional_definitions[index], lc, &body_pad);
+        true
+    };
     let render_method = |s: &mut String, m: &MethodDef| {
+        if render_conditional(s, m) {
+            return;
+        }
         if data_block {
             let mut m = m.clone();
             m.body = top_level(&m.body);

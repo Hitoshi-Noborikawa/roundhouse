@@ -31,6 +31,18 @@ pub(super) struct Visibility {
     carrier: bool,
     /// The declaring class's path, which `def Owner.name` spells for `def self.name`.
     owner: Option<String>,
+    /// Each def in a load-time conditional's branch: its statement offset
+    /// to (the conditional's offset, the branch index). Two definitions
+    /// of a name in different branches of one conditional are
+    /// alternatives, not a redefinition.
+    alternatives: HashMap<usize, (usize, usize)>,
+    /// A load-time conditional's offset to its branch count, when it ends
+    /// in `else` (some branch always runs).
+    exhaustive: HashMap<usize, usize>,
+    /// Load-time conditional definitions are admitted: a library class or
+    /// module body, whose emit writes the conditional. A model body's is
+    /// not, and stays refused.
+    conditionals: bool,
 }
 
 impl Visibility {
@@ -40,6 +52,71 @@ impl Visibility {
         let written = constant_id_str(&read.name());
         owner == written || owner.ends_with(&format!("::{written}"))
     }
+}
+
+/// A class-body `if` (with its `elsif`s and `else`) or `unless` (with
+/// its `else`), not a ternary or modifier, whose branches hold only
+/// method definitions (`def`, or `private def` and the other inline
+/// markers), at least one: `(unless, [(condition, statements)])`, the
+/// `else` branch with no condition. Ruby runs it when the body loads, and
+/// only the selected branch defines its methods.
+pub(super) fn conditional_definition<'pr>(node: &Node<'pr>) -> Option<(bool, Vec<(Option<Node<'pr>>, Vec<Node<'pr>>)>)> {
+    // Declares nothing in the emitted app (`if defined?(Rails::Console)`).
+    if console_only(node) {
+        return None;
+    }
+    let body = |statements: Option<ruby_prism::StatementsNode<'pr>>| -> Vec<Node<'pr>> {
+        statements.map(|s| flatten_statements(s.as_node())).unwrap_or_default()
+    };
+    let mut arms = Vec::new();
+    let negated;
+    if let Some(branch) = node.as_if_node() {
+        // Not a ternary, nor a modifier (`def x = 1 if y`): no `end`.
+        branch.if_keyword_loc()?;
+        branch.end_keyword_loc()?;
+        negated = false;
+        arms.push((Some(branch.predicate()), body(branch.statements())));
+        let mut next = branch.subsequent();
+        while let Some(sub) = next {
+            if let Some(elsif) = sub.as_if_node() {
+                arms.push((Some(elsif.predicate()), body(elsif.statements())));
+                next = elsif.subsequent();
+            } else if let Some(other) = sub.as_else_node() {
+                arms.push((None, body(other.statements())));
+                next = None;
+            } else {
+                return None;
+            }
+        }
+    } else if let Some(branch) = node.as_unless_node() {
+        branch.end_keyword_loc()?;
+        negated = true;
+        arms.push((Some(branch.predicate()), body(branch.statements())));
+        if let Some(other) = branch.else_clause() {
+            arms.push((None, body(other.statements())));
+        }
+    } else {
+        return None;
+    }
+    let defines = arms.iter().any(|(_, stmts)| !stmts.is_empty());
+    let only_defs = arms.iter().all(|(_, stmts)| {
+        stmts.iter().all(|stmt| definition(stmt).is_some() || conditional_accessor(stmt).is_some() || conditional_definition(stmt).is_some())
+    });
+    (defines && only_defs).then_some((negated, arms))
+}
+
+/// A bare `attr_reader` / `attr_writer` / `attr_accessor` of literal
+/// names. In a load-time conditional's branch it defines its methods
+/// only when the branch runs, as a `def` there does (activemerchant
+/// 1.137.0's `Connection` has `attr_accessor :min_version` under `if
+/// Net::HTTP.instance_methods.include?(:min_version=)`).
+pub(super) fn conditional_accessor<'pr>(stmt: &Node<'pr>) -> Option<CallNode<'pr>> {
+    let call = stmt.as_call_node()?;
+    (call.receiver().is_none()
+        && call.block().is_none()
+        && matches!(constant_id_str(&call.name()), "attr_reader" | "attr_writer" | "attr_accessor")
+        && call.arguments().is_some_and(|args| args.arguments().iter().all(|arg| symbol_or_string_value(&arg).is_some())))
+    .then_some(call)
 }
 
 pub(super) fn marker(call: &CallNode<'_>) -> bool {
@@ -239,6 +316,27 @@ impl Visibility {
         Self::resolve_owned(body, file, module_owner, None)
     }
 
+    /// [`Self::resolve_owned`] for a library class or module body, whose
+    /// load-time conditional definitions are admitted
+    /// (`conditional_definition`).
+    pub(super) fn resolve_library(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+        owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
+        let out = Self::resolve_carrying_inherited_with(body, file, module_owner, owner, true)?;
+        match out.inherited.first() {
+            Some((_, name, _)) => Err(Self::undefined(file, name)),
+            None => Ok(out),
+        }
+    }
+
+    /// Whether this body's load-time conditional definitions are admitted.
+    pub(super) fn admits_conditionals(&self) -> bool {
+        self.conditionals
+    }
+
     pub(super) fn resolve_owned(
         body: Option<&Node<'_>>,
         file: &str,
@@ -266,7 +364,17 @@ impl Visibility {
         module_owner: Option<&ClassId>,
         owner: Option<&ClassId>,
     ) -> IngestResult<Self> {
-        let mut out = Self { owner: owner.map(|o| o.0.to_string()), ..Self::default() };
+        Self::resolve_carrying_inherited_with(body, file, module_owner, owner, false)
+    }
+
+    fn resolve_carrying_inherited_with(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+        owner: Option<&ClassId>,
+        conditionals: bool,
+    ) -> IngestResult<Self> {
+        let mut out = Self { owner: owner.map(|o| o.0.to_string()), conditionals, ..Self::default() };
         if let Some(body) = body {
             let Some(statements) = body.as_statements_node() else {
                 return Err(Self::unsupported(
@@ -356,7 +464,10 @@ impl Visibility {
         file: &str,
     ) -> IngestResult<()> {
         let key = (class_side, name.clone());
-        if let Some(previous) = self.known.get(&key) {
+        let alternative = |a: usize, b: usize| {
+            matches!((self.alternatives.get(&a), self.alternatives.get(&b)), (Some((sa, ba)), Some((sb, bb))) if sa == sb && ba != bb)
+        };
+        if let Some(previous) = self.known.get(&key).filter(|previous| !previous.iter().all(|p| alternative(*p, offset))) {
             // A repeated ordinary constructor has the same implicit
             // visibility on every definition. Keep the pre-existing duplicate
             // bodies so semantic consumers (e.g. Alba's evidence gate) can
@@ -396,6 +507,28 @@ impl Visibility {
             self.inherited.push((class_side, name, statement));
             return Ok(());
         };
+        // Every definition in a different branch of one conditional: the
+        // change applies to whichever branch ran.
+        // Only when every branch defines it and some branch always runs:
+        // otherwise Ruby raises NameError here when the branch that
+        // defines it did not.
+        if positions.iter().any(|p| self.alternatives.contains_key(p)) {
+            let statement = self.alternatives.get(&positions[0]).map(|(s, _)| *s);
+            let same = positions.iter().all(|p| self.alternatives.get(p).map(|(s, _)| *s) == statement);
+            let branches: HashSet<usize> = positions.iter().filter_map(|p| self.alternatives.get(p).map(|(_, b)| *b)).collect();
+            let covered = statement.and_then(|s| self.exhaustive.get(&s)).is_some_and(|n| branches.len() == *n && branches.len() == positions.len());
+            if !same || !covered {
+                return Err(Self::unsupported(file, "conditional or dynamic visibility declarations are not modeled"));
+            }
+        }
+        let alternatives = positions.len() > 1 && positions.iter().all(|p| self.alternatives.contains_key(p));
+        if alternatives {
+            for position in positions.clone() {
+                self.values.insert((position, name.clone()), visibility);
+            }
+            self.changed.insert(key);
+            return Ok(());
+        }
         let [position] = positions.as_slice() else {
             return Err(Self::unsupported(
                 file,
@@ -404,6 +537,65 @@ impl Visibility {
         };
         self.values.insert((*position, name), visibility);
         self.changed.insert(key);
+        Ok(())
+    }
+
+    /// A load-time conditional's definitions (and those of the
+    /// conditionals nested in its branches): each takes the visibility in
+    /// effect at the statement, or its inline marker's, and the defs in
+    /// different branches of one conditional are alternatives.
+    fn walk_conditional(&mut self, statement: &Node<'_>, class_side: bool, default: MethodVisibility, file: &str) -> IngestResult<()> {
+        let offset = statement.location().start_offset();
+        let Some((_, arms)) = conditional_definition(statement) else { return Ok(()) };
+        if arms.last().is_some_and(|(condition, _)| condition.is_none()) {
+            self.exhaustive.insert(offset, arms.len());
+        }
+        for (index, (_, stmts)) in arms.iter().enumerate() {
+            for stmt in stmts {
+                let at = stmt.location().start_offset();
+                self.defaults.insert(at, default);
+                if conditional_definition(stmt).is_some() {
+                    self.walk_conditional(stmt, class_side, default, file)?;
+                    continue;
+                }
+                if let Some(call) = conditional_accessor(stmt) {
+                    let kw = constant_id_str(&call.name());
+                    for arg in call.arguments().into_iter().flat_map(|a| a.arguments().iter()) {
+                        let Some(name) = symbol_or_string_value(&arg) else { continue };
+                        self.alternatives.insert(at, (offset, index));
+                        if kw != "attr_writer" {
+                            self.define(at, name.clone(), class_side, default, file)?;
+                        }
+                        if kw != "attr_reader" {
+                            self.define(at, format!("{name}="), class_side, default, file)?;
+                        }
+                    }
+                    continue;
+                }
+                let Some(def) = definition(stmt) else { continue };
+                let inline = stmt.as_call_node().filter(marker).map(|call| match constant_id_str(&call.name()) {
+                    "public" | "public_class_method" => MethodVisibility::Public,
+                    "protected" => MethodVisibility::Protected,
+                    _ => MethodVisibility::Private,
+                });
+                if def.receiver().is_some_and(|r| r.as_self_node().is_none() && !self.names_owner(&r)) || (class_side && def.receiver().is_some()) {
+                    return Err(Self::unsupported(file, "visibility of a definition on a foreign receiver is not modeled"));
+                }
+                let name = constant_id_str(&def.name()).to_string();
+                let side = class_side || def.receiver().is_some();
+                let visibility = inline.unwrap_or_else(|| {
+                    if !side && PRIVATE_HOOKS.contains(&name.as_str()) {
+                        MethodVisibility::Private
+                    } else if def.receiver().is_some() {
+                        MethodVisibility::Public
+                    } else {
+                        default
+                    }
+                });
+                self.alternatives.insert(at, (offset, index));
+                self.define(at, name, side, visibility, file)?;
+            }
+        }
         Ok(())
     }
 
@@ -592,6 +784,12 @@ impl Visibility {
         for statement in flatten_statements(body) {
             let offset = statement.location().start_offset();
             self.defaults.insert(offset, default);
+            // A load-time conditional's definitions take the visibility in
+            // effect at the statement, or their inline marker's.
+            if self.conditionals && conditional_definition(&statement).is_some() {
+                self.walk_conditional(&statement, class_side, default, file)?;
+                continue;
+            }
             let def = definition(&statement);
             let node = &statement;
             let mut inline = None;

@@ -1507,6 +1507,7 @@ end
                 nullable_columns: Vec::new(),
                 origin: None,
                 constants,
+                conditional_definitions: Vec::new(),
                 unknown_calls: Vec::new(),
                 class_ivar_initializers: Vec::new(),
             });
@@ -1531,6 +1532,7 @@ end
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            conditional_definitions: Vec::new(),
             unknown_calls: Vec::new(),
             class_ivar_initializers: Vec::new(),
         });
@@ -10159,6 +10161,7 @@ fn lift_read_framework_settings<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut 
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     });

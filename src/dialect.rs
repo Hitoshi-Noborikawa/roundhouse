@@ -1160,6 +1160,10 @@ pub struct LibraryClass {
     /// does), so these replay ahead of the method definitions. That
     /// makes position-sensitive markers unsafe to capture — see the
     /// visibility deny-list at the ingest site.
+    /// Class-body `if` / `unless` statements whose branches define
+    /// methods. See [`ConditionalDefinitions`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_definitions: Vec<ConditionalDefinitions>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unknown_calls: Vec<Expr>,
 }
@@ -2433,4 +2437,81 @@ pub fn enum_mapping_reads_label(m: &[(String, crate::expr::Literal)]) -> bool {
 /// The label an enum mapping gives a NULL column (`unknown: nil`), if any.
 pub fn enum_nil_label(m: &[(String, crate::expr::Literal)]) -> Option<&str> {
     m.iter().find(|(_, v)| matches!(v, crate::expr::Literal::Nil)).map(|(l, _)| l.as_str())
+}
+
+/// A class-body (or `class << self`) `if` / `elsif` / `else` or `unless`
+/// / `else` whose branches hold only method definitions:
+///
+/// ```ruby
+/// class << self
+///   if Rails.env.test?
+///     def diagnostic_sampling = "test"
+///   else
+///     def diagnostic_sampling = "other"
+///   end
+/// end
+/// ```
+///
+/// Ruby evaluates the condition when the body runs, at load time, and
+/// only the selected branch defines its methods. Every branch's methods
+/// are ordinary entries of `LibraryClass::methods`, so analysis types
+/// each of them; this record says which branch each belongs to. The Ruby
+/// family writes the conditional around them, where its first member
+/// stands, so the selected branch defines the method as in the source.
+/// Other targets refuse the class by name: they would define every
+/// branch's methods, the last one winning.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConditionalDefinitions {
+    /// The whole `if` / `unless` statement.
+    pub span: Span,
+    /// `unless`: the first branch runs when its condition is falsy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub negated: bool,
+    /// The branches in source order: `if`, each `elsif`, then `else`
+    /// (no condition). A branch that defines nothing is kept, so the
+    /// emitted conditional selects what the source selects.
+    pub arms: Vec<ConditionalArm>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConditionalArm {
+    /// `None` for the `else` branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Expr>,
+    /// The `methods` entries this branch defines, by identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<ConditionalMember>,
+    /// The load-time conditionals nested in this branch, which Ruby
+    /// evaluates only when the branch runs; written inside it, ordered by
+    /// their start among the branch's methods.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested: Vec<ConditionalDefinitions>,
+}
+
+/// One method a [`ConditionalArm`] defines: its name, side and the span
+/// of its name in the `def` header, which tells it from another branch's
+/// definition of the same name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConditionalMember {
+    pub name: Symbol,
+    pub receiver: MethodReceiver,
+    pub name_span: Span,
+}
+
+impl ConditionalMember {
+    pub fn of(method: &MethodDef) -> Self {
+        Self { name: method.name.clone(), receiver: method.receiver, name_span: method.name_span }
+    }
+
+    pub fn is(&self, method: &MethodDef) -> bool {
+        self.name == method.name && self.receiver == method.receiver && self.name_span == method.name_span
+    }
+}
+
+impl ConditionalDefinitions {
+    /// Whether a branch of this statement, or of a conditional nested in
+    /// one, defines `method`.
+    pub fn contains(&self, method: &MethodDef) -> bool {
+        self.arms.iter().any(|arm| arm.methods.iter().any(|m| m.is(method)) || arm.nested.iter().any(|n| n.contains(method)))
+    }
 }

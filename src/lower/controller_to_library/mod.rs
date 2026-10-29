@@ -624,6 +624,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             nullable_columns: Vec::new(),
             origin: None,
             constants: collect_class_constants(controller),
+            conditional_definitions: Vec::new(),
             unknown_calls: collect_delegate_calls(controller),
             class_ivar_initializers: collect_class_ivar_initializers(controller),
         };
@@ -707,6 +708,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         nullable_columns: Vec::new(),
         origin: None,
         constants: collect_class_constants(controller),
+        conditional_definitions: Vec::new(),
         unknown_calls: collect_delegate_calls(controller),
         class_ivar_initializers: collect_class_ivar_initializers(controller),
     };

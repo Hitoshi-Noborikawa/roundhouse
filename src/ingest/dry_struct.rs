@@ -332,6 +332,7 @@ fn expand_nested(
                 nullable_columns: Vec::new(),
                 origin: None,
                 constants: Vec::new(),
+                conditional_definitions: Vec::new(),
                 unknown_calls,
                 class_ivar_initializers: Vec::new(),
             });

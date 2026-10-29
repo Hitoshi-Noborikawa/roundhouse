@@ -2536,6 +2536,9 @@ fn target_files_inner(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    if !matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        refuse_conditional_definitions(app, target);
+    }
     let without_auto_sources;
     let app = match without_auto_source_gems(app, target) {
         Some(trimmed) => {
@@ -4835,6 +4838,27 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         // file loads: the gems' entry programs come first.
         let heading = if boot.is_empty() { "" } else { "# Bundler.require: the gems' entry files.\n" };
         *models = format!("{preamble}{heading}{boot}{}{models}", if boot.is_empty() { "" } else { "\n" });
+    }
+}
+
+/// A class-body load-time conditional (`dialect::ConditionalDefinitions`)
+/// is written as the source has it only by the Ruby family; another
+/// target would define every branch's methods, the last one winning, so
+/// each such statement is an error there.
+fn refuse_conditional_definitions(app: &App, target: BuildTarget) {
+    for lc in &app.library_classes {
+        for conditional in &lc.conditional_definitions {
+            let diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                conditional.span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "conditional_definition",
+                format!(
+                    "`{}` defines methods in a load-time `if`/`unless`, which only the Ruby and JRuby targets carry",
+                    lc.name.0.as_str()
+                ),
+            );
+            emit::diagnostics::push(diagnostic);
+        }
     }
 }
 
@@ -13507,6 +13531,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            conditional_definitions: Vec::new(),
             unknown_calls: Vec::new(),
             class_ivar_initializers: Vec::new(),
         };
@@ -13681,6 +13706,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            conditional_definitions: Vec::new(),
             unknown_calls: Vec::new(),
             class_ivar_initializers: Vec::new(),
         });

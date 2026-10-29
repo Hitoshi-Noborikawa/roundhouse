@@ -312,7 +312,7 @@ fn data_block_classes(
             continue;
         }
         let name = ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), constant_id_str(&cw.name()))));
-        let DeclBody { includes, include_spans, methods, constants, unknown_calls, class_initializers, class_attributes: _ } =
+        let DeclBody { includes, include_spans, methods, constants, unknown_calls, class_initializers, class_attributes: _, conditional_definitions } =
             walk_decl_body(block.body(), &name, file, DeclBodyMode::Instance)?;
         debug_assert!(includes.is_empty() && constants.is_empty() && unknown_calls.is_empty());
         out.push(LibraryClass {
@@ -326,6 +326,7 @@ fn data_block_classes(
             nullable_columns: Vec::new(),
             origin: None,
             constants,
+            conditional_definitions,
             unknown_calls,
             class_ivar_initializers: class_initializers,
         });
@@ -360,7 +361,7 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
             });
         }
     }
-    let DeclBody { includes, include_spans, methods, constants, mut unknown_calls, mut class_initializers, class_attributes: _ } =
+    let DeclBody { includes, include_spans, methods, constants, mut unknown_calls, mut class_initializers, class_attributes: _, conditional_definitions } =
         walk_decl_body(body(), &owner, file, DeclBodyMode::Instance)?;
     class_initializers.extend(take_class_ivar_initializers(&mut unknown_calls));
     Ok(Some(LibraryClass {
@@ -377,6 +378,7 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
             span: super::util::node_span(&call.as_node(), file),
         }),
         constants,
+        conditional_definitions,
         unknown_calls,
         class_ivar_initializers: class_initializers,
     }))
@@ -610,7 +612,7 @@ pub(super) fn library_class_and_struct_base(
         mut constants,
         mut unknown_calls,
         mut class_initializers,
-        class_attributes: _,
+        class_attributes: _, conditional_definitions,
     } = walk_decl_body(class.body(), &owner, file, DeclBodyMode::Instance)?;
     // Not the write under a superclass: Ruby skips `X = … unless defined?(X)` when the parent holds `X`, which this body cannot see.
     if class.superclass().is_some()
@@ -720,6 +722,7 @@ pub(super) fn library_class_and_struct_base(
             nullable_columns: Vec::new(),
             origin: None,
             constants,
+            conditional_definitions,
             unknown_calls,
             class_ivar_initializers: class_initializers,
         },
@@ -1594,6 +1597,7 @@ fn struct_class(
         nullable_columns: Vec::new(),
         origin: Some(origin),
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     }
@@ -1742,7 +1746,7 @@ pub(super) fn library_class_from_module_node_with_scope(
     full_path.extend(name_path);
     let owner = ClassId(Symbol::from(full_path.join("::")));
 
-    let visibility = Visibility::resolve(module.body().as_ref(), file, Some(&owner))?;
+    let visibility = Visibility::resolve_library(module.body().as_ref(), file, Some(&owner), None)?;
     let DeclBody {
         includes,
         include_spans,
@@ -1750,7 +1754,7 @@ pub(super) fn library_class_from_module_node_with_scope(
         constants,
         mut unknown_calls,
         mut class_initializers,
-        class_attributes: _,
+        class_attributes: _, conditional_definitions,
     } = walk_decl_body_with_visibility(module.body(), &owner, file, DeclBodyMode::Instance, &visibility)?;
     class_initializers.extend(take_class_ivar_initializers(&mut unknown_calls));
     Ok(LibraryClass {
@@ -1764,6 +1768,7 @@ pub(super) fn library_class_from_module_node_with_scope(
         nullable_columns: Vec::new(),
         origin: None,
         constants,
+        conditional_definitions,
         unknown_calls,
         class_ivar_initializers: class_initializers,
     })
@@ -1816,6 +1821,8 @@ pub(super) struct DeclBody {
     /// `mattr_*` / `cattr_*` attribute names declared in this body —
     /// used when folding ClassMethods seeds onto the enclosing module.
     pub(super) class_attributes: HashSet<Symbol>,
+    /// The load-time conditionals whose branches define `methods`.
+    pub(super) conditional_definitions: Vec<crate::dialect::ConditionalDefinitions>,
 }
 
 impl DeclBody {
@@ -1827,6 +1834,7 @@ impl DeclBody {
         self.unknown_calls.extend(other.unknown_calls);
         self.class_initializers.extend(other.class_initializers);
         self.class_attributes.extend(other.class_attributes);
+        self.conditional_definitions.extend(other.conditional_definitions);
     }
 
     fn finalize_classvars(
@@ -1950,6 +1958,71 @@ fn is_relocatable_mattr_seed(expr: &Expr, class_attributes: &HashSet<Symbol>) ->
             class_attributes.iter().any(|attr| attr.as_str() == bare)
         }) && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil })
     )
+}
+
+/// A load-time conditional's record (`ConditionalDefinitions`), its
+/// branches' methods pushed onto `methods`: each `def`, each accessor
+/// half, and the methods of the conditionals nested in a branch.
+fn conditional_definitions(
+    statement: &ruby_prism::Node<'_>,
+    owner: &ClassId,
+    file: &str,
+    class_side: bool,
+    visibility: &Visibility,
+    methods: &mut Vec<MethodDef>,
+) -> IngestResult<crate::dialect::ConditionalDefinitions> {
+    let (negated, arms) = visibility::conditional_definition(statement).expect("a conditional definition");
+    let mut record = crate::dialect::ConditionalDefinitions {
+        span: super::util::node_span(statement, file),
+        negated,
+        arms: Vec::new(),
+    };
+    let recv = if class_side { MethodReceiver::Class } else { MethodReceiver::Instance };
+    for (condition, stmts) in arms {
+        let mut arm = crate::dialect::ConditionalArm {
+            condition: condition.map(|c| ingest_expr(&c, file)).transpose()?,
+            methods: Vec::new(),
+            nested: Vec::new(),
+        };
+        for stmt in stmts {
+            if visibility::conditional_definition(&stmt).is_some() {
+                arm.nested.push(conditional_definitions(&stmt, owner, file, class_side, visibility, methods)?);
+                continue;
+            }
+            if let Some(call) = visibility::conditional_accessor(&stmt) {
+                let kw = constant_id_str(&call.name());
+                let name_span = super::util::node_span(&stmt, file);
+                for arg in call.arguments().into_iter().flat_map(|a| a.arguments().iter()) {
+                    let Some(name) = super::util::symbol_or_string_value(&arg) else { continue };
+                    let name = Symbol::from(name);
+                    let mut halves = Vec::new();
+                    if kw != "attr_writer" {
+                        halves.push(synth_attr_reader(owner, &name, recv));
+                    }
+                    if kw != "attr_reader" {
+                        halves.push(synth_attr_writer(owner, &name, recv));
+                    }
+                    for mut method in halves {
+                        method.name_span = name_span;
+                        visibility.apply(&stmt, &mut method);
+                        arm.methods.push(crate::dialect::ConditionalMember::of(&method));
+                        methods.push(method);
+                    }
+                }
+                continue;
+            }
+            let Some(def) = visibility::definition(&stmt) else { continue };
+            let mut m = ingest_library_method(&def, owner, file)?;
+            visibility.apply(&stmt, &mut m);
+            if class_side {
+                m.receiver = MethodReceiver::Class;
+            }
+            arm.methods.push(crate::dialect::ConditionalMember::of(&m));
+            methods.push(m);
+        }
+        record.arms.push(arm);
+    }
+    Ok(record)
 }
 
 /// A receiver that is `self`, or a call chain on `self` (`self.logger`,
@@ -2242,7 +2315,7 @@ pub(super) fn walk_decl_body<'pr>(
     file: &str,
     mode: DeclBodyMode,
 ) -> IngestResult<DeclBody> {
-    let visibility = Visibility::resolve_owned(body.as_ref(), file, None, Some(owner))?;
+    let visibility = Visibility::resolve_library(body.as_ref(), file, None, Some(owner))?;
     walk_decl_body_with_visibility(body, owner, file, mode, &visibility)
 }
 
@@ -2447,6 +2520,15 @@ fn walk_decl_body_with_visibility<'pr>(
         {
             let name = Symbol::from(constant_id_str(&cw.name()));
             out.constants.push((name, ingest_expr(&cw.value(), file)?));
+            continue;
+        }
+        // A load-time conditional whose branches define methods: each is
+        // a method of this class, and the record says which branch
+        // defines it (`ConditionalDefinitions`).
+        if visibility.admits_conditionals() && visibility::conditional_definition(&statement).is_some() {
+            let class_side = mode.is_class_side() || module_function_active || extend_self_active;
+            let record = conditional_definitions(&statement, owner, file, class_side, visibility, &mut out.methods)?;
+            out.conditional_definitions.push(record);
             continue;
         }
         if statement.as_if_node().is_some() || statement.as_unless_node().is_some() {

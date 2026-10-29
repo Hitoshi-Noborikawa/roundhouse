@@ -88,6 +88,24 @@ variant carries `leading_comments: Vec<Comment>` plus a
 `leading_blank_line` flag — see `Comment` and `ControllerBodyItem` in
 `src/dialect.rs`.
 
+### Load-time conditional definitions
+
+A library class or module body may define methods under a load-time
+`if` / `elsif` / `else` or `unless` / `else` (`if Rails.env.test?` around
+two `def`s). Each branch may hold `def`s (`private def` too), plain
+`attr_reader` / `attr_writer` / `attr_accessor`s and nested conditionals
+of the same shape. Every branch's methods are ordinary methods of the
+class, so analysis types each one; `LibraryClass::conditional_definitions`
+records which branch defines which. The Ruby and JRuby trees write the
+conditional around them where the source had it, so the branch Ruby
+selects at load defines them. Other targets would define every branch's
+methods, and report each such statement as an error
+(`conditional_definition`). A named visibility change (`private :mode`)
+applies to such a method only when every branch defines it and the
+conditional ends in `else`. A model body's conditional definitions, a
+visibility marker inside a branch, and any other statement in one stay
+refused.
+
 ## ERB → Ruby → IR
 
 ### Why compile to Ruby?
