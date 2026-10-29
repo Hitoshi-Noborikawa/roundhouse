@@ -133,6 +133,15 @@ json.widgets(@widgets, cache: raise("bad")) do |widget|
 end
 "#;
 
+/// The inline-partial Hash followed by another argument. Jbuilder checks
+/// the first argument after the collection whatever the arity, so this
+/// renders the partial, not an array built by the block.
+const PARTIAL_EXTRA: &str = r#"json.count @widgets.size
+json.widgets(@widgets, { partial: "widgets/widget", as: :widget }, :extra) do |widget|
+  json.label widget.name
+end
+"#;
+
 /// An explicit `set!` with a key, a collection and a block. The method
 /// name is `set!`, not the key, and the first argument is the key, not
 /// the collection: the key-with-a-collection shape must not take it.
@@ -170,6 +179,7 @@ fn emitted() -> Vec<(String, String)> {
         ("app/views/widgets/options.json.jbuilder", OPTIONS),
         ("app/views/widgets/set_bang.json.jbuilder", SET_BANG),
         ("app/views/widgets/options_call.json.jbuilder", OPTIONS_CALL),
+        ("app/views/widgets/partial_extra.json.jbuilder", PARTIAL_EXTRA),
         ("app/views/widgets/partial_var.json.jbuilder", PARTIAL_VAR),
     ]
     .iter()
@@ -441,4 +451,15 @@ fn a_collection_with_a_call_in_its_options_is_not_an_array_of_blocks() {
     );
     let literal = view(&files, "widgets/options_json.rb");
     assert!(literal.contains("__col0.map"), "a literal option still lowers:\n{literal}");
+}
+
+/// The inline-partial Hash is checked whatever follows it.
+#[test]
+fn an_inline_partial_hash_before_another_argument_is_not_an_array_of_blocks() {
+    let files = emitted();
+    let src = view(&files, "widgets/partial_extra_json.rb");
+    assert!(
+        !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
+        "the block is not run per element:\n{src}"
+    );
 }

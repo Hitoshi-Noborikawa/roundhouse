@@ -2044,11 +2044,13 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // Arguments after the collection do not change that: `set!`
         // takes them as `*args` and, with a block, never reads them
         // (`json.items(col, cache: true) { … }` is the same array). The
-        // one exception is JbuilderTemplate's own `set!`, which takes a
-        // single trailing `partial:` + `as:` Hash for an inline partial
-        // before the block is considered (`args.one? &&
-        // _partial_options?(options)`, which tests that both keys are
-        // present, whatever their values); that shape stays below.
+        // one exception is JbuilderTemplate's own `set!`, which renders
+        // an inline partial before the block is considered when the
+        // first argument after the collection is a `partial:` + `as:`
+        // Hash, whatever follows it (jbuilder 2.15.1:
+        // `_partial_options?(args.first)`, i.e. `Hash === options &&
+        // options.key?(:as) && options.key?(:partial)`, so the keys'
+        // presence, whatever their values); that shape stays below.
         //
         // Jbuilder still evaluates those arguments before `set!` drops
         // them, so the arm only takes them when they are literals: a
@@ -2063,10 +2065,10 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             && block.is_some()
             && (key != "set!" || args.len() == 1)
             && args[1..].iter().all(is_literal_value)
-            && !(args.len() == 2
-                && extract_hash(&args[1]).is_some_and(|opts| {
-                    hash_has_key(opts, "partial") && hash_has_key(opts, "as")
-                })) =>
+            && !args
+                .get(1)
+                .and_then(extract_hash)
+                .is_some_and(|opts| hash_has_key(opts, "partial") && hash_has_key(opts, "as")) =>
         {
             let Some((item_var, body)) = item_block(block) else {
                 return JbStmt::Unknown;
