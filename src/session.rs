@@ -56,6 +56,25 @@ pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
 /// columns as the Array Rails reads types them so
 /// (`lower::array_columns`); every other target sees the ingested app.
 pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    if matches!(target, crate::build_target::BuildTarget::Ruby | crate::build_target::BuildTarget::Jruby | crate::build_target::BuildTarget::Spinel) {
+        app.native_library_keywords = true;
+        for class in &mut app.library_classes {
+            for method in &mut class.methods {
+                for param in &mut method.params {
+                    if param.from_keyword {
+                        param.keyword = true;
+                        param.from_keyword = false;
+                    }
+                    if param.from_kwrest {
+                        param.keyword = true;
+                        param.rest = true;
+                        param.default = None;
+                        param.from_kwrest = false;
+                    }
+                }
+            }
+        }
+    }
     if target.stores_array_columns() {
         crate::lower::array_columns::store_arrays(app);
     }

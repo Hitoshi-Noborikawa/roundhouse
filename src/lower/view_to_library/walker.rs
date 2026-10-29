@@ -492,15 +492,29 @@ fn splice_form_wrapper(
     // what was passed and fall back to each remaining parameter's own
     // default; a parameter with no default and no argument is a call
     // this pass cannot reconstruct.
-    if args.len() > w.params.len() {
+    let (positionals, keywords) = if w.keyword_rest {
+        match args.last() {
+            Some(last) => match &*last.node {
+                ExprNode::Hash { kwargs: true, .. } => (&args[..args.len() - 1], Some(last)),
+                ExprNode::KeywordSplat { value } => (&args[..args.len() - 1], Some(value)),
+                _ => (args, None),
+            },
+            None => (args, None),
+        }
+    } else {
+        (args, None)
+    };
+    let positional_count = w.params.len() - usize::from(w.keyword_rest);
+    if positionals.len() > positional_count {
         return None;
     }
-    if !args.iter().all(is_pure_read) {
+    if !positionals.iter().all(is_pure_read) || keywords.is_some_and(|arg| !is_pure_read(arg)) {
         return None;
     }
     let mut binding: crate::det::HashMap<&Symbol, &Expr> = crate::det::HashMap::default();
     for (i, (name, default)) in w.params.iter().enumerate() {
-        match args.get(i) {
+        let argument = if w.keyword_rest && i == positional_count { keywords } else { positionals.get(i) };
+        match argument {
             Some(a) => {
                 binding.insert(name, a);
             }
@@ -2289,6 +2303,7 @@ mod tests {
         // room page died on.
         let wrapper = super::super::FormWrapperHelper {
             params: vec![(Symbol::from("room"), None)],
+            keyword_rest: false,
             call: Expr::new(
                 Span::default(),
                 ExprNode::Send {
@@ -2352,6 +2367,7 @@ mod tests {
         // a site keeps its shape and stays a loud failure.
         let wrapper = super::super::FormWrapperHelper {
             params: vec![(Symbol::from("room"), None)],
+            keyword_rest: false,
             call: Expr::new(
                 Span::default(),
                 ExprNode::Send {

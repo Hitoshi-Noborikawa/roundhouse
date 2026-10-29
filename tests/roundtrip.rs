@@ -150,6 +150,7 @@ fn tiny_blog_round_trips() {
         inferred_method_params: Default::default(),
         models: vec![post_model],
         library_classes: vec![],
+        native_library_keywords: false,
         file_programs: vec![],
         boot_gem_entries: vec![],
         current_attribute_classes: vec![],

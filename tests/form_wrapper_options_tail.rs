@@ -50,6 +50,10 @@ end
 }
 
 fn app_with_helper(call_tail: &str, helper: &str) -> App {
+    app_with_helper_target(call_tail, helper, None)
+}
+
+fn app_with_helper_target(call_tail: &str, helper: &str, target: Option<roundhouse::project::BuildTarget>) -> App {
     let template = format!(
         "<%= thing_form_with @thing{call_tail} do |form| %>\n  <p>hi</p>\n<% end %>\n"
     );
@@ -71,8 +75,30 @@ fn app_with_helper(call_tail: &str, helper: &str) -> App {
         ("app/views/things/show.html.erb", Box::leak(template.into_boxed_str())),
     ]))
     .expect("ingest wrapper app");
-    roundhouse::session::analyze_and_lower(&mut app);
+    if let Some(target) = target {
+        roundhouse::session::analyze_and_lower_for(&mut app, target);
+    } else {
+        roundhouse::session::analyze_and_lower(&mut app);
+    }
     app
+}
+
+#[test]
+fn a_native_keyword_rest_wrapper_does_not_splice_a_positional_hash() {
+    let app = app_with_helper_target(
+        ", { class: \"invalid\" }",
+        r#"module ThingsHelper
+  def thing_form_with(model, **params, &)
+    form_with model: @thing, url: thing_path(model), method: :patch, **params, &
+  end
+end
+"#,
+        Some(roundhouse::project::BuildTarget::Ruby),
+    );
+    let files = roundhouse::emit::ruby::emit_lowered_views(&app);
+    let source = &files.iter().find(|file| file.path.to_string_lossy().ends_with("things/show.rb")).unwrap().content;
+    assert!(source.contains("thing_form_with"), "{source}");
+    assert!(!source.contains("<form"), "{source}");
 }
 
 fn show_view(call_tail: &str) -> String {
