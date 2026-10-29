@@ -1,4 +1,6 @@
-# rails 8.1.4: a strong-params method that is both a before_action target and called by the action.
+# rails 8.1.4: a before_action target that the controller also calls: from
+# the action, from a public helper, from a parameter default, and as a bound
+# method (`method(:prepare)`, `&method(:prepare)`).
 #
 # Run it outside a Rails app's tree:
 #
@@ -40,3 +42,63 @@ puts "with gadget: status=#{s.response.status} body=#{s.response.body}"
 s.post "/gadgets", params: { other: 1 }
 puts "without gadget: status=#{s.response.status}"
 puts "gadgets: #{Gadget.count}"
+
+s = ActionDispatch::Integration::Session.new(OracleApp)
+
+# Each variant replaces GadgetsController; the router looks the constant up
+# per request.
+def variant(&body)
+  Object.send(:remove_const, :GadgetsController)
+  Object.const_set(:GadgetsController, Class.new(ActionController::Base))
+  GadgetsController.class_eval do
+    skip_forgery_protection
+  end
+  GadgetsController.class_eval(&body)
+end
+
+variants = {
+  "public helper" => proc {
+    before_action :gadget_params, only: :create
+    def create
+      @gadget = Gadget.create!(name: gadget_name)
+      render json: { name: @gadget.name }
+    end
+    def gadget_name = gadget_params[:name]
+    private
+    def gadget_params = params.require(:gadget).permit(:name)
+  },
+  "parameter default" => proc {
+    before_action :gadget_params, only: :create
+    def create
+      @gadget = Gadget.create!(name: gadget_name)
+      render json: { name: @gadget.name }
+    end
+    private
+    def gadget_name(attributes = gadget_params) = attributes[:name]
+    def gadget_params = params.require(:gadget).permit(:name)
+  },
+  "method(:prepare)" => proc {
+    before_action :prepare, only: :create
+    def create
+      @gadget = Gadget.create!(name: method(:prepare).call)
+      render json: { name: @gadget.name }
+    end
+    private
+    def prepare = @label = params[:gadget][:name]
+  },
+  "&method(:prepare)" => proc {
+    before_action :prepare, only: :create
+    def create
+      [params[:gadget][:name]].each(&method(:prepare))
+      @gadget = Gadget.create!(name: @label)
+      render json: { name: @gadget.name }
+    end
+    private
+    def prepare(*) = @label = params[:gadget][:name]
+  },
+}
+variants.each do |label, body|
+  variant(&body)
+  s.post "/gadgets", params: { gadget: { name: "z" } }
+  puts "#{label}: status=#{s.response.status} body=#{s.response.body}"
+end

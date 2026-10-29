@@ -1271,9 +1271,14 @@ fn build_methods(
     // helper validated up front with `before_action :widget_params` and
     // read again as `widget_params[:name]`) is still live after
     // inlining: dropping it leaves those calls dangling (NameError).
+    // Every own method counts, routed or not, and so do its parameter
+    // defaults.
     let mut called_by_bodies: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
-    for a in publics.iter().chain(privs.iter()) {
+    for a in publics.iter().chain(helper_publics.iter()).chain(privs.iter()) {
         collect_self_send_names(&a.body, &mut called_by_bodies);
+        for default in a.formal_params().iter().filter_map(|p| p.default.as_ref()) {
+            collect_self_send_names(default, &mut called_by_bodies);
+        }
     }
     let filter_target_names: crate::det::HashSet<&Symbol> = before_filters
         .iter()
@@ -1752,12 +1757,27 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
 }
 
 /// The names `body` calls on the controller itself: receiverless sends
-/// and sends on `self`.
+/// and sends on `self`, and the bound methods it takes the same way
+/// (`method(:name)`, `&method(:name)`).
 fn collect_self_send_names(body: &Expr, out: &mut crate::det::HashSet<Symbol>) {
-    if let ExprNode::Send { recv, method, .. } = &*body.node {
-        if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
+    let on_self = |recv: &Option<Expr>| {
+        recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+    };
+    match &*body.node {
+        ExprNode::Send { recv, method, args, .. } if on_self(recv) => {
             out.insert(method.clone());
+            if method.as_str() == "method" {
+                if let [arg] = args.as_slice() {
+                    if let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*arg.node {
+                        out.insert(value.clone());
+                    }
+                }
+            }
         }
+        ExprNode::MethodRef { recv, name } if on_self(recv) => {
+            out.insert(name.clone());
+        }
+        _ => {}
     }
     body.node.for_each_child(&mut |c| collect_self_send_names(c, out));
 }
