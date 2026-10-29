@@ -1,7 +1,8 @@
 //! A binary String reaches SQLite as a BLOB literal. lobsters' comment
 //! `confidence_order` is three packed bytes (its default holds NULs), and
 //! a quoted literal ended the statement at the first NUL: every comment
-//! save on the Spinel tree was "unrecognized token".
+//! save on the Spinel tree was "unrecognized token". A binary-tagged
+//! String of UTF-8 bytes (a cookie's session token here) stays TEXT.
 
 use super::emit_and_run;
 use roundhouse::project::BuildTarget;
@@ -21,8 +22,9 @@ got = [
   Db.escape_string("it's"),
   Db.escape_string("café"),
   Db.escape_string((+"\xfc\xd9\x07").force_encoding("UTF-8")),
+  Db.escape_string("tok123".b),
 ]
-want = ["X'fcd907'", "X'000000'", "'it''s'", "'café'", "X'fcd907'"]
+want = ["X'fcd907'", "X'000000'", "'it''s'", "'café'", "X'fcd907'", "'tok123'"]
 raise "escape: #{got.inspect}" unless got == want
 puts "binary literal passed"
 "#,

@@ -2472,10 +2472,10 @@ module Db
 
   def self.bind_text(stmt, idx, value)
     raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
-    # Preserve all bytes at the FFI boundary, including embedded NULs. A
-    # binary String is a BLOB, as the sqlite3 gem binds it and as the inline
-    # writer (escape_string) stores it, so a lookup meets the stored class.
-    if value.encoding == Encoding::ASCII_8BIT || !value.valid_encoding?
+    # Preserve all bytes at the FFI boundary, including embedded NULs. Bytes
+    # only a BLOB can hold bind as one, as the inline writer (escape_string)
+    # stores them, so a lookup meets the stored class.
+    if Db.blob_bytes?(value)
       current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_blob(stmt, idx, value, value.bytesize, -1))
     else
       current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_text(stmt, idx, value, value.bytesize, -1))
@@ -2505,15 +2505,20 @@ module Db
   # quote doubling matches sqlite's literal-string syntax; non-string
   # input goes through `to_s` first (Ruby semantics).
   #
-  # A binary String (ASCII-8BIT, as `pack` answers) is a BLOB literal, as
-  # the sqlite3 gem binds it; so is one holding a NUL, which no quoted
-  # literal can carry (the statement text ends at it), and one whose bytes
-  # are not valid UTF-8 (a BLOB read back, which `gsub` refuses). lobsters'
-  # comment `confidence_order` is three packed bytes.
+  # Bytes no quoted literal can carry are a BLOB literal: a NUL (the
+  # statement text ends at it) or bytes that are not UTF-8 (`gsub` refuses
+  # them). lobsters' comment `confidence_order` is three packed bytes.
   def self.escape_string(s)
     str = s.to_s
-    return "X'" + str.unpack1("H*") + "'" if str.encoding == Encoding::ASCII_8BIT || str.include?("\0") || !str.valid_encoding?
+    return "X'" + str.unpack1("H*") + "'" if Db.blob_bytes?(str)
     "'" + str.gsub("'", "''") + "'"
+  end
+
+  # Not the ASCII-8BIT tag alone: this runtime reads headers and cookies as binary, and a session token so tagged must stay the TEXT its row holds.
+  def self.blob_bytes?(str)
+    return true if str.include?("\0")
+    return !str.valid_encoding? unless str.encoding == Encoding::ASCII_8BIT
+    !str.dup.force_encoding("UTF-8").valid_encoding?
   end
 
   def self.escape_int(n)
