@@ -377,7 +377,6 @@ end
 )];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn an_include_written_in_another_body_is_the_modules_own() {
     gem_same_as_native(
         "compat",

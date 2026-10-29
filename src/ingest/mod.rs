@@ -83,6 +83,7 @@ pub mod model;
 mod delegated_type;
 mod app_extension_calls;
 mod body_statements;
+mod external_include;
 mod hook_class_attribute;
 mod class_macros;
 mod column_accessors;

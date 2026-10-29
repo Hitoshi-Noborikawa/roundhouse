@@ -161,6 +161,19 @@ written in source order. A hook with a declaration this cannot read (a
 computed name or flag, a block, an unknown option) keeps its text and
 still fails at the include. So does a model's include of such a module.
 
+### An include written in another body
+
+`Other.include(M)`, where `Other` and `M` are the app's own and Ruby
+resolves both from the body the call is written in, is an include of
+`Other` (`ingest::external_include`): Ruby gives `Other`'s existing
+includers a module it includes later, so the ancestors are the same.
+activemerchant's `module Billing` ends `Compatibility::Model.include
+Rails::Model`, and a namespace module holding such a call is declared
+for it. The same call inside a railtie's `initializer`,
+`config.to_prepare` or `ActiveSupport.on_load` block makes `M` a
+dependency of `Other`, which is what a Concern does with it, and the
+block stays where it is.
+
 ## ERB → Ruby → IR
 
 ### Why compile to Ruby?
