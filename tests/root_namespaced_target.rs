@@ -51,7 +51,7 @@ fn a_namespaced_root_target_names_the_namespaced_controller() {
         "Rails.application.routes.draw do\n  root to: \"rails/health#show\"\n  get \"widgets\" => \"widgets#index\"\nend\n",
     );
     let main = file(&files, "main.rb");
-    assert!(main.contains("when :rails_health then Rails::HealthController.new"), "{main}");
+    assert!(main.contains("when :rails__health then Rails::HealthController.new"), "{main}");
     assert!(!main.contains("Rails/health"), "{main}");
 }
 

@@ -7137,7 +7137,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
 
 /// Add `RouteTable::CONTROLLER_PATHS` to routes.rb. It maps the router
 /// symbol of a namespaced controller to the Rails controller path
-/// (`admin_posts: "admin/posts"`). The ruby overlay's `recognize_path`
+/// (`admin__posts: "admin/posts"`). The ruby overlay's `recognize_path`
 /// and the test helper's `assert_recognizes` read it. A top-level controller has no row, and
 /// `recognize_path` gives its router symbol. The path comes from the
 /// class name, so it differs from Rails for an acronym inflection
@@ -12794,7 +12794,7 @@ mod tests {
         apply_controller_paths(&mut files, &crate::lower::flatten_routes(&app));
         assert_eq!(
             files[0].1,
-            "module RouteTable\n  CONTROLLER_PATHS = { admin_posts: \"admin/posts\" }.freeze\n\nend\n"
+            "module RouteTable\n  CONTROLLER_PATHS = { admin__posts: \"admin/posts\" }.freeze\n\nend\n"
         );
         assert_eq!(files[1].1, module);
     }

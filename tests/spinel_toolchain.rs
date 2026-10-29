@@ -372,7 +372,7 @@ puts "rails health contract passed"
     run.assert_passes();
     assert!(run.stdout.contains("rails health contract passed"));
     let main = std::fs::read_to_string(run.emitted.join("main.rb")).expect("main.rb");
-    assert!(main.contains("when :rails_health then Rails::HealthController.new"), "{main}");
+    assert!(main.contains("when :rails__health then Rails::HealthController.new"), "{main}");
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {
