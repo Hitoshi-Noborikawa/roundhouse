@@ -572,6 +572,16 @@ pub(crate) fn lower_value_reads(app: &mut crate::app::App) {
     }
 }
 
+// Not left to raise at run time: the synthesized record has a reader per permitted key and no `[]=`, and a key's value may change type (lobsters assigns a Tag relation over its `tags: []` Strings).
+fn report_params_write(span: Span, controller: &ClassId, class: &ClassId) {
+    crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+        span,
+        None,
+        "params write",
+        format!("`[]=` on the permitted params of `{}` (a synthesized {}) has no runtime; Rails' Parameters accepts it", controller.0, class.0),
+    ));
+}
+
 fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut calls = Vec::new();
     let mut blocked = Vec::new();
@@ -590,6 +600,9 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                         _ => None,
                     };
                     if let Some(class) = recv.and_then(|recv| sources.class(recv, specs)) {
+                        if let LValue::Index { .. } = target {
+                            report_params_write(expr.span, &controller.name, &class);
+                        }
                         blocked.push(class);
                     }
                 }
@@ -617,6 +630,7 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                         && !matches!(method.as_str(), "==" | "===" | "!=" | "<=" | ">="))
                 {
                     if method.as_str() == "delete" { calls.push((class.clone(), method.clone())); }
+                    if method.as_str() == "[]=" { report_params_write(expr.span, &controller.name, &class); }
                     blocked.push(class);
                 }
             });
