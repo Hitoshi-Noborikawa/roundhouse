@@ -280,6 +280,41 @@ end
     }
 }
 
+/// A lookup change sent reflectively on the hook's receiver: `send`,
+/// `public_send` and `__send__` each run the named method (CodeRabbit on
+/// #1525), so keywords stay refused.
+#[test]
+fn included_callback_sending_a_lookup_change_still_refuses() {
+    for body in [
+        "base.send(:define_singleton_method, :new) { |**o| o }",
+        "base.public_send(:define_singleton_method, :new) { |**o| o }",
+        "base.__send__(:define_singleton_method, :new) { |**o| o }",
+    ] {
+        let source = format!(
+            r#"
+module Hooks
+  def self.included(base)
+    {body}
+  end
+end
+
+class Child
+  include Hooks
+
+  def initialize(label:)
+    @label = label
+  end
+
+  def self.build
+    new(label: "x")
+  end
+end
+"#
+        );
+        assert!(constructor_keywords_are_refused(&source), "{body}");
+    }
+}
+
 /// A hook that calls, on its receiver, a method an extended module defines,
 /// and that method replaces `new` (CodeRabbit on #1525): the call can't be
 /// read as a harmless macro, so keywords stay refused.

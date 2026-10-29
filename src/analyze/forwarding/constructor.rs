@@ -864,7 +864,7 @@ fn mutates_constructor_lookup_method(
     hook_targets: Option<&HookTargets>,
     question: Question,
 ) -> bool {
-    if matches!(method, "send" | "public_send") {
+    if matches!(method, "send" | "public_send" | "__send__") {
         let Some((dynamic_method, rest)) = args.split_first() else {
             return false;
         };
