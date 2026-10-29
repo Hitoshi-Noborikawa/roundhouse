@@ -162,6 +162,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     if method.as_str() == "truncate" && block.is_none() {
         return ground_string_truncate(expr);
     }
+    if method.as_str() == "truncate_words" && block.is_none() {
+        return ground_string_truncate_words(expr);
+    }
     let wants_block = match method.as_str() {
         "index_by" => true,
         "many?" => block.is_some(),
@@ -709,6 +712,50 @@ fn ground_string_truncate(expr: &mut Expr) -> bool {
         ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
     ));
     *args = vec![receiver, truncate_to, omission, separator];
+    *parenthesized = true;
+    expr.ty = Some(Ty::Str);
+    true
+}
+
+/// `text.truncate_words(n)` and `text.truncate_words(n, omission: o)` on
+/// a String become `ActiveSupport.truncate_words(text, n, o_or_nil)`.
+/// The default separator only: Rails builds a Regexp from `separator:`,
+/// which the runtime does not do at run time, so that call stays as
+/// written.
+fn ground_string_truncate_words(expr: &mut Expr) -> bool {
+    let span = expr.span;
+    let ExprNode::Send { recv, args, parenthesized, .. } = &mut *expr.node else {
+        return false;
+    };
+    if !matches!(recv.as_ref().and_then(|r| r.ty.as_ref()), Some(Ty::Str)) {
+        return false;
+    }
+    let omission = match args.as_slice() {
+        [_] => {
+            let mut lit = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Nil });
+            lit.ty = Some(Ty::Nil);
+            lit
+        }
+        [_, options] => {
+            let ExprNode::Hash { entries, .. } = &*options.node else { return false };
+            let [(k, v)] = entries.as_slice() else { return false };
+            let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node else {
+                return false;
+            };
+            if key.as_str() != "omission" {
+                return false;
+            }
+            v.clone()
+        }
+        _ => return false,
+    };
+    let words_count = args[0].clone();
+    let receiver = recv.take().expect("checked above");
+    *recv = Some(Expr::new(
+        span,
+        ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+    ));
+    *args = vec![receiver, words_count, omission];
     *parenthesized = true;
     expr.ty = Some(Ty::Str);
     true
@@ -1266,5 +1313,33 @@ mod tests {
         };
         let mut effects = truncate_on(Some(Ty::Str), vec![("separator", call("sep")), ("omission", call("mark"))]);
         assert!(!rewrite_node(&mut effects));
+    }
+
+    #[test]
+    fn string_truncate_words_grounds_only_the_default_separator() {
+        let on = |options: Vec<(&str, Expr)>, ty: Option<Ty>| {
+            let mut e = truncate_on(ty, options);
+            if let ExprNode::Send { method, .. } = &mut *e.node {
+                *method = Symbol::from("truncate_words");
+            }
+            e
+        };
+        let mut bare = on(vec![], Some(Ty::Str));
+        assert!(rewrite_node(&mut bare));
+        assert_eq!(arg_kinds(&bare), ["text", "27", "nil"]);
+        assert_eq!(bare.ty, Some(Ty::Str));
+        let ExprNode::Send { recv: Some(r), method, .. } = &*bare.node else { panic!() };
+        assert_eq!(method.as_str(), "truncate_words");
+        assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
+
+        let mut omission = on(vec![("omission", str_lit("~"))], Some(Ty::Str));
+        assert!(rewrite_node(&mut omission));
+        assert_eq!(arg_kinds(&omission), ["text", "27", "~"]);
+
+        // Not proven a String, or a separator: left as written.
+        let mut untyped = on(vec![], None);
+        assert!(!rewrite_node(&mut untyped));
+        let mut separator = on(vec![("separator", str_lit(" "))], Some(Ty::Str));
+        assert!(!rewrite_node(&mut separator));
     }
 }
