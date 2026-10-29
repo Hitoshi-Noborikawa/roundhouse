@@ -78,8 +78,9 @@ module Rails
 
     # Pathname#join takes any number of parts
     # (`Rails.root.join("source", "posts")`), and with none it answers
-    # the path itself. An absolute part starts the path over, as it does
-    # in Pathname: `Rails.root.join("/var", "x")` is `/var/x`.
+    # the path itself. As in Pathname, an absolute part starts the path
+    # over and a separator is not doubled: `Rails.root.join("/var/", "x")`
+    # is `/var/x`.
     def join(*parts)
       if parts.empty?
         self
@@ -87,7 +88,12 @@ module Rails
         base = @base
         parts.each do |part|
           text = part.to_s
-          base = text.start_with?("/") ? text : base + "/" + text
+          if text.start_with?("/")
+            base = text
+          else
+            base = base.chomp("/") while base.end_with?("/")
+            base = base + "/" + text
+          end
         end
         AppPath.new(base)
       end

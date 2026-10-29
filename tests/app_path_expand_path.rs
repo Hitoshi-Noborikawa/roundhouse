@@ -7,8 +7,10 @@
 //! emitted program would have raised NoMethodError where the class loads.
 //! The emitted app's root is the directory it serves from, so CRuby's
 //! Pathname over that directory is the oracle (Rails 8.1.4's `Rails.root`
-//! is that Pathname): an absolute part starts a join over, and a directory
-//! argument is converted, though it never moves an absolute path. The
+//! is that Pathname): an absolute part starts a join over, a part's
+//! trailing separator is not doubled, and a directory argument is
+//! converted, though it never moves an absolute path (`Rails.public_path`
+//! is absolute in Rails, so `expand_path("/srv")` keeps it). The
 //! targets without the ruby-family runtime refuse the call by name,
 //! whichever arm of its receiver is the app path.
 
@@ -24,9 +26,14 @@ const PATHS: &str = r#"module Paths
   VAR = Rails.root.join("/var", "x").expand_path
   RESTART = Rails.root.join("tmp", "/var").expand_path
   PLUS = (Rails.root + "/var").expand_path
+  TRAILING = Rails.root.join("/var/", "x")
+  SLASHES = Rails.root.join("/var//", "x")
+  ROOTED = Rails.root.join("/", "x")
+  PUBLIC = Rails.public_path.expand_path("/srv")
 
   def self.report
-    [CACHE.to_s, LOGS.to_s, UNDER.to_s, CACHE.join("a").to_s, VAR.to_s, RESTART.to_s, PLUS.to_s]
+    [CACHE.to_s, LOGS.to_s, UNDER.to_s, CACHE.join("a").to_s, VAR.to_s, RESTART.to_s, PLUS.to_s,
+     TRAILING.to_s, SLASHES.to_s, ROOTED.to_s, PUBLIC.to_s]
   end
 
   def self.bad_dir
@@ -50,13 +57,15 @@ root = Pathname(Dir.pwd)
 expected = [root.join("tmp", "cache").expand_path.to_s, root.join("tmp", "..", "log").expand_path.to_s,
             root.join("x").expand_path("/srv").to_s, root.join("tmp", "cache", "a").expand_path.to_s,
             root.join("/var", "x").expand_path.to_s, root.join("tmp", "/var").expand_path.to_s,
-            (root + "/var").expand_path.to_s]
+            (root + "/var").expand_path.to_s, root.join("/var/", "x").to_s, root.join("/var//", "x").to_s,
+            root.join("/", "x").to_s, root.join("public").expand_path("/srv").to_s]
 bad = begin
   root.join("x").expand_path(12).to_s
 rescue TypeError => e
   e.class.name
 end
-p Paths.report == expected, Paths.bad_dir == bad, Paths.bad_dir, Paths.report.map { |path| Pathname(path).absolute? }.uniq
+p Paths.report == expected || [Paths.report, expected], Paths.bad_dir == bad, Paths.bad_dir,
+  Paths.report.map { |path| Pathname(path).absolute? }.uniq
 "#,
     );
     run.assert_passes();
