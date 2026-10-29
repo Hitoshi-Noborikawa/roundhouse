@@ -1417,7 +1417,15 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
         with_ty(var_ref(value_param.clone()), Ty::Untyped),
         col_ty.clone(),
     );
-    let value_ty = if slot.is_json() || json_assignment.is_some() {
+    let value_ty = if slot.is_json()
+        || json_assignment.is_some()
+        || enum_setter_value(
+            model,
+            col,
+            with_ty(var_ref(value_param.clone()), Ty::Untyped),
+        )
+        .is_some()
+    {
         Ty::Untyped
     } else {
         col_ty.clone()
