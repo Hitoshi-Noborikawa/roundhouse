@@ -636,8 +636,10 @@ module ActiveSupport
   end
 
   # The whitespace Rails' default `truncate_words` separator (`/\s+/`)
-  # splits on.
-  WORD_SPACE = " \t\n\v\f\r"
+  # splits on, as a byte: space, or \t \n \v \f \r.
+  def self.word_space_byte?(b)
+    b == 32 || (b >= 9 && b <= 13)
+  end
 
   # AS `String#truncate_words(words_count, omission: "...")`
   # (core_ext/string/filters.rb) for the default separator, with the
@@ -646,18 +648,21 @@ module ActiveSupport
   # the first word, and the cut happens only when whitespace follows the
   # n-th word. Built without a Regexp, like `squish` above. A `separator:`
   # call is not grounded here. Same home and same rule as `truncate`.
+  # The scan reads bytes: every separator is ASCII and no byte of a
+  # multibyte UTF-8 character is below 0x80, so the cuts are the same,
+  # and `text[i]` would walk the String from the start on each read.
   def self.truncate_words(text, words_count, omission)
     mark = omission || "..."
-    n = text.length
+    n = text.bytesize
     i = 0
     words = 0
     while i < n
       j = i + 1
-      j += 1 while j < n && !WORD_SPACE.include?(text[j])
+      j += 1 while j < n && !word_space_byte?(text.getbyte(j))
       k = j
-      k += 1 while k < n && WORD_SPACE.include?(text[k])
+      k += 1 while k < n && word_space_byte?(text.getbyte(k))
       words += 1
-      return text[0, j] + mark if words == words_count && k > j
+      return text.byteslice(0, j) + mark if words == words_count && k > j
       i = k
     end
     text.dup
