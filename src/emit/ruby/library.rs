@@ -5881,10 +5881,21 @@ fn owned_singular_associations(app: &App) -> crate::det::HashSet<(String, String
     use crate::dialect::Association;
     let mut out = crate::det::HashSet::default();
     for m in &app.models {
-        for a in m.associations() {
-            if let Association::BelongsTo { name, .. } | Association::HasOne { name, .. } = a {
-                out.insert((m.name.0.as_str().to_string(), name.as_str().to_string()));
+        // Not the model's own declarations alone: an STI subclass (campfire's `Rooms::Open < Room`) answers its parent's associations.
+        let mut current = Some(m);
+        let mut seen = 0;
+        while let Some(owner) = current {
+            for a in owner.associations() {
+                if let Association::BelongsTo { name, .. } | Association::HasOne { name, .. } = a {
+                    out.insert((m.name.0.as_str().to_string(), name.as_str().to_string()));
+                }
             }
+            seen += 1;
+            current = owner
+                .parent
+                .as_ref()
+                .filter(|_| seen < 16)
+                .and_then(|p| app.models.iter().find(|x| &x.name == p));
         }
     }
     out
@@ -6220,8 +6231,8 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
     let all_models = sig.all_models;
     let assoc_targets = sig.assoc_targets;
     let collection_targets = sig.collection_targets;
-    // Not by name alone once the type says otherwise: lobsters' `tag.tag` is Tag's String column, named like a `belongs_to :tag`.
-    if matches!(
+    // Not by name alone once a read's type says otherwise: lobsters' `tag.tag` is Tag's String column, named like a `belongs_to :tag`. A bare local keeps its name: its inferred type is the weaker signal there.
+    if matches!(&*arg.node, ExprNode::Send { recv: Some(_), .. }) && matches!(
         arg.ty.as_ref().map(crate::ty::Ty::peel_nilable),
         Some(crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym | crate::ty::Ty::Bool)
     ) {

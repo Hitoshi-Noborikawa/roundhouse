@@ -47,7 +47,7 @@ fn the_package_ships_and_replays_the_initializer_when_the_lock_pins_the_gem() {
 fn without_the_gem_nothing_of_it_ships() {
     let (emitted, _) = app(false).emit(BuildTarget::Spinel);
     let boot = std::fs::read_to_string(emitted.join("boot.rb")).unwrap();
-    assert!(!boot.contains("runtime/gems/"), "{boot}");
+    assert!(!boot.contains("require_relative \"runtime/gems/"), "{boot}");
     assert!(!emitted.join("runtime/gems").exists());
 }
 

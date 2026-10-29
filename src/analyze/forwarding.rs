@@ -894,6 +894,9 @@ struct SourceContractIndex<'a> {
     /// Owners a fragment declares a method of again, or whose mixins more than one fragment adds.
     redefined: HashSet<ClassId>,
     including_fragments: HashMap<ClassId, usize>,
+    /// The fragment being read for each owner, and the one each method was declared in.
+    current_fragment: HashMap<ClassId, usize>,
+    declared_in: HashMap<(ClassId, Symbol, bool), usize>,
     instance: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     class: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     virtual_owners: Vec<&'a ClassId>,
@@ -921,6 +924,8 @@ impl<'a> SourceContractIndex<'a> {
             shadowing_initializers: HashSet::default(),
             redefined: HashSet::default(),
             including_fragments: HashMap::default(),
+            current_fragment: HashMap::default(),
+            declared_in: HashMap::default(),
             instance: HashMap::default(),
             class: HashMap::default(),
             virtual_owners: Vec::new(),
@@ -1060,6 +1065,7 @@ impl<'a> SourceContractIndex<'a> {
         parent: Option<&'a ClassId>,
         includes: impl Iterator<Item = ClassId>,
     ) {
+        *self.current_fragment.entry(owner.clone()).or_default() += 1;
         if let Some(parent) = parent {
             self.parents.entry(owner.clone()).or_insert(parent);
         }
@@ -1084,7 +1090,11 @@ impl<'a> SourceContractIndex<'a> {
                 MethodReceiver::Instance => &mut self.instance,
                 MethodReceiver::Class => &mut self.class,
             };
-            if declarations.insert((owner.clone(), method.name.clone()), (method, model)).is_some() {
+            declarations.insert((owner.clone(), method.name.clone()), (method, model));
+            // Not a redefinition within one class body: Ruby keeps the last, whatever loads first.
+            let fragment = self.current_fragment.get(owner).copied().unwrap_or(0);
+            let key = (owner.clone(), method.name.clone(), method.receiver == MethodReceiver::Class);
+            if self.declared_in.insert(key, fragment).is_some_and(|prev| prev != fragment) {
                 self.redefined.insert(owner.clone());
             }
         }
