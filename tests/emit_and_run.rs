@@ -20033,3 +20033,6 @@ mod helper_param_after_views;
 
 #[path = "emit_and_run/layout_ivar_unset.rs"]
 mod layout_ivar_unset;
+
+#[path = "emit_and_run/stub_facade_source_gem.rs"]
+mod stub_facade_source_gem;

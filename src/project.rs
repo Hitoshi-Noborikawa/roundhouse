@@ -2807,7 +2807,9 @@ fn target_files_inner(
         BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
             spinel_relation_model_handle(&mut files)?;
             widen_spinel_hash_config_arrays(&mut files);
-            spin_shape(files)
+            let mut files = spin_shape(files)?;
+            apply_spinel_int_overflow(&mut files, app);
+            Ok(files)
         }),
         // The ruby family gets the bundled-library requires too: the
         // table used to live inside `spin_shape` and so reached only
@@ -10675,6 +10677,22 @@ fn apply_image_processor_wiring(files: &mut [(String, String)]) -> Result<bool, 
                 is not in the file set")?;
     stub.1 = real;
     Ok(true)
+}
+
+/// `roundhouse.yml`'s `spinel.int_overflow` on every compile the Makefile
+/// runs: the app binary through `spin build` (which passes what follows
+/// `--` to the compiler) or the raw compiler, and each test binary.
+fn apply_spinel_int_overflow(files: &mut [(String, String)], app: &App) {
+    let Some(mode) = app.spinel_int_overflow.as_deref() else { return };
+    let flag = format!("--int-overflow={mode}");
+    let Some((_, makefile)) = files.iter_mut().find(|(p, _)| p == "Makefile") else { return };
+    for (from, to) in [
+        ("\t$(SPIN) build\n".to_string(), format!("\t$(SPIN) build -- {flag}\n")),
+        ("\t$(SPINEL) main.rb $(RBS_FLAG) -o $@".to_string(), format!("\t$(SPINEL) main.rb $(RBS_FLAG) {flag} -o $@")),
+        ("$(SPINEL_TEST_FLAGS) $< -o $@".to_string(), format!("$(SPINEL_TEST_FLAGS) {flag} $< -o $@")),
+    ] {
+        *makefile = makefile.replace(&from, &to);
+    }
 }
 
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
