@@ -66,25 +66,51 @@ fn expect_receiver_guard_preserves_non_array_lowering() {
 }
 
 #[test]
-fn array_expect_lowers_explicit_params_receivers() {
-    for receiver in ["self.params", "@params"] {
-        let (emitted, errors) =
-            app_with_receiver(receiver).emit(roundhouse::project::BuildTarget::Spinel);
-        assert!(errors.is_empty(), "{receiver}: {errors:?}");
-        let source = std::fs::read_to_string(emitted.join("app/controllers/items_controller.rb"))
-            .expect("controller");
-        assert!(
-            source.contains("Params.expect_array("),
-            "{receiver}: {source}"
-        );
-        assert!(!source.contains(".expect("), "{receiver}: {source}");
-        app_with_receiver(receiver).run_ruby(r##"require "json"
+fn array_expect_lowers_the_params_ivar() {
+    let receiver = "@params";
+    let (emitted, errors) =
+        app_with_receiver(receiver).emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{receiver}: {errors:?}");
+    let source = std::fs::read_to_string(emitted.join("app/controllers/items_controller.rb"))
+        .expect("controller");
+    assert!(
+        source.contains("Params.expect_array("),
+        "{receiver}: {source}"
+    );
+    assert!(!source.contains(".expect("), "{receiver}: {source}");
+    app_with_receiver(receiver).run_ruby(r##"require "json"
 require "stringio"
 raw = JSON.generate({"items" => [{"header" => "H", "ignored" => "removed"}]})
 status, _, body = Main.run_rack("REQUEST_METHOD" => "POST", "PATH_INFO" => "/items", "QUERY_STRING" => "", "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => raw.bytesize.to_s, "rack.input" => StringIO.new(raw))
 raise "#{status} #{body.inspect}" unless status == 200 && JSON.parse(body.join) == [{"header" => "H"}]
 puts "PASS"
 "##).assert_passes();
+}
+
+#[test]
+fn self_params_array_expect_preserves_method_dispatch() {
+    for location in ["none", "own", "inherited"] {
+        let definition = "  def params\n    {\"items\" => [{\"header\" => \"filtered\"}]}\n  end\n";
+        let app = app_with_receiver("self.params")
+            .write(
+                "app/controllers/application_controller.rb",
+                &format!(
+                    "class ApplicationController < ActionController::API\n{}end\n",
+                    if location == "inherited" { definition } else { "" },
+                ),
+            )
+            .write(
+                "app/controllers/items_controller.rb",
+                &format!(
+                    "class ItemsController < ApplicationController\n{}  def create\n    render json: self.params.expect(items: [[:header]])\n  end\nend\n",
+                    if location == "own" { definition } else { "" },
+                ),
+            );
+        let (emitted, _) = app.emit(roundhouse::project::BuildTarget::Spinel);
+        let source = std::fs::read_to_string(emitted.join("app/controllers/items_controller.rb"))
+            .expect("controller");
+        assert!(source.contains("self.params.expect("), "{location}: {source}");
+        assert!(!source.contains("Params.expect_array("), "{location}: {source}");
     }
 }
 

@@ -2281,11 +2281,7 @@ pub(super) fn rewrite_params(expr: &Expr) -> Expr {
         }
         ExprNode::Send { recv: Some(recv), method, args, .. }
             if method.as_str() == "expect"
-                && (matches!(&*recv.node,
-                        ExprNode::Send { recv: Some(receiver), method, args, block: None, .. }
-                            if matches!(&*receiver.node, ExprNode::SelfRef)
-                                && method.as_str() == "params" && args.is_empty())
-                    || matches!(&*recv.node, ExprNode::Ivar { name } if name.as_str() == "params")) =>
+                && matches!(&*recv.node, ExprNode::Ivar { name } if name.as_str() == "params") =>
         {
             let [arg] = args.as_slice() else { return None };
             let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
