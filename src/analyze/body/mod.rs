@@ -1026,6 +1026,8 @@ impl<'a> BodyTyper<'a> {
             ExprNode::If { then_branch, else_branch, .. } => {
                 self.each_branch_is_class_object(then_branch, ctx) && self.each_branch_is_class_object(else_branch, ctx)
             }
+            // A local that already answers Module queries passes that on, not an identity.
+            ExprNode::Var { name, .. } if ctx.query_class_objects.contains(name) => true,
             _ => self.is_class_object(expr, ctx),
         }
     }
@@ -2831,6 +2833,7 @@ impl<'a> BodyTyper<'a> {
                         }
                         if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
                             let proven = self.is_class_object(value, &local_ctx);
+                            let query = !proven && self.each_branch_is_class_object(value, &local_ctx);
                             let live = self.is_live_class(value, &local_ctx);
                             forget_class_object_writes(value, &mut local_ctx);
                             local_ctx.class_objects.remove(name);
@@ -2839,7 +2842,7 @@ impl<'a> BodyTyper<'a> {
                             if proven { local_ctx.class_objects.insert(name.clone()); }
                             // `flag ? A : B` has no single identity to write
                             // through, but either class answers a Module query.
-                            else if self.each_branch_is_class_object(value, &local_ctx) {
+                            else if query {
                                 local_ctx.query_class_objects.insert(name.clone());
                             }
                             self.prove_selector(name, value, &mut local_ctx);

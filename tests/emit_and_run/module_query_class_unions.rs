@@ -106,3 +106,17 @@ fn a_value_that_may_not_be_a_class_stays_refused() {
         assert!(errors.iter().any(|e| e.contains("Module protocol")), "{source}: {errors:#?}");
     }
 }
+
+#[test]
+fn a_copy_keeps_the_query_proof_only() {
+    let source = "class Celsius\n  UNIT = \"C\"\nend\n\nclass Fahrenheit\n  UNIT = \"F\"\nend\n\nclass Thermometer\n  def copied_unit(metric)\n    scale = metric ? Celsius : Fahrenheit\n    copy = scale\n    copy.const_get(:UNIT)\n  end\nend\n";
+    let run = emit_and_run::real_blog()
+        .write("app/models/class_unions.rb", source)
+        .run_ruby("raise unless [Thermometer.new.copied_unit(true), Thermometer.new.copied_unit(false)] == [\"C\", \"F\"]\nputs \"copy passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("copy passed"), "{}", run.stdout);
+    // The copy is one of several classes, not one identity: a write through it stays refused.
+    let write = source.replace("copy.const_get(:UNIT)", "copy.define_method(:y) { 1 }");
+    let (_, errors) = emit_and_run::real_blog().write("app/models/class_unions.rb", &write).emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("Module protocol")), "{errors:#?}");
+}
