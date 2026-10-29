@@ -1556,6 +1556,9 @@ end
     // kept or dropped after every app file is read (see
     // `keep_initializer_defined`).
     let mut initializer_defined: Vec<LibraryClass> = Vec::new();
+    // `ActionController::Base.prepend_view_path …`, applied with the class
+    // bodies' own once every class is read (see `view_paths`).
+    let mut view_path_ops = Vec::new();
 
     // `Time::DATE_FORMATS[:name] = ->(t) { … }` in an initializer —
     // read independently of config/application.rb above, since an app
@@ -1610,6 +1613,7 @@ end
                     }
                 }
                 app.module_mixins.extend(mixins);
+                view_path_ops.extend(super::view_paths::extract_initializer_view_paths(&bytes, &path_str));
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
                 app.initializer_defs.extend(extract_initializer_defs(&bytes, &path_str));
                 app.gem_package_settings.extend(super::gem_package_settings::extract(&bytes, &path_str));
@@ -1847,21 +1851,36 @@ end
     // and an engine's copy of it never does. Keyed on name and format,
     // not the file, so an `.erb` override shadows a `.haml` original;
     // another FORMAT of the same name is a different template and stays.
-    // Only across roots — within one, nothing changes.
-    let mut view_owner: HashMap<(Symbol, Symbol), usize> = HashMap::default();
-    for (root_index, root) in roots.iter().enumerate() {
-        let mut keep = |view: &crate::dialect::View| {
-            let owner = *view_owner
-                .entry((view.name.clone(), view.format.clone()))
-                .or_insert(root_index);
-            owner == root_index
-        };
-        let views_dir = dir.join(root).join("views");
+    // Only across roots — within one, nothing changes. The roots are each
+    // class's view paths, which start as these and which the app can
+    // prepend to, append to or replace (`view_paths`).
+    let view_lookup = super::view_paths::ViewLookup::new(
+        &app,
+        roots.iter().map(|root| root.join("views")).collect(),
+        &view_path_ops,
+    );
+    let mut walked: Vec<super::view_paths::WalkedRoot> = Vec::new();
+    let mut ingested: HashMap<PathBuf, crate::dialect::View> = HashMap::default();
+    for root in view_lookup.roots() {
+        let views_dir = dir.join(root);
         if !vfs.is_dir(&views_dir) {
             continue;
         }
+        // A view path inside one already walked (`app/views/themes/next`
+        // in `app/views`) holds files that walk read: the same files, not a
+        // second read of them.
+        if let Some(outer) = walked.iter().find(|w| views_dir.starts_with(&w.dir)) {
+            let files = outer.files.iter().filter(|f| f.starts_with(&views_dir)).cloned().collect();
+            walked.push(super::view_paths::WalkedRoot { root: root.clone(), dir: views_dir, files });
+            continue;
+        }
+        let mut files = Vec::new();
         let erb_files = read_erb_files(vfs, &views_dir)?;
         for (erb_path, engine) in erb_files {
+            files.push(erb_path.clone());
+            if ingested.contains_key(&erb_path) {
+                continue;
+            }
             let Some(source) = read_to_string_or_ledger(vfs, &erb_path)? else { continue };
             let rel = erb_path
                 .strip_prefix(&views_dir)
@@ -1885,14 +1904,16 @@ end
                 &erb_path.display().to_string(),
                 engine.compile_fn(),
             ))? {
-                if keep(&view) {
-                    app.views.push(view);
-                }
+                ingested.insert(erb_path, view);
             }
         }
 
         let jbuilder_files = read_jbuilder_files(vfs, &views_dir)?;
         for jb_path in jbuilder_files {
+            files.push(jb_path.clone());
+            if ingested.contains_key(&jb_path) {
+                continue;
+            }
             let Some(source) = read_to_string_or_ledger(vfs, &jb_path)? else { continue };
             let rel = jb_path
                 .strip_prefix(&views_dir)
@@ -1905,12 +1926,12 @@ end
                 rel,
                 &jb_path.display().to_string(),
             ))? {
-                if keep(&view) {
-                    app.views.push(view);
-                }
+                ingested.insert(jb_path, view);
             }
         }
+        walked.push(super::view_paths::WalkedRoot { root: root.clone(), dir: views_dir, files });
     }
+    app.views.extend(view_lookup.select(&app, dir, &walked, &ingested));
 
     // Shared test-support modules — `test/test_helpers/*.rb`, mixed
     // into every test case by the app's own `test/test_helper.rb`
@@ -4544,6 +4565,9 @@ const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     "include",
     "extend",
     "layout",
+    // Read by `view_paths`, which reports a form it cannot evaluate.
+    "prepend_view_path",
+    "append_view_path",
     "helper_method",
     "rescue_from",
     "private",
@@ -10036,26 +10060,23 @@ fn layouts_link_all_stylesheets<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &[P
 pub(super) fn initializer_statements<'a>(program: &ruby_prism::ProgramNode<'a>) -> Vec<Node<'a>> {
     let mut stmts: Vec<Node> = Vec::new();
     for stmt in program.statements().body().iter() {
-        let mut unwrapped = false;
-        if let Some(call) = stmt.as_call_node() {
-            let name = super::util::constant_id_str(&call.name());
-            if matches!(name, "to_prepare" | "to_run") {
-                if let Some(body) = call
-                    .block()
-                    .and_then(|b| b.as_block_node())
-                    .and_then(|b| b.body())
-                    .and_then(|b| b.as_statements_node())
-                {
-                    stmts.extend(body.body().iter());
-                    unwrapped = true;
-                }
-            }
-        }
-        if !unwrapped {
-            stmts.push(stmt);
+        match initializer_statements_of(&stmt) {
+            Some(body) => stmts.extend(body),
+            None => stmts.push(stmt),
         }
     }
     stmts
+}
+
+/// The statements of a top-level `to_prepare` / `to_run` block.
+pub(super) fn initializer_statements_of<'a>(stmt: &Node<'a>) -> Option<Vec<Node<'a>>> {
+    let call = stmt.as_call_node()?;
+    let name = super::util::constant_id_str(&call.name());
+    if !matches!(name, "to_prepare" | "to_run") {
+        return None;
+    }
+    let body = call.block()?.as_block_node()?.body()?.as_statements_node()?;
+    Some(body.body().iter().collect())
 }
 
 /// `def name` at an initializer's top level (lobsters'
