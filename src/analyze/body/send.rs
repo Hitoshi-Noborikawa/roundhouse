@@ -3778,7 +3778,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "pluralize" | "singularize" | "camelize" | "camelcase"
         | "underscore" | "dasherize" | "titleize" | "titlecase"
         | "humanize" | "demodulize" | "deconstantize" | "classify"
-        | "foreign_key" | "parameterize" | "truncate"
+        | "foreign_key" | "parameterize" | "truncate" | "truncate_words"
         | "squish" | "remove" | "indent"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),

@@ -82,6 +82,7 @@ module ActiveSupport
   def self.squish: (String text) -> String
   def self.squish!: (String text) -> String
   def self.truncate: (String text, Integer truncate_to, String? omission, String? separator) -> String
+  def self.truncate_words: (String text, Integer words_count, String? omission) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver
   # is a channel's `streams`, a plain Array. It is — an
@@ -132,6 +133,7 @@ module ActiveSupport
   def self.on_weekday?: (Time t) -> bool
   def self.on_wday?: (Time t, Integer wday) -> bool
   ZONE_NAMES: Hash[String, String]
+  WORD_SPACE: String
   class TimeZoneData
     def name: () -> String
     def initialize: (String name, Array[Integer] transitions, Array[Integer] offsets, Integer initial_offset, Array[Integer] rule, Array[bool] dsts) -> void

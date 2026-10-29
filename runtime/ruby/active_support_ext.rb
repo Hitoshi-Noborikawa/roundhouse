@@ -630,6 +630,34 @@ module ActiveSupport
     text[0, stop] + mark
   end
 
+  # The whitespace Rails' default `truncate_words` separator (`/\s+/`)
+  # splits on.
+  WORD_SPACE = " \t\n\v\f\r"
+
+  # AS `String#truncate_words(words_count, omission: "...")`
+  # (core_ext/string/filters.rb) for the default separator, with the
+  # omission positional. Rails matches `/\A((?>.+?\s+){n-1}.+?)\s+.*/m`:
+  # a word is at least one character, so leading whitespace belongs to
+  # the first word, and the cut happens only when whitespace follows the
+  # n-th word. Built without a Regexp, like `squish` above. A `separator:`
+  # call is not grounded here. Same home and same rule as `truncate`.
+  def self.truncate_words(text, words_count, omission)
+    mark = omission || "..."
+    n = text.length
+    i = 0
+    words = 0
+    while i < n
+      j = i + 1
+      j += 1 while j < n && !WORD_SPACE.include?(text[j])
+      k = j
+      k += 1 while k < n && WORD_SPACE.include?(text[k])
+      words += 1
+      return text[0, j] + mark if words == words_count && k > j
+      i = k
+    end
+    text.dup
+  end
+
   # AS `Enumerable#sole`: THE one element, and a raise for any other
   # count — Rails' `SoleItemExpectedError` with its two messages. A
   # core_ext reopen (`Enumerable`) the transpiled runtimes cannot host,

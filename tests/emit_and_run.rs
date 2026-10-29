@@ -130,6 +130,10 @@ mod class_attribute;
 mod string_truncate;
 #[path = "emit_and_run/string_truncate.rs"]
 mod string_truncate_runs;
+#[path = "support/string_truncate_words.rs"]
+mod string_truncate_words;
+#[path = "emit_and_run/string_truncate_words.rs"]
+mod string_truncate_words_runs;
 #[path = "support/array_excluding.rs"]
 mod array_excluding;
 #[path = "emit_and_run/array_excluding.rs"]

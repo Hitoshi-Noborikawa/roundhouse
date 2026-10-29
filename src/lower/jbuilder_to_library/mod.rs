@@ -2040,7 +2040,36 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // of objects, one per element, each built by the block. Checked
         // before the single-pair shape below, which would otherwise take
         // the collection as the value and drop the block.
-        key if args.len() == 1 && block.is_some() => {
+        //
+        // Arguments after the collection do not change that: `set!`
+        // takes them as `*args` and, with a block, never reads them
+        // (`json.items(col, cache: true) { … }` is the same array). The
+        // one exception is JbuilderTemplate's own `set!`, which renders
+        // an inline partial before the block is considered when the
+        // first argument after the collection is a `partial:` + `as:`
+        // Hash, whatever follows it (jbuilder 2.15.1:
+        // `_partial_options?(args.first)`, i.e. `Hash === options &&
+        // options.key?(:as) && options.key?(:partial)`, so the keys'
+        // presence, whatever their values); that shape stays below.
+        //
+        // Jbuilder still evaluates those arguments before `set!` drops
+        // them, so the arm only takes them when they are literals: a
+        // call there (`cache: raise("bad")`, `cache: key_for(x)`) has
+        // effects the lowered array would lose.
+        //
+        // An explicit `json.set!(:key, col) { … }` is not this shape:
+        // its method name is not the key and its first argument is not
+        // the collection, so only its one-argument form reaches this
+        // arm, as before.
+        key if !args.is_empty()
+            && block.is_some()
+            && (key != "set!" || args.len() == 1)
+            && args[1..].iter().all(is_literal_value)
+            && !args
+                .get(1)
+                .and_then(extract_hash)
+                .is_some_and(|opts| hash_has_key(opts, "partial") && hash_has_key(opts, "as")) =>
+        {
             let Some((item_var, body)) = item_block(block) else {
                 return JbStmt::Unknown;
             };
@@ -2326,6 +2355,24 @@ fn hash_get_string(entries: &[(Expr, Expr)], key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// A literal, or an Array/Hash of literals: evaluating it has no
+/// effect, so dropping it unevaluated changes nothing.
+fn is_literal_value(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Lit { .. } => true,
+        ExprNode::Array { elements, .. } => elements.iter().all(is_literal_value),
+        ExprNode::Hash { entries, .. } => entries
+            .iter()
+            .all(|(k, v)| is_literal_value(k) && is_literal_value(v)),
+        _ => false,
+    }
+}
+
+/// Whether the Hash has a Symbol key `key`, whatever its value.
+fn hash_has_key(entries: &[(Expr, Expr)], key: &str) -> bool {
+    hash_get_value(entries, key).is_some()
 }
 
 /// The VALUE under a Symbol key, whatever its shape — the collection
