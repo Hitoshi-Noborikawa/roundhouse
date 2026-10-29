@@ -124,6 +124,23 @@ json.widgets(@widgets, cache: true) do |widget|
 end
 "#;
 
+/// An explicit `set!` with a key, a collection and a block. The method
+/// name is `set!`, not the key, and the first argument is the key, not
+/// the collection: the key-with-a-collection shape must not take it.
+const SET_BANG: &str = r#"json.count @widgets.size
+json.set!(:widgets, @widgets) { |widget| json.label widget.name }
+"#;
+
+/// An inline partial whose `partial:` is not a literal. JbuilderTemplate's
+/// `set!` checks that the `partial:` and `as:` keys are present, not
+/// their values, so this is still the inline partial, not an array
+/// built by the block.
+const PARTIAL_VAR: &str = r#"json.count @widgets.size
+json.widgets @widgets, partial: @partial, as: :widget do |widget|
+  json.label widget.name
+end
+"#;
+
 fn emitted() -> Vec<(String, String)> {
     let files: HashMap<PathBuf, Vec<u8>> = [
         ("db/schema.rb", SCHEMA),
@@ -142,6 +159,8 @@ fn emitted() -> Vec<(String, String)> {
         ("app/views/widgets/nested_mixed.json.jbuilder", NESTED_MIXED),
         ("app/views/widgets/sorted.json.jbuilder", SORTED),
         ("app/views/widgets/options.json.jbuilder", OPTIONS),
+        ("app/views/widgets/set_bang.json.jbuilder", SET_BANG),
+        ("app/views/widgets/partial_var.json.jbuilder", PARTIAL_VAR),
     ]
     .iter()
     .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
@@ -375,4 +394,26 @@ puts Views::Widgets.options_json(widgets)
 "#,
     );
     assert_eq!(out, r#"{"count":2,"widgets":[{"label":"b"},{"label":"a"}]}"#);
+}
+
+/// `json.set!(:widgets, col) { … }` is not a key named `set!` mapped
+/// over the Symbol `:widgets`.
+#[test]
+fn an_explicit_set_bang_with_a_block_is_not_a_key_with_a_collection() {
+    let files = emitted();
+    let src = view(&files, "widgets/set_bang_json.rb");
+    assert!(!src.contains("\\\"set!\\\":"), "`set!` is not the key:\n{src}");
+    assert!(!src.contains("__col0 = :widgets"), "the key is not the collection:\n{src}");
+}
+
+/// `partial:` + `as:` with a non-literal `partial:` value is still the
+/// inline partial, not an array built by the block.
+#[test]
+fn an_inline_partial_with_a_variable_path_is_not_an_array_of_blocks() {
+    let files = emitted();
+    let src = view(&files, "widgets/partial_var_json.rb");
+    assert!(
+        !src.contains("__col0.map") && !src.contains("\\\"label\\\":"),
+        "the block is not run per element:\n{src}"
+    );
 }

@@ -2046,12 +2046,20 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // (`json.items(col, cache: true) { … }` is the same array). The
         // one exception is JbuilderTemplate's own `set!`, which takes a
         // single trailing `partial:` + `as:` Hash for an inline partial
-        // before the block is considered; that shape stays below.
+        // before the block is considered (`args.one? &&
+        // _partial_options?(options)`, which tests that both keys are
+        // present, whatever their values); that shape stays below.
+        //
+        // An explicit `json.set!(:key, col) { … }` is not this shape:
+        // its method name is not the key and its first argument is not
+        // the collection, so only its one-argument form reaches this
+        // arm, as before.
         key if !args.is_empty()
             && block.is_some()
+            && (key != "set!" || args.len() == 1)
             && !(args.len() == 2
                 && extract_hash(&args[1]).is_some_and(|opts| {
-                    hash_get_string(opts, "partial").is_some() && hash_get_symbol(opts, "as").is_some()
+                    hash_has_key(opts, "partial") && hash_has_key(opts, "as")
                 })) =>
         {
             let Some((item_var, body)) = item_block(block) else {
@@ -2339,6 +2347,11 @@ fn hash_get_string(entries: &[(Expr, Expr)], key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether the Hash has a Symbol key `key`, whatever its value.
+fn hash_has_key(entries: &[(Expr, Expr)], key: &str) -> bool {
+    hash_get_value(entries, key).is_some()
 }
 
 /// The VALUE under a Symbol key, whatever its shape — the collection
