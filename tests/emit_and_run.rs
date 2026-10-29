@@ -19966,6 +19966,8 @@ mod module_protocol_block_self;
 mod ipaddr_include;
 #[path = "emit_and_run/hash_subclass_include.rs"]
 mod hash_subclass_include;
+#[path = "emit_and_run/module_query_class_unions.rs"]
+mod module_query_class_unions;
 #[path = "emit_and_run/guarded_declarations.rs"]
 mod guarded_declarations;
 #[path = "emit_and_run/lock_versions.rs"]
