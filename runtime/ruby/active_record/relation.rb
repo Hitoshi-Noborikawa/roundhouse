@@ -1268,6 +1268,11 @@ module ActiveRecord
       @model
     end
 
+    # Rails' `alias model klass`; lobsters' moderator pages read the table name off whichever relation they filter.
+    def model
+      @model
+    end
+
     # Rails' relation answers its model's class methods; ancestry reads
     # `scope.primary_key` off the relation it is handed.
     def primary_key
