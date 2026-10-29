@@ -2982,7 +2982,12 @@ fn resolve_through_chain(
     // Owner edge is the sibling's foreign key. `through_writer_join`
     // copies that same key; asking it again cannot change the edge.
     let (back_joins, edge_table, edge_fk) = match thr_through {
-        None => (Vec::new(), pluralize_snake(thr_target.0.as_str()), thr_fk.clone()),
+        // Not the class name's plural: the owner edge is the join model's own table, as the join below reads it.
+        None => (
+            Vec::new(),
+            models.iter().find(|m| &m.name == thr_target).map_or_else(|| pluralize_snake(thr_target.0.as_str()), |m| m.table.0.as_str().to_string()),
+            thr_fk.clone(),
+        ),
         Some(_) => resolve_through_chain(models, model, thr, depth + 1)?,
     };
     let thr_model = models.iter().find(|m| &m.name == thr_target)?;

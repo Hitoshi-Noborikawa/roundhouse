@@ -3215,6 +3215,14 @@ impl<'a> BodyTyper<'a> {
                                     retype.local_bindings.insert(name, ty);
                                 }
                                 last = self.analyze_expr(&mut exprs[i], &retype);
+                                // Not the binding the first typing exported: `values = xs.map { … prev … }` now answers the widened element.
+                                if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*exprs[i].node {
+                                    if let Some(ty) = value.ty.clone().filter(|t| !t.is_open()) {
+                                        if !nil_seed.contains_key(name) {
+                                            local_ctx.local_bindings.insert(name.clone(), ty);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

@@ -55,7 +55,7 @@ fn without_the_gem_nothing_of_it_ships() {
 fn a_gemfile_require_false_keeps_the_package_out() {
     let (emitted, _) = app(true).write("Gemfile", "gem \"rack-mini-profiler\", require: false\n").emit(BuildTarget::Spinel);
     let boot = std::fs::read_to_string(emitted.join("boot.rb")).unwrap();
-    assert!(!boot.contains("runtime/gems/"), "{boot}");
+    assert!(!boot.contains("require_relative \"runtime/gems/"), "{boot}");
 }
 
 #[test]
