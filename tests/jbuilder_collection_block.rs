@@ -116,6 +116,14 @@ const SORTED: &str = r#"json.sorted @widgets.sort_by(&:name) do |widget|
 end
 "#;
 
+/// A trailing options Hash after the collection: `set!` takes it as
+/// `*args` and, with a block, never reads it.
+const OPTIONS: &str = r#"json.count @widgets.size
+json.widgets(@widgets, cache: true) do |widget|
+  json.label widget.name
+end
+"#;
+
 fn emitted() -> Vec<(String, String)> {
     let files: HashMap<PathBuf, Vec<u8>> = [
         ("db/schema.rb", SCHEMA),
@@ -133,6 +141,7 @@ fn emitted() -> Vec<(String, String)> {
         ("app/views/widgets/mixed.json.jbuilder", MIXED),
         ("app/views/widgets/nested_mixed.json.jbuilder", NESTED_MIXED),
         ("app/views/widgets/sorted.json.jbuilder", SORTED),
+        ("app/views/widgets/options.json.jbuilder", OPTIONS),
     ]
     .iter()
     .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
@@ -268,7 +277,7 @@ fn render(name: &str, body: &str) -> String {
     }
     std::fs::write(dir.join("app/views.rb"), "").unwrap();
     let mut requires = String::new();
-    for name in ["_widget_json.rb", "items_json.rb", "inline_json.rb", "names_json.rb", "sorted_json.rb"] {
+    for name in ["_widget_json.rb", "items_json.rb", "inline_json.rb", "names_json.rb", "sorted_json.rb", "options_json.rb"] {
         let file = dir.join("app/views/widgets").join(name);
         requires.push_str(&format!("require {:?}\n", file.display().to_string()));
     }
@@ -342,4 +351,28 @@ puts Views::Widgets.sorted_json(widgets)
         out,
         r#"{"sorted":[{"id":2,"meta":{"size":null}},{"id":1,"meta":{"size":5}},{"id":3,"meta":{"size":null}}]}"#
     );
+}
+
+/// Options after the collection do not change the array: the block is
+/// still run once per element, and the key is not dropped.
+#[test]
+fn a_collection_with_options_and_a_block_is_still_an_array_of_objects() {
+    let files = emitted();
+    let src = view(&files, "widgets/options_json.rb");
+    assert!(
+        src.contains("__col0 = widgets") && src.contains("__col0.map") && src.contains("\\\"label\\\":"),
+        "the block's pairs are emitted per element:\n{src}"
+    );
+    assert!(src.contains("\\\"widgets\\\":"), "the key is written:\n{src}");
+}
+
+#[test]
+fn a_collection_with_options_and_a_block_renders_what_jbuilder_renders() {
+    let out = render(
+        "options",
+        r#"widgets = [Widget.new(1, "b", 5), Widget.new(2, "a", nil)]
+puts Views::Widgets.options_json(widgets)
+"#,
+    );
+    assert_eq!(out, r#"{"count":2,"widgets":[{"label":"b"},{"label":"a"}]}"#);
 }

@@ -2040,7 +2040,20 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // of objects, one per element, each built by the block. Checked
         // before the single-pair shape below, which would otherwise take
         // the collection as the value and drop the block.
-        key if args.len() == 1 && block.is_some() => {
+        //
+        // Arguments after the collection do not change that: `set!`
+        // takes them as `*args` and, with a block, never reads them
+        // (`json.items(col, cache: true) { … }` is the same array). The
+        // one exception is JbuilderTemplate's own `set!`, which takes a
+        // single trailing `partial:` + `as:` Hash for an inline partial
+        // before the block is considered; that shape stays below.
+        key if !args.is_empty()
+            && block.is_some()
+            && !(args.len() == 2
+                && extract_hash(&args[1]).is_some_and(|opts| {
+                    hash_get_string(opts, "partial").is_some() && hash_get_symbol(opts, "as").is_some()
+                })) =>
+        {
             let Some((item_var, body)) = item_block(block) else {
                 return JbStmt::Unknown;
             };
