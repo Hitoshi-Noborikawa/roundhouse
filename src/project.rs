@@ -1855,6 +1855,13 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
         .into_iter()
         .filter(|name| !defines(name))
         .collect();
+    fn names_app_path(ty: &crate::ty::Ty) -> bool {
+        match ty {
+            crate::ty::Ty::Class { id, .. } => id.0.as_str() == "Rails::AppPath",
+            crate::ty::Ty::Union { variants } => variants.iter().any(names_app_path),
+            _ => false,
+        }
+    }
     fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str]) {
         use crate::expr::ExprNode;
         use crate::ty::Ty;
@@ -1897,6 +1904,9 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (Some(_), "unescape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC2396_Parser") => Some("URI::RFC2396_Parser#unescape"),
                 (Some(_), "escape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC3986_Parser") => Some("URI::RFC3986_Parser#escape"),
                 (Some(_), "unescape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC3986_Parser") => Some("URI::RFC3986_Parser#unescape"),
+                // `Rails.root`'s stand-in is runtime/ruby/rails.rb's, which only the ruby family and spinel load,
+                // whichever arm of the receiver it is (`Rails::AppPath?`, `Rails::AppPath | Pathname`).
+                (Some(_), "expand_path") if recv_ty.is_some_and(names_app_path) => Some("Rails::AppPath#expand_path"),
                 _ => None,
             };
             if let Some(construct) = construct {

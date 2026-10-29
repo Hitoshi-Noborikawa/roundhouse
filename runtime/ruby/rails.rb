@@ -78,12 +78,18 @@ module Rails
 
     # Pathname#join takes any number of parts
     # (`Rails.root.join("source", "posts")`), and with none it answers
-    # the path itself.
+    # the path itself. An absolute part starts the path over, as it does
+    # in Pathname: `Rails.root.join("/var", "x")` is `/var/x`.
     def join(*parts)
       if parts.empty?
         self
       else
-        AppPath.new(@base + "/" + parts.join("/"))
+        base = @base
+        parts.each do |part|
+          text = part.to_s
+          base = text.start_with?("/") ? text : base + "/" + text
+        end
+        AppPath.new(base)
       end
     end
 
@@ -122,6 +128,15 @@ module Rails
 
     def exist?
       File.exist?(@base)
+    end
+
+    # Pathname#expand_path: the absolute path. Here the root is the
+    # directory the app serves from, which `File.expand_path` reads. Rails.root
+    # is absolute, so a directory argument never moves the path, but it is
+    # still converted as File.expand_path converts it (an Integer raises TypeError).
+    def expand_path(dir = nil)
+      path = File.expand_path(@base)
+      AppPath.new(dir.nil? ? path : File.expand_path(path, dir))
     end
   end
 
