@@ -98,6 +98,7 @@ SPINEL_TESTS = [
     "open_telemetry_stub_spinel",
     "around_block_filter_spinel",
     "after_initialize_bare_new_spinel",
+    "find_or_create_bang_records",
     "before_action_return_spinel",
     "plain_class_optional_keywords_spinel",
     "jbuilder_array_value_spinel",
