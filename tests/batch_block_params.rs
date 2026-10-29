@@ -31,11 +31,16 @@ end
 "#;
 
 fn app() -> roundhouse::App {
+    app_with(&[])
+}
+
+/// The app, with `files` written over it.
+fn app_with(files: &[(&str, &str)]) -> roundhouse::App {
     let mailer = ["from_class", "from_relation", "from_association", "digest", "tally"]
         .iter()
         .map(|action| format!("  def {action}(value)\n    @value = value\n    mail(to: \"to@example.com\")\n  end\n"))
         .collect::<String>();
-    let tree: HashMap<PathBuf, Vec<u8>> = [
+    let mut tree: HashMap<PathBuf, Vec<u8>> = [
         ("db/schema.rb", SCHEMA.to_string()),
         ("app/models/author.rb", "class Author < ApplicationRecord\n  has_many :posts\nend\n".into()),
         ("app/models/post.rb", "class Post < ApplicationRecord\n  belongs_to :author\nend\n".into()),
@@ -48,6 +53,7 @@ fn app() -> roundhouse::App {
     .into_iter()
     .map(|(p, c)| (PathBuf::from(p), c.into_bytes()))
     .collect();
+    tree.extend(files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())));
     let mut app = ingest_app_from_tree(tree).expect("ingest tree");
     Analyzer::new(&app).analyze(&mut app);
     app
@@ -88,4 +94,35 @@ fn find_in_batches_yields_an_array_of_records() {
 #[test]
 fn in_batches_still_yields_a_relation() {
     assert_eq!(param(&app(), "tally"), Some(Ty::Relation { of: ClassId(Symbol::from("Post")) }));
+}
+
+/// The app's own batch method answers a class-side call, whether the
+/// model defines it, inherits it or takes it from a concern, and these
+/// yield a String: the block parameter must not bind the model's type.
+/// A relation and a has_many reader still run Rails' batches, which yield
+/// the record (Active Record 8.1.4 on CRuby 4.0.7).
+#[test]
+fn the_apps_own_batch_method_is_not_rails() {
+    let defs = |prefix: &str| {
+        ["find_each", "find_in_batches", "in_batches"]
+            .iter()
+            .map(|name| format!("  def {prefix}{name}(**)\n    yield \"post\"\n  end\n"))
+            .collect::<String>()
+    };
+    let own = format!("class Post < ApplicationRecord\n  belongs_to :author\n{}end\n", defs("self."));
+    let inherited = format!("class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\n{}end\n", defs("self."));
+    let concern = format!("module Batched\n  extend ActiveSupport::Concern\n\n  class_methods do\n{}  end\nend\n", defs(""));
+    let includer = "class Post < ApplicationRecord\n  include Batched\n  belongs_to :author\nend\n";
+    for files in [
+        vec![("app/models/post.rb", own.as_str())],
+        vec![("app/models/application_record.rb", inherited.as_str())],
+        vec![("app/models/concerns/batched.rb", concern.as_str()), ("app/models/post.rb", includer)],
+    ] {
+        let app = app_with(&files);
+        assert_ne!(param(&app, "from_class"), Some(post()), "{files:?}");
+        assert_ne!(param(&app, "digest"), Some(Ty::Array { elem: Arc::new(post()) }), "{files:?}");
+        assert_ne!(param(&app, "tally"), Some(Ty::Relation { of: ClassId(Symbol::from("Post")) }), "{files:?}");
+        assert_eq!(param(&app, "from_relation"), Some(post()), "{files:?}");
+        assert_eq!(param(&app, "from_association"), Some(post()), "{files:?}");
+    }
 }

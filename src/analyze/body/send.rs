@@ -632,7 +632,9 @@ impl<'a> BodyTyper<'a> {
         // The batch iterators run on a model's rows, from the class
         // (`Post.find_each`), a relation or a has_many reader. Each yields
         // its own shape: `find_each` a record, `find_in_batches` an Array
-        // of records, `in_batches` a relation.
+        // of records, `in_batches` a relation. The app's own class method
+        // of the name answers a class-side call instead, and may yield
+        // anything; a relation still runs Rails' batches.
         if matches!(method.as_str(), "find_each" | "find_in_batches" | "in_batches") {
             let is_model = |id: &ClassId| self.classes().get(id).is_some_and(|c| c.table.is_some());
             let of = match recv_ty {
@@ -641,7 +643,9 @@ impl<'a> BodyTyper<'a> {
                     Ty::Class { id, .. } if is_model(id) => Some(id.clone()),
                     _ => None,
                 },
-                Ty::Class { id, .. } if class_object_receiver && is_model(id) => Some(id.clone()),
+                Ty::Class { id, .. } if class_object_receiver && is_model(id) => {
+                    (!self.source_class_side(id, method)).then(|| id.clone())
+                }
                 _ => None,
             };
             if let Some(of) = of {
@@ -1110,6 +1114,25 @@ impl<'a> BodyTyper<'a> {
             current = cls.parent.clone();
         }
         None
+    }
+
+    /// Whether the app defines `method` on `of`'s class side: a
+    /// `def self.…` on it or a superclass, or in the `class_methods` of a
+    /// concern either includes.
+    fn source_class_side(&self, of: &ClassId, method: &Symbol) -> bool {
+        let mut stack = vec![of.clone()];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(cls) = self.classes().get(&id) else { continue };
+            if cls.source_class_methods.contains(method) {
+                return true;
+            }
+            stack.extend(cls.includes.iter().chain(&cls.parent).cloned());
+        }
+        false
     }
 
     fn source_ancestor(&self, of: &ClassId, method: &Symbol) -> Option<ClassId> {
