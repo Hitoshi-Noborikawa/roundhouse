@@ -48,6 +48,16 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
         .filter(|class| class.is_module)
         .map(|class| class.name.clone())
         .collect();
+    // Every method name the app defines, on any class, module or model: a
+    // send of one on a hook's callback receiver runs app code, which may
+    // change the receiver's lookup (`base.install_factory` after
+    // `base.extend(Factory)`).
+    let app_methods: HashSet<Symbol> = super::classes(app)
+        .flat_map(|class| class.methods.iter())
+        .chain(app.models.iter().flat_map(|model| model.methods()))
+        .chain(app.test_modules.iter().flat_map(|module| module.helpers.iter()))
+        .map(|method| method.name.clone())
+        .collect();
     let modules_with_custom_new: HashSet<ClassId> = index
         .virtual_owners
         .iter()
@@ -97,6 +107,7 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
             &modules_with_custom_new,
             modules_with_custom_initialize,
             &known_module_names,
+            &app_methods,
             question,
             &mut modules_with_mutating_hooks,
         );
@@ -110,6 +121,7 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
             modules_with_custom_new: &modules_with_custom_new,
             modules_with_custom_initialize,
             known_modules: &known_module_names,
+            app_methods: &app_methods,
             modules_with_mutating_hooks: &modules_with_mutating_hooks,
             hook_targets: Some(&hook_targets),
             question,
@@ -303,6 +315,7 @@ fn resolve_mutating_hook_modules(
     modules_with_custom_new: &HashSet<ClassId>,
     modules_with_custom_initialize: &HashSet<ClassId>,
     known_modules: &KnownModules,
+    app_methods: &HashSet<Symbol>,
     question: Question,
     modules_with_mutating_hooks: &mut HashSet<ClassId>,
 ) {
@@ -327,6 +340,7 @@ fn resolve_mutating_hook_modules(
                     modules_with_custom_new,
                     modules_with_custom_initialize,
                     known_modules,
+                    app_methods,
                     modules_with_mutating_hooks,
                     hook_targets: None,
                     question,
@@ -644,13 +658,15 @@ pub(super) fn scan_constructor_mutations(
                     context.question,
                 );
             // A send on the callback receiver mutates its lookup only when
-            // the method is one that can (`mutates_lookup`): reading it
-            // (`base.methods`, `base.respond_to?`) or calling a class macro
-            // on it (`base.before_action`) does not, the same rule as for
-            // a named receiver. A send that passes the receiver on as an
-            // argument keeps today's handling.
+            // the method is one that can (`mutates_lookup`) or one the app
+            // defines, whose body may (`base.install_factory` after
+            // `base.extend(Factory)`): reading it (`base.methods`,
+            // `base.respond_to?`) or calling a framework macro on it
+            // (`base.before_action`) does not, the same rule as for a named
+            // receiver. A send that passes the receiver on as an argument
+            // keeps today's handling.
             let mutates_callback_receiver = callback_receiver.is_some_and(|callback_receiver| {
-                (mutates_lookup
+                ((mutates_lookup || context.app_methods.contains(method))
                     && recv
                         .as_ref()
                         .is_some_and(|recv| receiver_uses_callback(recv, callback_receiver)))
@@ -716,6 +732,8 @@ pub(super) struct ConstructorMutationContext<'a> {
     pub(super) modules_with_custom_new: &'a HashSet<ClassId>,
     pub(super) modules_with_custom_initialize: &'a HashSet<ClassId>,
     pub(super) known_modules: &'a KnownModules,
+    /// Every method name the app defines (`index_unmodeled_lookup_mutations`).
+    pub(super) app_methods: &'a HashSet<Symbol>,
     pub(super) modules_with_mutating_hooks: &'a HashSet<ClassId>,
     /// The module sets above, probed by spelling: once they are final.
     pub(super) hook_targets: Option<&'a HookTargets>,

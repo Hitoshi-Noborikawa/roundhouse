@@ -269,3 +269,43 @@ end
         assert!(constructor_keywords_are_refused(&source), "{body}");
     }
 }
+
+/// A hook that calls, on its receiver, a method an extended module defines,
+/// and that method replaces `new` (CodeRabbit on #1525): the call can't be
+/// read as a harmless macro, so keywords stay refused.
+#[test]
+fn included_callback_calling_an_extended_constructor_installer_still_refuses() {
+    for (hook, class_extends) in [
+        ("base.extend(Factory)\n    base.install_factory", ""),
+        ("base.install_factory", "  extend Factory\n"),
+    ] {
+        let source = format!(
+            r#"
+module Factory
+  def install_factory
+    define_singleton_method(:new) {{ |**options| options }}
+  end
+end
+
+module Hooked
+  def self.included(base)
+    {hook}
+  end
+end
+
+class WidgetClient
+{class_extends}  include Hooked
+
+  def initialize(args)
+    @name = args[:name]
+  end
+
+  def self.build
+    new(name: "x")
+  end
+end
+"#
+        );
+        assert!(constructor_keywords_are_refused(&source), "{hook} / {class_extends:?}");
+    }
+}
