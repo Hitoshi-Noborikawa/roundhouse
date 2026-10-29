@@ -260,7 +260,9 @@ pub(super) enum ResolvedConstant {
     Namespace { class: Arc<ClassId>, runtime: bool },
     /// `runtime_decl`: declared only by the runtime's sources, so a
     /// registry class of the same exact name describes this constant.
-    Value { declaration: DeclarationId, name: Arc<ClassId>, runtime: Option<Arc<Ty>>, runtime_decl: bool },
+    /// `singleton`: declared in a `class << self` (`X::<X>::NAME`), whose
+    /// segment `name` leaves out.
+    Value { declaration: DeclarationId, name: Arc<ClassId>, runtime: Option<Arc<Ty>>, runtime_decl: bool, singleton: bool },
 }
 
 /// Rubydex answers for one source file.
@@ -1050,7 +1052,7 @@ fn answer_file(
                     } else {
                         None
                     };
-                    ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime, runtime_decl }
+                    ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime, runtime_decl, singleton: name.contains("::<") }
                 }
             });
         match answers.references.entry(key) {

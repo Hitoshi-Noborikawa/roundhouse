@@ -7962,7 +7962,11 @@ fn emit_library_class_decl_inner(
     let replayed_in_place: Vec<&Expr> = lc
         .unknown_calls
         .iter()
-        .filter(|call| call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && !call.span.is_synthetic())
+        .filter(|call| {
+            (call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0
+                || (call.decisions & crate::expr::BODY_STATEMENT != 0 && super::expr::carries_body_statements()))
+                && !call.span.is_synthetic()
+        })
         .collect();
     // Kept out of `replayed_in_place`: that list is what turns on
     // source-ordered bodies, and a constant write must not move includes
@@ -8481,6 +8485,15 @@ fn emit_library_class_decl_inner(
                 writeln!(s, "{body_pad}end").unwrap();
                 continue;
             }
+            // One of the class's `class << self` is its singleton
+            // class's, written back there. Unindented: a heredoc's lines
+            // are whitespace-significant.
+            if value.decisions & crate::expr::SINGLETON_BODY != 0 && super::expr::carries_body_statements() {
+                writeln!(s, "{body_pad}class << self").unwrap();
+                writeln!(s, "{body_pad}  {} = {}", cname.as_str(), rendered.trim_end()).unwrap();
+                writeln!(s, "{body_pad}end").unwrap();
+                continue;
+            }
             let mut lines = rendered.lines();
             match lines.next() {
                 Some(first_line) => {
@@ -8586,7 +8599,7 @@ fn emit_library_class_decl_inner(
                 }
                 BodyItem::Initializer(expr) if ordered_body => {
                     nested.borrow_mut().write_expr(s, depth, lc, expr);
-                    for line in super::emit_expr(&top_level(expr)).lines() {
+                    for line in in_singleton_scope(expr, super::emit_expr(&top_level(expr))).lines() {
                         writeln!(s, "{body_pad}{line}").unwrap();
                     }
                 }
@@ -8778,6 +8791,19 @@ fn emit_library_class_decl_inner(
     }
 
     EmittedFile { path: out_path, content: s }
+}
+
+/// `text`, the emitted `expr`, inside a `class << self` when the source
+/// wrote it in the class's own (`expr::SINGLETON_BODY`) and the tree
+/// carries it there: Ruby runs it with the singleton class as `self`,
+/// definee and lexical scope.
+fn in_singleton_scope(expr: &Expr, text: String) -> String {
+    if expr.decisions & crate::expr::SINGLETON_BODY == 0 || !super::expr::carries_body_statements() {
+        return text;
+    }
+    let text = text.trim_end();
+    let body = if text.contains("<<") { text.to_string() } else { super::shared::indent_lines(text, 1) };
+    format!("class << self\n{body}\nend")
 }
 
 /// Same-file methods a constant-defining call must see, and the hooked
