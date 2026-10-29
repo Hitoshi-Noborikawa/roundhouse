@@ -40,6 +40,32 @@ end
 }
 
 #[test]
+fn expect_receiver_guard_preserves_non_array_lowering() {
+    for receiver in ["params", "self.params", "@params"] {
+        for filter in [":name", "items: [:header]", "items: [[{ nested: [:header] }]]"] {
+            let app = app_with_receiver(receiver).write(
+                "app/controllers/items_controller.rb",
+                &format!(
+                    "class ItemsController < ApplicationController\n  def create\n    render json: {receiver}.expect({filter})\n  end\nend\n"
+                ),
+            );
+            let (emitted, _) = app.emit(roundhouse::project::BuildTarget::Spinel);
+            let source = std::fs::read_to_string(emitted.join("app/controllers/items_controller.rb"))
+                .expect("controller");
+            if receiver == "params" && filter == ":name" {
+                assert!(source.contains(".fetch(\"name\", \"0\").to_s.to_i"), "{source}");
+            } else if receiver != "self.params" && filter == "items: [:header]" {
+                assert!(source.contains("Params.expect_present("), "{source}");
+            } else {
+                assert!(source.contains(".expect("), "{receiver}, {filter}: {source}");
+                assert!(!source.contains(".fetch("), "{receiver}, {filter}: {source}");
+                assert!(!source.contains("Params.expect_array("), "{receiver}, {filter}: {source}");
+            }
+        }
+    }
+}
+
+#[test]
 fn array_expect_lowers_explicit_params_receivers() {
     for receiver in ["self.params", "@params"] {
         let (emitted, errors) =

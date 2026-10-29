@@ -2275,14 +2275,21 @@ pub(super) fn rewrite_params(expr: &Expr) -> Expr {
         // the original params receiver, before recursive rewrites change it.
         ExprNode::Send { recv: Some(recv), method, args, block, parenthesized }
             if method.as_str() == "expect"
-                && (is_bare_params(recv)
-                    || matches!(&*recv.node,
+                && is_bare_params(recv) =>
+        {
+            Some(rewrite_expect(args, block.as_ref(), *parenthesized, e.span))
+        }
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "expect"
+                && (matches!(&*recv.node,
                         ExprNode::Send { recv: Some(receiver), method, args, block: None, .. }
                             if matches!(&*receiver.node, ExprNode::SelfRef)
                                 && method.as_str() == "params" && args.is_empty())
                     || matches!(&*recv.node, ExprNode::Ivar { name } if name.as_str() == "params")) =>
         {
-            Some(rewrite_expect(args, block.as_ref(), *parenthesized, e.span))
+            let [arg] = args.as_slice() else { return None };
+            let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+            params_expect_array(entries, e.span)
         }
         // Bare `params` (no recv, no args, no block) → `@params`.
         ExprNode::Send { recv: None, method, args, block: None, .. }
