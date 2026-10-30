@@ -442,14 +442,19 @@ module ActiveRecord
     end
 
     # `rel.and(other)` — Rails' Relation#and: the intersection, this
-    # relation's WHEREs and the other's together (a condition both hold
-    # is kept once, as Rails' `where_clause |=` keeps it). Either side
-    # matching nothing leaves nothing.
+    # relation's WHEREs and HAVINGs and the other's together (a condition
+    # both hold is kept once, as Rails' `where_clause |=` keeps it).
+    # Either side matching nothing leaves nothing. The rest of the two
+    # queries must agree, or it raises ArgumentError, as Rails does.
     def and(other)
       spawn.and!(other)
     end
 
     def and!(other)
+      incompatible = structurally_incompatible_with(other)
+      unless incompatible.empty?
+        raise ArgumentError, "Relation passed to #and must be structurally compatible. Incompatible values: [#{incompatible.map { |name| ":#{name}" }.join(", ")}]"
+      end
       own_lists
       unload_records
       other.where_clauses.each do |w|
@@ -458,9 +463,44 @@ module ActiveRecord
           @opaque_wheres = true
         end
       end
+      other.having_clauses.each { |h| @havings << h unless @havings.include?(h) }
       mark_null! if other.null_relation?
       @none = true if other.explicit_none?
       self
+    end
+
+    # Rails' `structurally_incompatible_values_for`: the query parts
+    # other than the conditions that differ between the two relations.
+    # A list part the other relation never set (`joins`, `order`, …)
+    # does not count, as Rails relaxes it.
+    def structurally_incompatible_with(other)
+      theirs = other.structural_values
+      out = []
+      structural_values.each_with_index do |mine, i|
+        their = theirs[i]
+        next if mine[1] == their[1]
+        next if mine[2] == "list" && their[1] == ""
+        out << mine[0]
+      end
+      out
+    end
+
+    # Each structural part as [name, its text, "list" for a list part].
+    def structural_values
+      [
+        ["joins", @joins.join("\n"), "list"],
+        ["order", @orders.join("\n"), "list"],
+        ["group", @groups.join("\n"), "list"],
+        ["includes", @includes.map { |name| name.to_s }.join("\n"), "list"],
+        ["with", @ctes.join("\n"), "list"],
+        ["select", @select_sql.to_s, "list"],
+        ["distinct", @distinct.to_s, ""],
+        ["limit", @limit.to_s, ""],
+        ["offset", @offset.to_s, ""],
+        ["from", @from.to_s, ""],
+        ["lock", @lock_clause, ""],
+        ["readonly", @readonly.to_s, ""]
+      ]
     end
 
     # Answers whether it actually PUSHED a clause — a nil or empty
@@ -1243,6 +1283,10 @@ module ActiveRecord
 
     def where_clauses
       @wheres
+    end
+
+    def having_clauses
+      @havings
     end
 
     # `rel.arel` — the relation reified as its SELECT text, for the

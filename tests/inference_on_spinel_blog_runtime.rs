@@ -534,7 +534,12 @@ fn untyped_subexpressions_baseline() {
     // `unscope_parts`/`unscope_part!` read the part names (+8), and `lock`
     // reads its clause (+1). Their parameters are vars on this RBS-less
     // probe; relation.rbs and connection.rbs type them for the RBS-paired gate.
-    const CEILING: usize = 1192;
+    // MEASURED 1209 on 2026-10-30 (on 1192): `and` refuses structurally
+    // different relations, as Rails does, and keeps the other's HAVINGs.
+    // `structurally_incompatible_with` reads the other relation's parts
+    // (+10), `and!` its HAVINGs and the check (+6), and `structural_values`
+    // its own list (+1). relation.rbs types them for the RBS-paired gate.
+    const CEILING: usize = 1209;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

@@ -1,4 +1,5 @@
-//! Relation methods the PostgreSQL fork specs reach, on SQLite: `and`,
+//! Relation methods the PostgreSQL fork specs reach, on SQLite: `and`
+//! (with HAVING, and refusing structurally different relations),
 //! `unscope` of the order, limit and offset, an offset with no limit, and
 //! `readonly`, whose records refuse to be saved, destroyed, updated by
 //! column or touched.
@@ -35,6 +36,11 @@ class RelationPartsTest < ActiveSupport::TestCase
     assert_raises(ActiveRecord::ReadOnlyRecord) { held.touch }
     assert_equal 1, Article.where(title: "a").count
     assert_equal [], left.and(Article.none).unscope(:where).pluck(:title)
+    grouped = left.group(:title).and(Article.group(:title).having("title <> 'a'"))
+    assert_equal %w[b c], grouped.order(:title).pluck(:title)
+    assert_raises(ArgumentError) { Article.limit(1).and(left) }
+    assert_raises(ArgumentError) { left.and(Article.order(:title)) }
+    assert_equal %w[b c], left.order(:title).and(right).pluck(:title)
   end
 end
 "#,
