@@ -185,15 +185,32 @@ end
         .assert_passes();
 }
 
-/// The runtime's `insert` is the Ruby family's too.
+/// The runtime's `insert`, `insert!` and the `insert_all` forms the
+/// lowering declines are the Ruby family's too; the forms it inlines
+/// compile on a strict target.
 #[test]
 fn insert_is_unsupported_on_strict_targets() {
     let (_emitted, errors) = keystore_app()
         .edit(
             "app/models/keystore.rb",
             "  def self.put(key, value)\n",
-            "  def self.add(key, value)\n    Keystore.insert({key: key, value: value})\n  end\n\n  def self.put(key, value)\n",
+            "  def self.add(key, value)\n    Keystore.insert({key: key, value: value})\n    Keystore.insert!({key: key, value: value})\n    Keystore.insert_all([{key: key, value: value}], unique_by: :key)\n  end\n\n  def self.put(key, value)\n",
         )
         .emit(roundhouse::project::BuildTarget::Rust);
-    assert!(errors.iter().any(|e| e.contains("`insert` is the Ruby-family runtime's")), "{errors:#?}");
+    for method in ["insert", "insert!", "insert_all"] {
+        let message = format!("`{method}` is the Ruby-family runtime's");
+        assert!(errors.iter().any(|e| e.contains(&message)), "{method}: {errors:#?}");
+    }
+}
+
+#[test]
+fn inlined_insert_all_is_supported_on_strict_targets() {
+    let (_emitted, errors) = keystore_app()
+        .edit(
+            "app/models/keystore.rb",
+            "  def self.put(key, value)\n",
+            "  def self.add(key, value)\n    Keystore.insert_all([{key: key, value: value}])\n    Keystore.insert_all!([{key: key, value: value}], returning: %w[id])\n  end\n\n  def self.put(key, value)\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(!errors.iter().any(|e| e.contains("insert_all")), "{errors:#?}");
 }

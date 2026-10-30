@@ -752,10 +752,17 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::Int),
     },
-    // The Ruby-family runtime's single-row insert answers Rails'
+    // The Ruby-family runtime's single-row inserts answer Rails'
     // `ActiveRecord::Result`, as `insert_all!` does.
     CatalogedMethod {
         name: "insert",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
+    },
+    CatalogedMethod {
+        name: "insert!",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
@@ -2158,7 +2165,7 @@ mod tests {
             "save", "save!", "create", "create!", "update", "update!",
             "update_all", "destroy", "destroy!", "destroy_all",
             "delete", "delete_all", "increment!", "decrement!",
-            "touch", "touch_all", "insert", "insert_all",
+            "touch", "touch_all", "insert", "insert!", "insert_all",
             "upsert", "upsert_all",
         ] {
             let found: Vec<_> = lookup_any(m)

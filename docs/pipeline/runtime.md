@@ -928,8 +928,11 @@ is `unique_by:`'s columns, or those of the unique index it names
 `update_only:` narrows the SET to the columns it names. Timestamps are
 stamped with the database's clock as Rails 8.1 stamps them (SQLite's
 `STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')`, PostgreSQL's `CURRENT_TIMESTAMP`
-in UTC), `updated_at` moved only when an assigned column changed. No
-strict runtime transpiles `connection.rb`; the call is reported there.
+in UTC), `updated_at` moved only when an assigned column changed.
+`returning:` is not supported: given rows, `upsert_all` (and `upsert`,
+which calls it) raises `NotImplementedError` where Rails answers the
+returned columns. No strict runtime transpiles `connection.rb`; the call
+is reported there.
 
 ### A failed statement raises Rails' class, and SQLite enforces foreign keys
 
