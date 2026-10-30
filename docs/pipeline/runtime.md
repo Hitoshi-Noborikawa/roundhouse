@@ -3198,8 +3198,10 @@ that defines its own `slice` keeps it.
 
 **Untyped sites, ruby family only.** A receiver the analyzer cannot
 type keeps the call, which `runtime/ruby/active_record/connection.rb`
-answers beside `read_attribute`, reading each name through the `[]`
-column indexer. Rails reads through `public_send`, so a model method
+answers beside `read_attribute`, reading each name, Symbol or String
+and flattened as Rails flattens them, through the `[]` column indexer.
+That indexer answers a temporal column's stored text, so `slice` parses
+it into the Time the reader (and the typed path) answers. Rails reads through `public_send`, so a model method
 that is not a column (`slice(:id, :avatar_url)`) is a
 `NotImplementedError` there, not a nil. It is not in `base.rb` for the
 reason `read_attribute` is not: the strict targets have no untyped

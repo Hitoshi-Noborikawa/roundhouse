@@ -21,6 +21,10 @@ check("concern call site", a.card, { "id" => a.id, "title" => "Sliced" })
 check("model class method", Article.class_side, "id,title")
 check("namespaced module class method", Article::Utilities.count_of, 2)
 check("untyped call site", Article.all.first.slice(:title, :body), { "title" => "Sliced", "body" => "A sufficiently long body." })
+check("untyped String and Array names", Article.all.first.slice("title", [:body, :title]), { "title" => "Sliced", "body" => "A sufficiently long body." })
+stamp = Article.all.first.slice(:created_at)["created_at"]
+check("untyped timestamp is a Time", stamp.is_a?(Time), true)
+check("untyped timestamp", stamp, Article.find(a.id).created_at)
 check("no names", a.slice, {})
 check("no names, found receiver", Article.no_names_of(a.id), {})
 begin
