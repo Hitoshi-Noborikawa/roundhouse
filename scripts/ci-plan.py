@@ -78,7 +78,7 @@ SPINEL_TESTS = [
     "temporal_initialize_spinel",
     "framework_tests_spinel",
     "spinel_web_push_crypto",
-    "sponge_random",
+    "openssl_random",
     "spinel_db_lease",
     *PARAM_BIND_TESTS,
     "spinel_stmt_cache_lru",
@@ -546,12 +546,10 @@ def native_coverage(path):
         name = path.rsplit("/", 1)[-1]
         owned_tests = set()
         if path in {
-            "runtime/spinel/facades/sponge.rb",
-            "runtime/spinel/facades/sponge.rbs",
             "runtime/spinel/secure_random_stub.rb",
             "runtime/spinel/secure_random_stub.rbs",
         }:
-            owned_tests.add("sponge_random")
+            owned_tests.add("openssl_random")
         if name == "statement_cache_cases.rb":
             owned_tests.add("param_binds")
         if any(word in name for word in ("web_push", "base64")):
