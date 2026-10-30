@@ -50,6 +50,11 @@
 //! * `validates_uniqueness_to_tenant` takes literal `scope:`,
 //!   `case_sensitive:`, `allow_nil:`, `allow_blank:` and `message:`;
 //!   anything else is refused.
+//! * A model that also declares `belongs_to :<tenant>` keeps whichever
+//!   declaration comes later, as Rails does; the scope and the stamp use
+//!   the gem's key either way. Rails runs both declarations' presence
+//!   validations, so it reports `must exist` twice where this reports it
+//!   once.
 //! * Not modelled: the `TenantIsImmutable` raise when a persisted
 //!   record's tenant key is reassigned, the check that a record's other
 //!   `belongs_to` targets belong to the current tenant, carrying the
@@ -304,24 +309,35 @@ fn synthesize(src: &str, what: &str, app: &crate::App) -> Option<Model> {
 }
 
 /// Put `synth`'s items where the macro at `at` stood, and drop the macro.
-/// A `belongs_to` the model declares itself wins.
+///
+/// The gem's `belongs_to` is a second declaration when the model declares
+/// the association itself, and in Rails the later one's reflection wins
+/// (the scope and the stamp keep the gem's key either way): a model's own
+/// `belongs_to` after the macro is kept and the gem's dropped; one before
+/// it is replaced, in place so no later index moves, by the gem's.
 fn splice(model: &mut Model, synth: Model, at: usize) {
-    let own_assocs: Vec<String> = model
-        .body
-        .iter()
-        .filter_map(|it| match it {
-            ModelBodyItem::Association { assoc, .. } => Some(assoc.name().as_str().to_string()),
-            _ => None,
-        })
-        .collect();
-    let additions: Vec<ModelBodyItem> = synth
-        .body
-        .into_iter()
-        .filter(|it| match it {
-            ModelBodyItem::Association { assoc, .. } => !own_assocs.contains(&assoc.name().as_str().to_string()),
-            _ => true,
-        })
-        .collect();
+    let own = |body: &[ModelBodyItem], name: &str| -> Vec<usize> {
+        body.iter()
+            .enumerate()
+            .filter(|(_, it)| matches!(it, ModelBodyItem::Association { assoc, .. } if assoc.name().as_str() == name))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let mut additions: Vec<ModelBodyItem> = Vec::new();
+    for item in synth.body {
+        let ModelBodyItem::Association { assoc, .. } = &item else {
+            additions.push(item);
+            continue;
+        };
+        let declared = own(&model.body, assoc.name().as_str());
+        if declared.iter().any(|&i| i > at) {
+            continue;
+        }
+        match declared.last() {
+            Some(&i) => model.body[i] = item,
+            None => additions.push(item),
+        }
+    }
     model.body.remove(at);
     let pos = at.min(model.body.len());
     model.body.splice(pos..pos, additions);

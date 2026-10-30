@@ -227,3 +227,36 @@ fn a_literal_uniqueness_message_stays_literal() {
         .collect();
     assert_eq!(got, [Some(msg.to_string())]);
 }
+
+/// The gem's `belongs_to` is a second declaration of the association, and
+/// in Rails the later declaration's reflection wins (Rails 8.1.4: with the
+/// model's `belongs_to :account, foreign_key: :legacy_account_id` first,
+/// `reflect_on_association(:account).foreign_key` is `account_id`; with
+/// it after the macro, `legacy_account_id`). The scope and the stamp use
+/// the gem's key either way.
+#[test]
+fn a_redeclared_tenant_association_follows_the_later_declaration() {
+    let schema_with_legacy = SCHEMA.replace("    t.integer \"account_id\"\n", "    t.integer \"account_id\"\n    t.integer \"legacy_account_id\"\n");
+    let fkey = |src: &str| {
+        let files: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = tree(Some(LOCK), &[("app/models/widget.rb", src)])
+            .into_iter()
+            .map(|(p, c)| if p.ends_with("db/schema.rb") { (p, schema_with_legacy.clone().into_bytes()) } else { (p, c) })
+            .collect();
+        let app = ingest_app_from_tree(files).expect("ingest");
+        let widget = model(&app, "Widget");
+        let assocs: Vec<String> = widget
+            .body
+            .iter()
+            .filter_map(|i| match i {
+                ModelBodyItem::Association { assoc, .. } => Some(format!("{assoc:?}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(assocs.len(), 1, "{assocs:?}");
+        assocs[0].contains("legacy_account_id")
+    };
+    let own_first = "class Widget < ApplicationRecord\n  belongs_to :account, foreign_key: :legacy_account_id\n  acts_as_tenant :account\nend\n";
+    let own_last = "class Widget < ApplicationRecord\n  acts_as_tenant :account\n  belongs_to :account, foreign_key: :legacy_account_id\nend\n";
+    assert!(!fkey(own_first), "the gem's later belongs_to (account_id) wins");
+    assert!(fkey(own_last), "the model's later belongs_to (legacy_account_id) wins");
+}
