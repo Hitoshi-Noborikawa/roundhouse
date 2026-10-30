@@ -2621,6 +2621,20 @@ end
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
+    // After the splice for the same reason; reads the initializers for an
+    // `ActsAsTenant.configure` it does not model.
+    {
+        let init_dir = dir.join("config/initializers");
+        let mut initializers = Vec::new();
+        if app.gem_lock.as_ref().is_some_and(|l| l.has("acts_as_tenant")) && vfs.is_dir(&init_dir) {
+            for entry in read_rb_files(vfs, &init_dir)? {
+                if let Ok(text) = vfs.read_to_string(&entry) {
+                    initializers.push((entry.display().to_string(), text));
+                }
+            }
+        }
+        super::acts_as_tenant::expand_acts_as_tenant(&mut app, &initializers)?;
+    }
     // Before the macros: a macro's `extend Owner::ClassMethods` names the module this surfaces.
     super::referenced_carriers::surface_referenced_carriers(&mut app, &sources);
     super::conditional_permit::apply(&mut app);
