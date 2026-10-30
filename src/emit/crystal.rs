@@ -795,6 +795,10 @@ fn emit_app_cr(emitted: &[EmittedFile]) -> EmittedFile {
         "param_value",
         "hash_with_indifferent_access",
         "inflector",
+        // Ruby's core error classes (`NoMethodError`, `NameError`): errors
+        // subclasses them (`ActiveModel::UnknownAttributeError <
+        // NoMethodError`), and a superclass resolves at parse time.
+        "core_errors",
         // active_record_base → errors keeps the forward-ref chain
         // resolvable at parse time. Base is referenced by errors'
         // RecordInvalid as a property type (parse-time class macro);
