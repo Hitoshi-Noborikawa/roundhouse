@@ -380,7 +380,7 @@ fn rewrite_time_duration_arith(expr: &mut Expr) {
                 method: Symbol::from("time_operand"),
                 args: vec![operand],
                 block: None,
-                parenthesized: false,
+                parenthesized: true,
             },
         );
         args[0].ty = Some(Ty::Untyped);
