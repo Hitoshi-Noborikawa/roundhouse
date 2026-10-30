@@ -3083,11 +3083,12 @@ module ActiveRecord
     # type: a boolean against an integer column (`is_not_deleted
     # smallint`, `where(is_not_deleted: true)`) is 1 or 0, which
     # PostgreSQL's integer compares with and its TRUE does not. Every
-    # other value, and a column of another table, binds as given.
+    # other value, and a column of another table, binds as given. The
+    # boolean test comes first: `schema_column_types` builds its hash on
+    # each call, and every `where(id: ids)` element passes through here.
     def column_bound_value(col, val)
-      return val unless integer_column?(col)
-      return 1 if val == true
-      return 0 if val == false
+      return 1 if val == true && integer_column?(col)
+      return 0 if val == false && integer_column?(col)
       val
     end
 
