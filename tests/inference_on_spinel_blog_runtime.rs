@@ -529,7 +529,12 @@ fn untyped_subexpressions_baseline() {
     // _bulk_stamps (2), _database_now_sql and _same_value_sql (1 each),
     // Arel::Nodes.quote_scalar's boolean escape (2) and
     // Relation#bound_text (1). The RBS-paired gate types them.
-    const CEILING: usize = 1173;
+    // MEASURED 1192 on 2026-10-30 against main 3dfccb68 (1173): Relation's
+    // `and`/`and!` read the other relation's conditions and none (+10),
+    // `unscope_parts`/`unscope_part!` read the part names (+8), and `lock`
+    // reads its clause (+1). Their parameters are vars on this RBS-less
+    // probe; relation.rbs and connection.rbs type them for the RBS-paired gate.
+    const CEILING: usize = 1192;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
