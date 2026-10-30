@@ -37,6 +37,7 @@ fn declared_elsewhere(model: &Model, name: &Symbol) -> bool {
             _ => false,
         })
         || base_instance_methods().contains(name)
+        || model.select_aliases.iter().any(|a| &a.name == name && a.source_method)
 }
 
 fn unique_aliases(model: &Model) -> Vec<Symbol> {

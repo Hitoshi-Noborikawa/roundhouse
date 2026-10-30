@@ -49,7 +49,18 @@ pub(super) fn stamp(app: &mut App) {
                 }
             }
         }
+        for view in &app.views {
+            visit(&view.body, None);
+        }
     }
+    let methods = crate::analyze::SourceMethodIndex::new(app);
+    let found: Vec<(ClassId, SelectAlias)> = found
+        .into_iter()
+        .map(|(class, alias)| {
+            let source_method = methods.instance_method(&class, alias.name.as_str());
+            (class, SelectAlias { source_method, ..alias })
+        })
+        .collect();
     for (class, alias) in found {
         let Some(model) = app.models.iter_mut().find(|m| m.name == class) else { continue };
         if !model.select_aliases.iter().any(|a| a.name == alias.name && a.span == alias.span) {
@@ -67,7 +78,7 @@ fn collect(expr: &Expr, ctx: Option<&ClassId>, models: &[Model], out: &mut Vec<(
         for arg in args {
             let Some(sql) = sql_text(arg) else { continue };
             for name in aliases(&sql) {
-                out.push((model.clone(), SelectAlias { name: Symbol::from(name), span: expr.span }));
+                out.push((model.clone(), SelectAlias { name: Symbol::from(name), span: expr.span, source_method: false }));
             }
         }
     }

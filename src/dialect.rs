@@ -40,6 +40,9 @@ pub struct SelectAlias {
     pub name: Symbol,
     #[serde(default, skip_serializing_if = "Span::is_synthetic")]
     pub span: Span,
+    // A flag rather than dropping the alias: a declared `attribute` of that name still takes the selected value.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_method: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

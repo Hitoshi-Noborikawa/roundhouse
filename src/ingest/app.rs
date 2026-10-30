@@ -2697,7 +2697,7 @@ end
     // `numericality:` on an untyped attribute is decided per target
     // (`refuse_numericality_allow_on_untyped`, `session::analyze_and_lower_for`).
     gap_acceptance_on_undeclared(&mut app);
-    // Not at model ingest: the `select` naming a model's aliases can sit in another model, class or controller.
+    // Not at model ingest: the `select` naming a model's aliases can sit in another model, class, controller or view.
     super::select_aliases::stamp(&mut app);
     gap_uniqueness_on_polymorphic_attribute(&mut app);
     // After every model and library class: a custom `validates` key is

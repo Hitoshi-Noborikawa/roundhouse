@@ -28,6 +28,15 @@ fn app() -> emit_and_run::Overlay {
                 "  end\n",
             ),
         )
+        .edit(
+            "app/models/application_record.rb",
+            "  primary_abstract_class\n",
+            "  primary_abstract_class\n\n  def rank\n    \"parent\"\n  end\n",
+        )
+        .write(
+            "app/views/articles/scores.html.erb",
+            "<% Comment.select(\"id, 1 AS score, 2 AS rank\").each do |c| %><%= c.score %><%= c.rank %><% end %>\n",
+        )
 }
 
 const ASSERTIONS: &str = r##"article = Article.create!(title: "Tallies", body: "a body that is long enough")
@@ -48,6 +57,10 @@ rescue NoMethodError => e
 end
 raise missing unless missing == "undefined method 'times' for an instance of Comment"
 raise Comment.find(plain.id).total.inspect unless Comment.find(plain.id).total.nil?
+scored = Comment.select("id, 1 AS score").to_a.first.score
+raise scored.inspect unless scored == 1
+ranked = Comment.select("id, 2 AS rank").to_a.first.rank
+raise ranked.inspect unless ranked == "parent"
 puts "select aliases passed"
 "##;
 
@@ -69,10 +82,11 @@ fn select_aliases_read_back_on_spinel() {
 #[test]
 fn a_target_without_the_runtime_relation_reports_each_alias() {
     let (_emitted, errors) = app().emit(roundhouse::project::BuildTarget::Typescript);
-    for alias in ["times", "total", "widest"] {
+    for alias in ["times", "total", "widest", "score"] {
         assert!(
             errors.iter().any(|e| e.contains(&format!("select alias `{alias}` not supported (typescript)"))),
             "{alias}: {errors:?}"
         );
     }
+    assert!(!errors.iter().any(|e| e.contains("select alias `rank`")), "{errors:?}");
 }
