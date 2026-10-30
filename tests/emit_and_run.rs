@@ -20144,6 +20144,9 @@ mod reopened_class_constructor;
 #[path = "emit_and_run/flash_any_key.rs"]
 mod flash_any_key;
 
+#[path = "emit_and_run/select_alias_attributes.rs"]
+mod select_alias_attributes;
+
 #[path = "emit_and_run/route_arg_column_named_like_association.rs"]
 mod route_arg_column_named_like_association;
 

@@ -1895,6 +1895,34 @@ the state set, because `begin`/`ensure` is not available in this file
 surface lives in the ruby-family `connection.rb` reopen). The push and
 the pop are symmetric on every path that returns.
 
+### A select alias is a reader only where the `select` names it in source
+
+Rails reads every extra column of a result set back as an attribute:
+after `select("count(*) AS times, title")` each record answers
+`record.times`. `ingest::select_aliases` finds the `AS` names of a
+`select` whose argument is a string literal (interpolations count as
+values, never as names) and whose model is known: a chain of query
+methods rooted at a model constant, the implicit self of a model's class
+method or scope, or an association scope (its target). The model lowerer
+gives each such alias a reader (`model_to_library::select_aliases`), and
+`instantiate` keeps the row when it carries one. A name a column, an
+association, a method or `Base` already answers gets no reader; a name
+an `attribute :name, :type` declares takes the selected value through
+its casting writer, as Rails' attribute set does (lobsters' `Vote#count`
+and `#usernames` read nil before).
+
+Where the two differ:
+
+- A `select` built at run time, or reached through a receiver the pass
+  cannot place (a local, an association reader), gives no reader; the
+  read stays the `no known method` error it was.
+- An alias written without `AS` (`count(*) times`) is not read.
+- A reader answers the driver's value untyped, and raises Rails'
+  `NoMethodError` on a record whose query did not select it.
+- The strict targets have no runtime Relation to load a custom `select`
+  with, so each alias is an error there
+  (`select_alias_gaps_for_target`).
+
 ### A `has_many :through` reader is a live Relation — only here
 
 `user.rooms`, `room.users`, `user.reachable_messages`: a reader for an

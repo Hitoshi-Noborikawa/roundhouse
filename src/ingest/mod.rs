@@ -109,6 +109,7 @@ pub mod sources;
 pub mod spec;
 pub mod type_ascription;
 pub mod sql_functions;
+mod select_aliases;
 pub mod structure_sql;
 pub mod survey;
 mod tableless_inheritance;
