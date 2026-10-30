@@ -36,6 +36,10 @@ const ROUTES: &str = "Rails.application.routes.draw do
   direct :pick_strike do |note, options|
     route_for :strike, note&.id
   end
+  direct :pick_tagged do |note, options|
+    route_for_arg_0 = \"?from=helper\"
+    route_for(:archive, note&.id) + route_for_arg_0
+  end
 end
 ";
 
@@ -52,6 +56,10 @@ const HELPER: &str = "module LinkHelper
 
   def first_note_strike
     pick_strike_path(Note.first)
+  end
+
+  def first_note_tagged
+    pick_tagged_path(Note.first)
   end
 end
 ";
@@ -71,6 +79,7 @@ raise "first_note: " + RouteHelpers.first_note_path.inspect unless RouteHelpers.
 raise "named: " + RouteHelpers.strike_path("abc").inspect unless RouteHelpers.strike_path("abc") == "/strikes/abc"
 raise "this_year: " + RouteHelpers.this_year_path.inspect unless RouteHelpers.this_year_path == "/archive/2026"
 raise "pick_archive nil: " + RouteHelpers.pick_archive_path(nil).inspect unless RouteHelpers.pick_archive_path(nil) == "/archive"
+raise "pick_tagged nil: " + RouteHelpers.pick_tagged_path(nil).inspect unless RouteHelpers.pick_tagged_path(nil) == "/archive?from=helper"
 puts "direct route_for passed"
 "#;
 
@@ -90,6 +99,11 @@ fn route_for_converts_an_integer_only_for_a_string_slot() {
     // Into a REQUIRED String segment it stays as it was: Rails raises on a
     // nil there (a separate question from this conversion).
     assert!(helpers.contains("RouteHelpers.strike_path(note && note.id)"), "{helpers}");
+    // A helper that binds `route_for_arg_0` itself keeps it: the temporary
+    // takes a name the helper doesn't use.
+    let tagged = helpers.split("def self.pick_tagged_path").nth(1).expect("pick_tagged_path emitted");
+    let tagged = tagged.split("\n  def ").next().unwrap_or(tagged);
+    assert!(tagged.contains("route_for_arg_1 = note && note.id"), "{tagged}");
 }
 
 #[test]

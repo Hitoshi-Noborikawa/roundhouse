@@ -85,7 +85,12 @@ fn build_direct_helper(
         })
         .collect();
     let mut body = helper.body.clone();
-    rewrite_route_for(&mut body, flat, helper_params, &std::cell::Cell::new(0));
+    // The temporaries `rewrite_route_for` introduces take names the
+    // helper doesn't already use: its block parameters and its locals.
+    let mut taken: crate::det::HashSet<Symbol> = helper.params.iter().cloned().collect();
+    crate::lower::model_to_library::markers::collect_local_names(&body, &mut taken);
+    let fresh = FreshLocals { next: std::cell::Cell::new(0), taken: std::cell::RefCell::new(taken) };
+    rewrite_route_for(&mut body, flat, helper_params, &fresh);
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(format!("{}_path", helper.name.as_str())),
@@ -108,10 +113,10 @@ fn rewrite_route_for(
     expr: &mut Expr,
     flat: &[FlatRoute],
     helper_params: &crate::det::HashMap<String, Vec<crate::ty::Ty>>,
-    next_local: &std::cell::Cell<usize>,
+    fresh: &FreshLocals,
 ) {
     expr.node
-        .for_each_child_mut(&mut |c| rewrite_route_for(c, flat, helper_params, next_local));
+        .for_each_child_mut(&mut |c| rewrite_route_for(c, flat, helper_params, fresh));
 
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return;
@@ -166,7 +171,7 @@ fn rewrite_route_for(
             if wants_str && is_int {
                 to_s(arg.clone(), arg.span)
             } else if wants_str && optional_slot && nilable_int {
-                to_s_keeping_nil(arg.clone(), next_local)
+                to_s_keeping_nil(arg.clone(), fresh)
             } else {
                 arg.clone()
             }
@@ -329,14 +334,32 @@ fn send0(recv: Expr, method: &str, span: Span) -> Expr {
     )
 }
 
-/// `value`'s `to_s`, or nil when it is nil: bound once to a fresh
-/// `route_for_arg_<n>` local, then `nil? ? nil : to_s`.
-fn to_s_keeping_nil(value: Expr, next_local: &std::cell::Cell<usize>) -> Expr {
+/// Names for the temporaries one direct helper's rewrite introduces:
+/// `route_for_arg_<n>`, skipping any name the helper already uses.
+struct FreshLocals {
+    next: std::cell::Cell<usize>,
+    taken: std::cell::RefCell<crate::det::HashSet<Symbol>>,
+}
+
+impl FreshLocals {
+    fn name(&self) -> Symbol {
+        loop {
+            let n = self.next.get();
+            self.next.set(n + 1);
+            let candidate = Symbol::from(format!("route_for_arg_{n}"));
+            if self.taken.borrow_mut().insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+    }
+}
+
+/// `value`'s `to_s`, or nil when it is nil: bound once to a fresh local,
+/// then `nil? ? nil : to_s`.
+fn to_s_keeping_nil(value: Expr, fresh: &FreshLocals) -> Expr {
     use crate::ty::Ty;
     let span = value.span;
-    let n = next_local.get();
-    next_local.set(n + 1);
-    let name = Symbol::from(format!("route_for_arg_{n}"));
+    let name = fresh.name();
     let value_ty = value.ty.clone().unwrap_or(Ty::Untyped);
     let typed = |node: ExprNode, ty: Ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
     let read = || typed(ExprNode::Var { id: VarId(0), name: name.clone() }, value_ty.clone());
