@@ -1213,6 +1213,11 @@ impl Analyzer {
                 classes.entry(id.clone()).or_default().constructor_calls_super = expr_calls_super(&method.body);
             }
         }
+        for controller in &app.controllers {
+            for action in controller.actions() {
+                classes.entry(controller.name.clone()).or_default().source_instance_methods.insert(action.name.clone());
+            }
+        }
 
         // A class named in a signature means the lexically nearest one
         // (`Capabilities::Charge` inside `ShopifyPayments::Capability`),

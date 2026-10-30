@@ -119,6 +119,57 @@ end
     ),
 ];
 
+/// A controller helper `name` that answers a Symbol. The action writes it
+/// into a ring through `label` and reads it back.
+const CONTROLLER: &[(&str, &str)] = &[
+    (
+        "app/controllers/application_controller.rb",
+        "class ApplicationController < ActionController::Base\nend\n",
+    ),
+    (
+        "app/controllers/tags_controller.rb",
+        r#"class TagsController < ApplicationController
+  def show
+    ring = Ring.new
+    ring.write(:k, label)
+    @value = ring.read(:k)
+  end
+
+  private
+
+  def label
+    name
+  end
+
+  def name
+    :tags
+  end
+end
+"#,
+    ),
+    (
+        "app/models/ring.rb",
+        r#"class Ring
+  def initialize
+    @store = {}
+  end
+
+  def pick(key, original)
+    original.nil? ? :none : original
+  end
+
+  def write(key, value)
+    @store[key] = pick(key, value)
+  end
+
+  def read(key)
+    pick(key, @store[key])
+  end
+end
+"#,
+    ),
+];
+
 /// No `name` of its own. The class-side send is `Module#name`. Ruby raises
 /// `NameError` for the instance send; the analyzer keeps its String
 /// fallback there, which this pins.
@@ -131,6 +182,35 @@ const PLAIN: &[(&str, &str)] = &[(
 
   def label
     name
+  end
+end
+"#,
+)];
+
+/// A literal send dispatches on its receiver's side for every method, not
+/// only `name`: an instance's `send(:kind)` reaches the instance's `kind`,
+/// and a class method's reaches the class method.
+const SIDES: &[(&str, &str)] = &[(
+    "app/models/widget.rb",
+    r#"class Widget
+  def self.kind
+    1
+  end
+
+  def kind
+    :k
+  end
+
+  def self.own_kind
+    send(:kind)
+  end
+
+  def self.instance_kind
+    new.send(:kind)
+  end
+
+  def sent_kind
+    public_send(:kind)
   end
 end
 "#,
@@ -199,8 +279,31 @@ fn a_ring_keeps_no_string_the_reader_never_returns() {
 }
 
 #[test]
+fn a_ring_through_send_keeps_no_string_the_reader_never_returns() {
+    let tag = RING[0].1.replace("    name\n", "    send(:name)\n");
+    assert_ne!(tag, RING[0].1);
+    let analyzed = analyze(&[(RING[0].0, tag.as_str()), RING[1], RING[2]]);
+    assert_eq!(ret(&analyzed, "Ring", "read", false), Ty::Sym);
+}
+
+#[test]
+fn a_controller_ring_keeps_no_string_its_name_helper_never_returns() {
+    let analyzed = analyze(CONTROLLER);
+    assert_eq!(ret(&analyzed, "TagsController", "label", false), Ty::Sym);
+    assert_eq!(ret(&analyzed, "Ring", "read", false), Ty::Sym);
+}
+
+#[test]
 fn a_class_without_its_own_name_keeps_the_string_fallback() {
     let analyzed = analyze(PLAIN);
     assert_eq!(ret(&analyzed, "Plain", "label", false), Ty::Str);
     assert_eq!(ret(&analyzed, "Plain", "title", true), Ty::Str);
+}
+
+#[test]
+fn a_literal_send_keeps_its_receivers_side() {
+    let analyzed = analyze(SIDES);
+    assert_eq!(ret(&analyzed, "Widget", "sent_kind", false), Ty::Sym);
+    assert_eq!(ret(&analyzed, "Widget", "instance_kind", true), Ty::Sym);
+    assert_eq!(ret(&analyzed, "Widget", "own_kind", true), Ty::Int);
 }

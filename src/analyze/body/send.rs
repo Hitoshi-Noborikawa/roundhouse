@@ -1456,8 +1456,9 @@ impl<'a> BodyTyper<'a> {
                     }
                     _ => None,
                 };
+                // Same receiver, so the same side: an instance's send(:m) is its own m, not a class method m.
                 if let Some(name) = literal_name {
-                    return self.dispatch(recv_ty, &name, block_ret, &args[1..]);
+                    return self.dispatch_on(recv_ty, &name, block_ret, &args[1..], instance_receiver);
                 }
             }
             return match recv_ty {
