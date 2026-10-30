@@ -185,6 +185,32 @@ end
         .assert_passes();
 }
 
+/// The two `insert_all` forms the lowering inlines, which a strict target
+/// therefore does not report: the bare one skips a duplicate, and the
+/// raising one answers the RETURNING columns.
+#[test]
+fn inlined_insert_all_forms_run() {
+    keystore_app()
+        .write(
+            "test/models/keystore_inlined_insert_all_test.rb",
+            r#"require "test_helper"
+
+class KeystoreInlinedInsertAllTest < ActiveSupport::TestCase
+  test "insert_all skips a duplicate and insert_all! returns ids" do
+    Keystore.insert_all([{ key: "a", value: 1 }, { key: "b", value: 2 }])
+    Keystore.insert_all([{ key: "a", value: 9 }])
+    assert_equal 2, Keystore.count
+    assert_equal 1, Keystore.where(key: "a").pick(:value)
+    inserted = Keystore.insert_all!([{ key: "c", value: 3 }], returning: %w[id])
+    assert_equal [Keystore.where(key: "c").pick(:id)], inserted.rows.flatten
+  end
+end
+"#,
+        )
+        .run_test("test/models/keystore_inlined_insert_all_test.rb")
+        .assert_passes();
+}
+
 /// The runtime's `insert`, `insert!` and the `insert_all` forms the
 /// lowering declines are the Ruby family's too; the forms it inlines
 /// compile on a strict target.
