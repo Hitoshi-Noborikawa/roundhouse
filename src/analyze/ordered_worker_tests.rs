@@ -70,6 +70,40 @@ fn snapshot(a: &Analyzer, app: &App) -> Vec<u8> {
     .unwrap()
 }
 
+// Macro substitution deliberately retains the factory call's spans.
+fn macro_app(padding: usize) -> App {
+    let pad = (0..padding).map(|i| format!("v_{i} = {i}\n")).collect::<String>();
+    app(&[
+        ("lib/translation_factory.rb", "class TranslationFactory; def self.translated(scope); define_method(:label) do; I18n.t(:label, scope: scope, name: 7); end; end; end"),
+        ("lib/a_slow.rb", &format!("class ASlow < TranslationFactory; def pad; {pad}nil; end; translated [:bad]; end")),
+        ("lib/b_fast.rb", "class BFast < TranslationFactory; translated [:good]; end"),
+        ("config/locales/en.yml", "en:\n  bad:\n    label: \"%<name>02d\"\n  good:\n    label: hello\n"),
+    ])
+}
+
+fn macro_label<'a>(app: &'a App, name: &str) -> &'a crate::dialect::MethodDef {
+    app.library_classes.iter().find(|c| c.name == id(name)).unwrap()
+        .methods.iter().find(|m| m.name == sym("label")).unwrap()
+}
+
+fn macro_call(expr: &Expr) -> &Expr {
+    match &*expr.node {
+        ExprNode::Seq { exprs } => macro_call(exprs.last().unwrap()),
+        ExprNode::Send { method, .. } if method.as_str() == "t" => expr,
+        _ => panic!("expected the expanded translation call: {expr:?}"),
+    }
+}
+
+fn emitted_labels(app: &App) -> Vec<u8> {
+    let code = format!("class ASlow; {}; end; class BFast; {}; end; p [ASlow.new.label, BFast.new.label]",
+        crate::emit::ruby::emit_method(macro_label(app, "ASlow")),
+        crate::emit::ruby::emit_method(macro_label(app, "BFast")));
+    let run = std::process::Command::new("ruby").args(["-e", &code]).output().unwrap();
+    assert!(run.status.success(), "{code}\n{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(run.stdout, b"[\"7\", \"hello\"]\n");
+    run.stdout
+}
+
 #[test]
 fn worker_child() {
     let Ok(out) = std::env::var("ORDERED_ANALYSIS_TEST_OUT") else {
@@ -284,16 +318,74 @@ fn worker_child() {
             }
             serde_json::to_vec(&results).unwrap()
         }
+        "i18n_macro_order" => {
+            let mut app = macro_app(0);
+            let spans = |name| {
+                let call = macro_call(&macro_label(&app, name).body);
+                let ExprNode::Send { recv, args, .. } = &*call.node else { unreachable!() };
+                recv.iter().map(|r| r.span).chain(args.iter().map(|a| a.span)).collect::<Vec<_>>()
+            };
+            assert_eq!(spans("ASlow"), spans("BFast"), "the test must exercise cloned spans");
+            // Good first works even in serial. With workers the condition
+            // variable forces the same cache population order, without sleeps.
+            app.library_classes.sort_by_key(|c| c.name != id("BFast"));
+            let ready = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+            let catalog = app.i18n.clone();
+            let answers = crate::lower::i18n_translate::with_plan_cache(|| {
+                parallel::map(&mut app.library_classes, |class| {
+                    let method = class.methods.iter().find(|m| m.name == sym("label"))?;
+                    let good = class.name == id("BFast");
+                    if !good {
+                        let (lock, wake) = &ready;
+                        let mut complete = lock.lock().unwrap();
+                        while !*complete { complete = wake.wait(complete).unwrap(); }
+                    }
+                    let call = macro_call(&method.body);
+                    let ExprNode::Send { recv, method, args, block, .. } = &*call.node else { unreachable!() };
+                    let result = crate::lower::i18n_translate::resolves(&catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), crate::lower::i18n_translate::Site::Other).unwrap();
+                    if good {
+                        *ready.0.lock().unwrap() = true;
+                        ready.1.notify_all();
+                        assert!(result.is_ok());
+                    } else {
+                        assert!(result.as_ref().is_err_and(|e| e.contains("formatted placeholder")), "a good cached plan hid the refusal: {result:?}");
+                    }
+                    Some((class.name.clone(), result))
+                })
+            });
+            // A subsequent lowering has its own catalog/cache. This also
+            // checks the emitted values for two supported, distinct scopes.
+            app.i18n.entries.insert("bad.label".into(), "%{name}".into());
+            crate::lower::i18n_translate::apply_i18n_translate_lowering(&mut app);
+            let values = emitted_labels(&app);
+            serde_json::to_vec(&(answers, values)).unwrap()
+        }
+        "i18n_macro_v4" => {
+            let mut app = macro_app(500);
+            let mut analyzer = Analyzer::new(&app);
+            analyzer.analyze(&mut app);
+            let diagnostics = diagnose(&app);
+            let refusals: Vec<_> = diagnostics.iter().filter(|d| d.message.contains("formatted placeholder")).collect();
+            assert_eq!(refusals.len(), 1, "{diagnostics:?}");
+            assert!(refusals[0].message.contains("%<name>02d"));
+            // Correcting the older serial collision makes the good method
+            // clean too. The malformed call alone remains refused.
+            serde_json::to_vec(&diagnostics).unwrap()
+        }
         _ => panic!("unknown case"),
     };
     std::fs::write(out, bytes).unwrap();
 }
 
 fn compare_case(case: &str) {
+    compare_case_workers(case, &[1, 2, 4, 8]);
+}
+
+fn compare_case_workers(case: &str, workers: &[usize]) {
     let root = std::env::temp_dir().join(format!("roundhouse-ordered-{case}-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let mut expected = None;
-    for workers in [1, 2, 4, 8] {
+    for &workers in workers {
         let out = root.join(workers.to_string());
         let run = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "analyze::ordered_worker_tests::worker_child", "--nocapture"])
@@ -331,4 +423,13 @@ fn mailer_parameters_publish_at_the_original_item() {
 #[test]
 fn i18n_plans_are_shared_within_one_app_only() {
     compare_case("i18n");
+}
+
+#[test]
+fn copied_macro_spans_do_not_share_distinct_translation_plans() {
+    compare_case_workers("i18n_macro_order", &[1, 2, 8]);
+}
+#[test]
+fn macro_v4_keeps_the_formatted_translation_refused() {
+    compare_case_workers("i18n_macro_v4", &[1, 2, 8]);
 }
