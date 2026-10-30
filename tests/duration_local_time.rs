@@ -20,6 +20,81 @@ fn app() -> emit_and_run::Overlay {
 }
 
 #[test]
+fn uncertain_time_operands_only_use_helpers_on_ruby_family_targets() {
+    let source = "class NativeClock < ApplicationRecord\n  def self.diff(value)\n    Time.utc(2026, 1, 2) - value\n  end\n  def self.add(value)\n    Time.utc(2026, 1, 2) + value\n  end\nend\n";
+    let schema = "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :native_clocks do |t|\n  end\nend\n";
+    for target in [
+        BuildTarget::Ruby,
+        BuildTarget::Jruby,
+        BuildTarget::Spinel,
+        BuildTarget::Crystal,
+        BuildTarget::Rust,
+        BuildTarget::Go,
+        BuildTarget::Typescript,
+        BuildTarget::TypescriptWorker,
+        BuildTarget::Python,
+        BuildTarget::Elixir,
+        BuildTarget::Kotlin,
+        BuildTarget::Swift,
+        BuildTarget::CSharp,
+    ] {
+        let tree = [
+            (
+                std::path::PathBuf::from("app/models/native_clock.rb"),
+                source.as_bytes().to_vec(),
+            ),
+            (
+                std::path::PathBuf::from("db/schema.rb"),
+                schema.as_bytes().to_vec(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+        roundhouse::session::analyze_and_lower_for(&mut app, target);
+        let ruby = roundhouse::emit::ruby::emit_lowered_models(&app)
+            .into_iter()
+            .map(|f| f.content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if matches!(
+            target,
+            BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel
+        ) {
+            assert!(
+                ruby.contains("Time.utc(2026, 1, 2) - ActiveSupport::Duration.time_operand(value)"),
+                "{target:?}: {ruby}"
+            );
+            assert!(
+                ruby.contains("Time.utc(2026, 1, 2) + ActiveSupport::Duration.time_operand(value)"),
+                "{target:?}: {ruby}"
+            );
+        } else {
+            assert!(
+                ruby.contains("Time.utc(2026, 1, 2) - value"),
+                "{target:?}: {ruby}"
+            );
+            assert!(
+                ruby.contains("Time.utc(2026, 1, 2) + value"),
+                "{target:?}: {ruby}"
+            );
+            assert!(!ruby.contains("time_operand"), "{target:?}: {ruby}");
+        }
+    }
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("app/models/native_clock.rb", source)
+        .write("db/schema.rb", schema)
+        .emit(BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let crystal = std::fs::read_to_string(emitted.join("src/models/native_clock.cr")).unwrap();
+    assert!(
+        crystal.contains("Time.utc(2026_i64, 1_i64, 2_i64) - value"),
+        "{crystal}"
+    );
+    assert!(!crystal.contains("time_operand"), "{crystal}");
+}
+
+#[test]
 fn duration_locals_and_aliases_use_runtime_time_operands() {
     let (emitted, errors) = app().emit(BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:#?}");

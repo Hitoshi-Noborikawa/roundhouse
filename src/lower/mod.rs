@@ -791,6 +791,14 @@ pub fn apply_post_analyze_lowerings(
     app: &mut crate::app::App,
     registry: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
 ) -> Vec<crate::diagnostic::Diagnostic> {
+    apply_post_analyze_lowerings_for(app, registry, crate::build_target::BuildTarget::Ruby)
+}
+
+pub(crate) fn apply_post_analyze_lowerings_for(
+    app: &mut crate::app::App,
+    registry: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    target: crate::build_target::BuildTarget,
+) -> Vec<crate::diagnostic::Diagnostic> {
     // Templates ingested for the analyzer only (`View::analysis_only`)
     // leave here: the type checker and the IDE have seen them; no
     // lowering or emitter should.
@@ -1081,7 +1089,7 @@ pub fn apply_post_analyze_lowerings(
     // entry's runs_after). An all-duration-unit name set dispatches
     // through case arms synthesized as plural unit calls that count on
     // this grounding (`send_dispatch::duration_plural`).
-    duration::apply_duration_lowering(app);
+    duration::apply_duration_lowering_for(app, target);
     ran!("duration");
     relation_counted_terminal::apply_relation_counted_terminals(app);
     ran!("relation_counted_terminal");
