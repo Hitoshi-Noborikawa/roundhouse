@@ -183,6 +183,14 @@ fn only_a_helper_instance_body_runs_in_the_view() {
         ("app/helpers/logos_helper.rb", "module LogosHelper\n  def logo\n    image_tag(\"logo.png\")\n  end\nend\n"),
     ]);
     assert_eq!(returns(&app, "LogosHelper", "logo", false), Some(Ty::Str), "a singleton image_tag is not the view's");
+    // Nor does a later module's `def self.badge` hide an earlier helper's
+    // instance `badge`, though it took the name's entry in the index.
+    let app = analyzed_app(&[
+        ("app/helpers/badges_helper.rb", "module BadgesHelper\n  def badge\n    37\n  end\nend\n"),
+        ("app/helpers/logos_helper.rb", "module LogosHelper\n  def logo\n    badge\n  end\nend\n"),
+        ("app/helpers/zebras_helper.rb", "module ZebrasHelper\n  def self.badge\n    \"z\"\n  end\nend\n"),
+    ]);
+    assert_eq!(returns(&app, "LogosHelper", "logo", false), Some(Ty::Int), "the instance badge answers");
 }
 
 #[test]

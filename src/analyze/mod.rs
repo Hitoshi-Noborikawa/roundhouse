@@ -8731,17 +8731,27 @@ fn is_abstract_body(body: &Expr) -> bool {
 /// `App::helper_method_index` without the names whose module defines them
 /// only as `def self.x`: ingest indexes every method of a helper module, and a
 /// helper body's bare call reaches the view's instance methods, never a
-/// module's singleton one.
+/// module's singleton one. The index keeps one owner per name, so a module
+/// whose `def self.x` took the entry hands it back to the helper that
+/// defines `x` on the instance side — the last in `helper :all`'s sorted
+/// order, as the view's own lookup would find it.
 fn helper_instance_index(app: &App) -> HashMap<Symbol, ClassId> {
+    let defines = |owner: &ClassId, name: &Symbol| {
+        app.library_classes.iter().any(|lc| {
+            &lc.name == owner
+                && lc.methods.iter().any(|m| &m.name == name && m.receiver == crate::dialect::MethodReceiver::Instance)
+        })
+    };
+    // Every helper module, not only the index's owners: a module whose
+    // every name a later one took owns no entry at all.
+    let owners: std::collections::BTreeSet<&ClassId> =
+        app.helper_method_index.values().chain(app.helper_modules.iter()).collect();
     app.helper_method_index
         .iter()
-        .filter(|(name, owner)| {
-            app.library_classes.iter().any(|lc| {
-                &lc.name == *owner
-                    && lc.methods.iter().any(|m| &m.name == *name && m.receiver == crate::dialect::MethodReceiver::Instance)
-            })
+        .filter_map(|(name, owner)| {
+            let owner = if defines(owner, name) { owner } else { *owners.iter().rev().find(|o| defines(o, name))? };
+            Some((name.clone(), owner.clone()))
         })
-        .map(|(name, owner)| (name.clone(), owner.clone()))
         .collect()
 }
 
