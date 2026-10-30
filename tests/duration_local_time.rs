@@ -10,6 +10,8 @@ raise "aliased minutes" unless LocalDurationClock.subtracted.iso8601(6) == "2026
 raise "retained duration" unless LocalDurationClock.retained_duration.iso8601 == "2026-01-02T02:00:00Z"
 raise "outer chained seconds" unless LocalDurationClock.chained_added.iso8601(6) == "2026-01-02T03:04:07.123456Z"
 raise "inner chained minutes" unless LocalDurationClock.chained_subtracted.iso8601(6) == "2026-01-02T03:02:05.123456Z"
+raise "closure fraction" unless LocalDurationClock.captured.iso8601(6) == "2026-01-02T00:00:00.500000Z"
+raise "completed iterator" unless LocalDurationClock.block_capture.iso8601(6) == "2026-01-02T00:00:02.000000Z"
 puts "local duration time arithmetic passed"
 "#;
 
@@ -18,20 +20,41 @@ fn app() -> emit_and_run::Overlay {
 }
 
 #[test]
-fn integral_duration_locals_and_aliases_are_unwrapped_at_time_arithmetic() {
+fn duration_locals_and_aliases_use_runtime_time_operands() {
     let (emitted, errors) = app().emit(BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:#?}");
     let ruby = std::fs::read_to_string(emitted.join("app/models/local_duration_clock.rb")).unwrap();
-    assert!(ruby.contains("at + delay.to_i"), "{ruby}");
-    assert!(ruby.contains("at - copy.to_i"), "{ruby}");
+    assert!(
+        ruby.contains("at + ActiveSupport::Duration.time_operand(delay)"),
+        "{ruby}"
+    );
+    assert!(
+        ruby.contains("at - ActiveSupport::Duration.time_operand(copy)"),
+        "{ruby}"
+    );
     assert!(ruby.contains("delay.to_i == 7200"), "{ruby}");
-    assert_eq!(ruby.matches("at + delay.to_i").count(), 3, "{ruby}");
-    assert_eq!(ruby.matches("at - copy.to_i").count(), 2, "{ruby}");
+    assert_eq!(
+        ruby.matches("at + ActiveSupport::Duration.time_operand(delay)")
+            .count(),
+        5,
+        "{ruby}"
+    );
+    assert_eq!(
+        ruby.matches("at - ActiveSupport::Duration.time_operand(copy)")
+            .count(),
+        2,
+        "{ruby}"
+    );
 }
 
 #[test]
-fn other_receivers_and_uncertain_duration_locals_keep_their_arguments() {
+fn runtime_time_operands_handle_reassignments_and_closures() {
     let controls = r#"class DurationControls
+  def self.integer
+    at = Time.utc(2026, 1, 2)
+    at + 7
+  end
+
   def self.custom
     delay = 2.seconds
     CustomClock.new + delay
@@ -130,16 +153,29 @@ end
     assert!(errors.is_empty(), "{errors:#?}");
     let ruby = std::fs::read_to_string(emitted.join("app/models/duration_controls.rb")).unwrap();
     assert!(!ruby.contains("delay.to_i"), "{ruby}");
+    assert!(
+        ruby.contains("at + ActiveSupport::Duration.time_operand(delay)"),
+        "{ruby}"
+    );
+    assert!(
+        ruby.contains("at - ActiveSupport::Duration.time_operand(delay)"),
+        "{ruby}"
+    );
+    assert!(ruby.contains("CustomClock.new + delay"), "{ruby}");
+    assert!(ruby.contains("at + 7"), "{ruby}");
+    assert!(!ruby.contains("time_operand(7)"), "{ruby}");
     emit_and_run::empty_app()
         .write("app/models/duration_controls.rb", controls)
-        .run_ruby(r#"
+        .run_ruby(
+            r#"
 at = Time.utc(2026, 1, 2)
 raise "captured fraction" unless DurationControls.captured == at + 0.5
 raise "indirect fraction" unless DurationControls.indirect_capture == at - 0.5
 raise "compound fraction" unless DurationControls.compound_capture == at + 0.5
 raise "multiple fraction" unless DurationControls.multiple_capture == at + 0.5
 raise "block reassignment" unless DurationControls.block_capture == at + 2
-"#)
+"#,
+        )
         .assert_passes();
 }
 

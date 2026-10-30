@@ -160,109 +160,12 @@ fn type_duration_constants(expr: &mut Expr, owner: Option<&ClassId>, constants: 
 /// `Time - Time` shape.
 pub(crate) fn apply_duration_rewrites(body: &mut Expr, temporal_predicates: bool) {
     rewrite_durations(body);
-    let mut captured_assignments = BTreeSet::new();
-    collect_closure_assignments(body, false, &mut captured_assignments);
-    rewrite_local_time_durations(body, &mut BTreeSet::new(), &captured_assignments);
     if temporal_predicates {
         rewrite_temporal_predicates(body);
     }
     rewrite_duration_comparisons(body);
     rewrite_time_duration_arith(body);
     rewrite_expires_in(body);
-}
-
-fn integral_clock_duration(expr: &Expr, locals: &BTreeSet<Symbol>) -> bool {
-    if let ExprNode::Var { name, .. } = &*expr.node {
-        return locals.contains(name);
-    }
-    if let ExprNode::Assign { value, .. } = &*expr.node {
-        return integral_clock_duration(value, locals);
-    }
-    is_duration_const_call(expr)
-        && matches!(&*expr.node, ExprNode::Send { method, args, .. }
-            if matches!(method.as_str(), "seconds" | "second" | "minutes" | "minute" | "hours" | "hour")
-                && matches!(args.as_slice(), [value] if matches!(value.ty, Some(Ty::Int))))
-}
-
-fn collect_closure_assignments(expr: &Expr, in_closure: bool, assigned: &mut BTreeSet<Symbol>) {
-    let in_closure = in_closure || matches!(&*expr.node, ExprNode::Lambda { .. });
-    if in_closure {
-        match &*expr.node {
-            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
-            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => {
-                assigned.insert(name.clone());
-            }
-            ExprNode::MultiAssign { targets, .. } => {
-                for target in targets {
-                    if let LValue::Var { name, .. } = target {
-                        assigned.insert(name.clone());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    expr.node.for_each_child(&mut |child| collect_closure_assignments(child, in_closure, assigned));
-}
-
-fn rewrite_local_time_durations(
-    expr: &mut Expr,
-    locals: &mut BTreeSet<Symbol>,
-    captured_assignments: &BTreeSet<Symbol>,
-) {
-    match &mut *expr.node {
-        ExprNode::Seq { exprs } => {
-            for child in exprs {
-                rewrite_local_time_durations(child, locals, captured_assignments);
-            }
-            return;
-        }
-        ExprNode::Assign {
-            target: LValue::Var { name, .. },
-            value,
-        } => {
-            rewrite_local_time_durations(value, locals, captured_assignments);
-            if !captured_assignments.contains(name) && integral_clock_duration(value, locals) {
-                locals.insert(name.clone());
-            } else {
-                locals.remove(name);
-            }
-            return;
-        }
-        ExprNode::Send { block: None, .. }
-        | ExprNode::Array { .. }
-        | ExprNode::Hash { .. }
-        | ExprNode::Lit { .. }
-        | ExprNode::Var { .. }
-        | ExprNode::Const { .. }
-        | ExprNode::SelfRef => {
-            expr.node
-                .for_each_child_mut(&mut |child| rewrite_local_time_durations(child, locals, captured_assignments));
-        }
-        _ => {
-            expr.node.for_each_child_mut(&mut |child| {
-                rewrite_local_time_durations(child, &mut BTreeSet::new(), captured_assignments)
-            });
-            locals.clear();
-            return;
-        }
-    }
-    let ExprNode::Send {
-        recv: Some(recv),
-        method,
-        args,
-        block: None,
-        ..
-    } = &mut *expr.node
-    else {
-        return;
-    };
-    if matches!(method.as_str(), "+" | "-")
-        && matches!(recv.ty, Some(Ty::Time))
-        && matches!(args.as_slice(), [value] if matches!(&*value.node, ExprNode::Var { .. }) && integral_clock_duration(value, locals))
-    {
-        args[0] = seconds_of(take(&mut args[0]));
-    }
 }
 
 /// `expires_in <dur>, stale_while_revalidate: <dur>, stale_if_error:
@@ -441,6 +344,46 @@ fn rewrite_time_duration_arith(expr: &mut Expr) {
                 && !is_typed_duration(recv)
     );
     if !is_arith {
+        let ExprNode::Send {
+            recv: Some(recv),
+            method,
+            args,
+            block: None,
+            ..
+        } = &mut *expr.node
+        else {
+            return;
+        };
+        if !matches!(recv.ty, Some(Ty::Time))
+            || !matches!(method.as_str(), "+" | "-")
+            || args.len() != 1
+            || matches!(args[0].ty, Some(Ty::Int | Ty::Float | Ty::Time))
+        {
+            return;
+        }
+        let operand = take(&mut args[0]);
+        let span = operand.span;
+        let mut duration = Expr::new(
+            span,
+            ExprNode::Const {
+                path: vec![Symbol::from("ActiveSupport"), Symbol::from("Duration")],
+            },
+        );
+        duration.ty = Some(Ty::Class {
+            id: ClassId(Symbol::from("ActiveSupport::Duration")),
+            args: vec![].into(),
+        });
+        args[0] = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(duration),
+                method: Symbol::from("time_operand"),
+                args: vec![operand],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        args[0].ty = Some(Ty::Untyped);
         return;
     }
     let ExprNode::Send { args, .. } = &mut *expr.node else { unreachable!() };
