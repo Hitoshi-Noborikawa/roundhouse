@@ -208,3 +208,22 @@ fn without_the_gem_in_the_lock_the_macro_is_left_alone() {
     assert!(unknown_calls(model(&app, "Widget")).iter().any(|m| m == "acts_as_tenant"));
     assert!(!app.library_classes.iter().any(|c| c.name.0.as_str() == "ActsAsTenant"));
 }
+
+/// A single-quoted `message:` is literal text in Ruby (and Rails keeps it
+/// verbatim): re-rendering it into the synthesized source must not turn
+/// `#{...}`, `#@x` or `#$x` into interpolation.
+#[test]
+fn a_literal_uniqueness_message_stays_literal() {
+    let msg = r##"taken #{x} #@y #$z \ "q""##;
+    let src = format!("class Widget < ApplicationRecord\n  acts_as_tenant :account\n  validates_uniqueness_to_tenant :name, message: '{}'\nend\n", msg.replace('\\', "\\\\"));
+    let app = ingest_app_from_tree(tree(Some(LOCK), &[("app/models/widget.rb", &src)])).expect("ingest");
+    let got: Vec<Option<String>> = model(&app, "Widget")
+        .body
+        .iter()
+        .filter_map(|i| match i {
+            ModelBodyItem::Validation { validation, .. } => Some(validation.message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, [Some(msg.to_string())]);
+}

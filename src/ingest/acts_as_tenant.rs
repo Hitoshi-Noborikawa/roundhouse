@@ -102,10 +102,34 @@ fn macro_calls(model: &Model, name: &str) -> Vec<(usize, Vec<Expr>)> {
 fn literal_source(expr: &Expr) -> Option<String> {
     match &*expr.node {
         ExprNode::Lit { value: Literal::Sym { value } } if is_ident(value.as_str()) => Some(format!(":{}", value.as_str())),
-        ExprNode::Lit { value: Literal::Str { value } } => Some(format!("{value:?}")),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(ruby_string(value)),
         ExprNode::Lit { value: Literal::Bool { value } } => Some(value.to_string()),
         _ => None,
     }
+}
+
+/// `s` as a double-quoted Ruby literal that reads back as exactly `s`.
+/// Rust's `{:?}` is not one: it leaves `#` alone, so a single-quoted
+/// `'taken #{x}'` (literal text, which Rails keeps verbatim) would come
+/// back as an interpolation. `#` is escaped, which covers `#{`, `#@` and
+/// `#$`.
+fn ruby_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '#' => out.push_str("\\#"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// A symbol or string literal's text.
