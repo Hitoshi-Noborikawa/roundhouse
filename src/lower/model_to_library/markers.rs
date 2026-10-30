@@ -134,8 +134,8 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
 /// `User#to_param` answers the username). Skipped for abstract models
 /// like the other instance-shaped synthesizers.
 ///
-/// `@id.to_s`, not `id&.to_s`: the ivar is the lowered id slot every
-/// model carries, and on a persisted record — the only kind a URL
+/// `@id.to_s` (the declared key's slot, under `self.primary_key = …`),
+/// not `id&.to_s`: the ivar is the lowered id slot every model carries, and on a persisted record — the only kind a URL
 /// helper ever renders — the two are byte-identical. (For an unsaved
 /// record Rails answers nil where this answers ""; no corpus call
 /// site reaches that.) Belongs to every target: the definition that
@@ -164,9 +164,10 @@ pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model) 
             Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
+                    // The key column's slot: `@cityhash` under `self.primary_key = "cityhash"`.
                     recv: Some(Expr::new(
                         Span::synthetic(),
-                        ExprNode::Ivar { name: Symbol::from("id") },
+                        ExprNode::Ivar { name: model.primary_key.clone().unwrap_or_else(|| Symbol::from("id")) },
                     )),
                     method: Symbol::from("to_s"),
                     args: Vec::new(),

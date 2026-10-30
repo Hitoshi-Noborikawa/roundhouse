@@ -2732,6 +2732,8 @@ end
     // including declarations contributed by either kind of Concern,
     // and reuses the prepared resolver rather than rebuilding it.
     super::concern_accessors::validate(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
+    // After every model and reopen: a model may declare its key anywhere.
+    key_composite_tables(&mut app)?;
     // Model-to-database ownership reads every model, concern splice and
     // library module, so it runs once they all exist.
     super::database_ownership::resolve(&mut app);
@@ -2798,6 +2800,63 @@ end
 /// is a concern's method) keeps the dynamic path, which is still what
 /// Rails runs, and the clone the lowering gives it goes unused. An entry
 /// a helper module owns is left as it is.
+/// A table whose primary key spans several columns
+/// (`Table.primary_key_columns`) keys its records on the column its
+/// models declare (`self.primary_key = "cityhash"`), which is then the
+/// table's key column. A model that declares none — itself or through a
+/// model ancestor — is refused, as the composite key was before: Rails
+/// keys such a model on every column of it, and this compiler does not
+/// yet.
+fn key_composite_tables(app: &mut App) -> IngestResult<()> {
+    let declared = |model: &crate::dialect::Model| -> Option<crate::ident::Symbol> {
+        let mut current = Some(model);
+        let mut seen = 0;
+        while let Some(m) = current {
+            // A reopen (`app/models/event/mentioned.rb`) is the same class:
+            // any of its definitions may carry the declaration.
+            if let Some(key) = app.models.iter().filter(|o| o.name == m.name).find_map(|o| o.primary_key.clone()) {
+                return Some(key);
+            }
+            seen += 1;
+            if seen > app.models.len() {
+                return None;
+            }
+            current = m.parent.as_ref().and_then(|p| app.models.iter().find(|o| &o.name == p));
+        }
+        None
+    };
+    let mut keyed: Vec<(crate::ident::Symbol, crate::ident::Symbol)> = Vec::new();
+    for model in &app.models {
+        let Some(table) = app.schema.tables.get(&model.table.0) else { continue };
+        if table.primary_key_columns.is_empty() {
+            continue;
+        }
+        match declared(model) {
+            Some(key) if table.columns.iter().any(|c| c.name == key) => keyed.push((table.name.clone(), key)),
+            _ => {
+                let columns = table.primary_key_columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ");
+                let refusal = super::IngestError::Unsupported {
+                    file: "db/structure.sql".into(),
+                    message: format!(
+                        "primary key dropped: composite key ({}({columns})): `{}` declares no `self.primary_key` naming one of its columns",
+                        table.name.as_str(),
+                        model.name.0.as_str()
+                    ),
+                };
+                super::survey::unwrap_or_record::<()>(Err(refusal))?;
+            }
+        }
+    }
+    for (table, key) in keyed {
+        if let Some(table) = app.schema.tables.get_mut(&table) {
+            for column in &mut table.columns {
+                column.primary_key = column.name == key;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn reconcile_controller_helper_methods(app: &mut App) {
     let owners: HashSet<&crate::ident::ClassId> = app.helper_method_index.values().collect();
     let mut still_pure: HashMap<crate::ident::ClassId, Vec<Symbol>> = HashMap::default();

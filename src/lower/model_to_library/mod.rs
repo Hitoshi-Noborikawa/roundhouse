@@ -1439,7 +1439,7 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_find_primary_key_input(&model.name, table));
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
-        push_adapter_methods(&mut methods, model, table, schema, param_binds);
+        push_adapter_methods(&mut methods, model, table, schema, param_binds, runtime_relation == RuntimeRelation::Present);
         match crate::lower::default_scope::default_scope(model) {
             Some(crate::lower::default_scope::DefaultScope::Static(scope)) => {
                 methods.push(crate::lower::default_scope::synth_default_scope_where(model, &scope));

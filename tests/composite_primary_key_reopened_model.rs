@@ -37,7 +37,6 @@ fn emitted_event(declaring: &str, reopening: &str) -> String {
 }
 
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn a_single_key_declaration_survives_a_reopen_without_one() {
     let event = emitted_event(
         "class Event < ApplicationRecord\n  self.primary_key = :id\nend\n",
@@ -48,7 +47,6 @@ fn a_single_key_declaration_survives_a_reopen_without_one() {
 }
 
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn a_reopen_may_carry_the_single_key_declaration() {
     let event = emitted_event(
         "class Event < ApplicationRecord\nend\n",

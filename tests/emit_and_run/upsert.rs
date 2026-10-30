@@ -260,3 +260,30 @@ fn receiverless_and_rooted_inserts_are_unsupported_on_strict_targets() {
     assert_eq!(reported("insert!"), 1, "{errors:#?}");
     assert_eq!(reported("insert_all"), 2, "{errors:#?}");
 }
+
+/// A record's own integer key is written, as Rails writes it: `create`
+/// with an `id:` and an inlined `insert_all` row's `id:` keep it, and a
+/// record given none still takes the database's.
+#[test]
+fn a_supplied_integer_key_is_written() {
+    keystore_app()
+        .write(
+            "test/models/keystore_key_test.rb",
+            r#"require "test_helper"
+
+class KeystoreKeyTest < ActiveSupport::TestCase
+  test "a supplied id is the row's" do
+    Keystore.create!(id: 900, key: "given", value: 1)
+    assert_equal "given", Keystore.find(900).key
+    Keystore.insert_all([{ id: 910, key: "bulk", value: 2 }])
+    assert_equal "bulk", Keystore.find(910).key
+    assigned = Keystore.create!(key: "assigned", value: 3)
+    assert assigned.id > 0
+    assert_equal "assigned", Keystore.find(assigned.id).key
+  end
+end
+"#,
+        )
+        .run_test("test/models/keystore_key_test.rb")
+        .assert_passes();
+}
