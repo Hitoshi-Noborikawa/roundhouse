@@ -156,6 +156,25 @@ fn show_view(call_tail: &str) -> String {
         })
 }
 
+#[test]
+fn a_call_with_constant_option_keys_keeps_the_wrapper() {
+    for tail in [", **{ OPTION_KEY => \"x\" }", ", OPTION_KEY => \"x\""] {
+        let src = show_view(tail);
+        assert!(src.contains("thing_form_with"), "{tail}: {src}");
+        assert!(src.contains("OPTION_KEY"), "{tail}: {src}");
+        assert!(!src.contains("io << \"\""), "{tail}: {src}");
+    }
+}
+
+#[test]
+fn a_call_with_splatted_literal_option_keys_produces_a_form() {
+    for tail in [", **{ class: \"literal\" }", ", **{ \"class\" => \"literal\" }"] {
+        let src = show_view(tail);
+        assert!(src.contains("<form"), "{tail}: {src}");
+        assert!(!src.contains("thing_form_with"), "{tail}: {src}");
+    }
+}
+
 /// Bare call — the options parameter binds its own `{}` default.
 #[test]
 fn a_call_with_no_options_binds_the_default() {
