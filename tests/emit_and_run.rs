@@ -20157,6 +20157,9 @@ mod polymorphic_source_through;
 #[path = "emit_and_run/namespaced_controller_symbol.rs"]
 mod namespaced_controller_symbol;
 
+#[path = "emit_and_run/route_format_lookahead.rs"]
+mod route_format_lookahead;
+
 #[path = "emit_and_run/params_write_assign.rs"]
 mod params_write_assign;
 

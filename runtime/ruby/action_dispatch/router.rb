@@ -351,6 +351,9 @@ module ActionDispatch
       unless format.empty?
         format_pattern = segment_pattern_for(seg_constraints, "format")
         return nil if !format_pattern.empty? && !segment_pattern_match(format_pattern, format)
+        # Not held like `format` (format_held_param_tail): another extension is the param's own text, as a lookahead requirement reads it (`/domains/example.com.xml`).
+        suffix_pattern = segment_pattern_for(seg_constraints, "format_suffix")
+        return nil if !suffix_pattern.empty? && !segment_pattern_match(suffix_pattern, format)
       end
       params = {}
       params["format"] = format unless format.empty?
