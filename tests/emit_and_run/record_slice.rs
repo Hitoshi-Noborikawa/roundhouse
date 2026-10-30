@@ -2,10 +2,14 @@
 
 use super::emit_and_run;
 
-const SUMMARY: &str = "  include Sliceable\n  def summary = slice(:id, :title)\n  def self.no_names_of(id) = find(id).slice\n";
+const SUMMARY: &str = "  include Sliceable\n  def summary = slice(:id, :title)\n  def self.no_names_of(id) = find(id).slice\n  def self.slice(*names) = names.join(\",\")\n  def self.class_side = slice(:id, :title)\n";
 
 /// A concern's bare `slice` reads the columns of the model it belongs to.
 const CONCERN: &str = "module Article::Sliceable\n  extend ActiveSupport::Concern\n\n  def card = slice(:id, :title)\nend\n";
+
+/// A module in the model's namespace whose class methods are not run on
+/// a record: its bare `slice` is its own.
+const UTILITIES: &str = "module Article::Utilities\n  def self.slice(*names) = names.size\n  def self.count_of = slice(:id, :title)\nend\n";
 
 const ASSERTIONS: &str = r##"
 def check(label, got, want)
@@ -14,6 +18,8 @@ end
 a = Article.create!(title: "Sliced", body: "A sufficiently long body.")
 check("typed call site", a.summary, { "id" => a.id, "title" => "Sliced" })
 check("concern call site", a.card, { "id" => a.id, "title" => "Sliced" })
+check("model class method", Article.class_side, "id,title")
+check("namespaced module class method", Article::Utilities.count_of, 2)
 check("untyped call site", Article.all.first.slice(:title, :body), { "title" => "Sliced", "body" => "A sufficiently long body." })
 check("no names", a.slice, {})
 check("no names, found receiver", Article.no_names_of(a.id), {})
@@ -34,6 +40,7 @@ puts "slice passed"
 fn sliced_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .write("app/models/article/sliceable.rb", CONCERN)
+        .write("app/models/article/utilities.rb", UTILITIES)
         .edit(
             "app/models/article.rb",
             "class Article < ApplicationRecord\n",

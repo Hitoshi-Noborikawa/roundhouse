@@ -3180,7 +3180,9 @@ ways.
 
 **Typed sites, every target.** `src/lower/record_slice.rs` rewrites a
 `slice` whose receiver types as a model (or is the implicit `self` of
-a model or of one of its concerns; the strict targets do not mix a
+an instance method of a model or of one of its concerns; a class
+method's or scope's bare `slice` is not a record's and keeps the call;
+the strict targets do not mix a
 model concern's methods into the model yet, so a concern's lowered
 `slice` builds on the ruby family only) and whose names are literals into a Hash literal of reader
 calls: `a.slice(:id, :title)` becomes `{"id" => a.id, "title" =>

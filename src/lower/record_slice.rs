@@ -46,28 +46,37 @@ pub fn apply_record_slice_lowering(app: &mut App, registry: &HashMap<ClassId, Cl
         .map(|m| m.name.clone())
         .chain(app.library_classes.iter().filter(|lc| lc.methods.iter().any(defines_slice)).map(|lc| lc.name.clone()))
         .collect();
-    // A model's concern (`User::Bannable`, a module nested under the
-    // model) runs on that model's records, so its bare `slice` reads the
-    // model's columns, the rule `for_each_model_body_named` applies.
-    let concern_models: HashMap<ClassId, ClassId> = app
-        .library_classes
-        .iter()
-        .filter(|lc| lc.is_module)
-        .filter_map(|lc| {
-            let (namespace, _) = lc.name.0.as_str().rsplit_once("::")?;
-            let model = models.iter().find(|m| m.0.as_str() == namespace)?;
-            Some((lc.name.clone(), model.clone()))
-        })
-        .collect();
-    let ctx = Ctx {
-        registry,
-        models: &models,
-        own_slice: &own_slice,
-        concern_models: &concern_models,
-        next_binding: std::cell::Cell::new(0),
-    };
+    let ctx = Ctx { registry, models: &models, own_slice: &own_slice, next_binding: std::cell::Cell::new(0) };
     let mut diags = Vec::new();
-    super::for_each_owned_hook_body(app, &mut |owner, body| rewrite(body, owner, &ctx, &mut diags));
+    // A bare `slice` reads `self`, so it lowers only in a body known to
+    // run on a model's record: the model's instance methods, and those of
+    // its concerns (`User::Bannable`, a module nested under the model, the
+    // rule `for_each_model_body_named` applies). A class method, a scope,
+    // or a module's own class method keeps the call: sharing the model's
+    // namespace does not make `self` a record.
+    let instance = crate::dialect::MethodReceiver::Instance;
+    for model in &mut app.models {
+        let name = model.name.clone();
+        for item in &mut model.body {
+            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                if method.receiver == instance {
+                    rewrite(&mut method.body, Some(&name), &ctx, &mut diags);
+                }
+            }
+        }
+    }
+    for lc in &mut app.library_classes {
+        if !lc.is_module {
+            continue;
+        }
+        let Some((namespace, _)) = lc.name.0.as_str().rsplit_once("::") else { continue };
+        let Some(model) = models.iter().find(|m| m.0.as_str() == namespace) else { continue };
+        for m in lc.methods.iter_mut().filter(|m| m.receiver == instance) {
+            rewrite(&mut m.body, Some(model), &ctx, &mut diags);
+        }
+    }
+    // Every body, for a `slice` on a receiver typed as a model.
+    super::for_each_owned_hook_body(app, &mut |_, body| rewrite(body, None, &ctx, &mut diags));
     for view in &mut app.views {
         rewrite(&mut view.body, None, &ctx, &mut diags);
     }
@@ -79,12 +88,12 @@ struct Ctx<'a> {
     registry: &'a HashMap<ClassId, ClassInfo>,
     models: &'a BTreeSet<ClassId>,
     own_slice: &'a BTreeSet<ClassId>,
-    /// A model concern → the model whose records it runs on.
-    concern_models: &'a HashMap<ClassId, ClassId>,
     /// Numbers each site's receiver binding, so no two share a name.
     next_binding: std::cell::Cell<usize>,
 }
 
+/// `owner` is the model whose record `self` is, for a bare `slice`;
+/// `None` where `self` is not known to be one.
 fn rewrite(expr: &mut Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<Diagnostic>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, owner, ctx, diags));
     if let Some(lowered) = lower_slice(expr, owner, ctx, diags) {
@@ -97,17 +106,13 @@ fn lower_slice(expr: &Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<
     if method.as_str() != "slice" {
         return None;
     }
-    // Implicit self reads against the class whose method this is, or
-    // for a concern, the model it belongs to.
+    // A bare `slice` reads the record `self` is.
     let model = match recv {
         Some(r) => match r.ty.as_ref() {
             Some(Ty::Class { id, .. }) => id.clone(),
             _ => return None,
         },
-        None => {
-            let owner = owner?;
-            ctx.concern_models.get(owner).unwrap_or(owner).clone()
-        }
+        None => owner?.clone(),
     };
     if !ctx.models.contains(&model) {
         return None;
