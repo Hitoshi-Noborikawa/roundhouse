@@ -103,6 +103,17 @@ fn unsupported_nested_filters_keep_the_source_error() {
 }
 
 #[test]
+fn a_params_alias_does_not_gain_the_params_array_contract() {
+    let errors = source_errors(
+        "    p = params\n    answers = p.expect(answers: [[:header]])\n    render json: answers.map(&:to_h)",
+    );
+    assert!(
+        errors.iter().any(|error| error.contains("map")),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn an_ordinary_hash_does_not_gain_the_params_array_contract() {
     let errors = source_errors(
         "    answers = { value: \"scalar\" }.expect(answers: [[:header]])\n    render json: answers.map(&:to_h)",

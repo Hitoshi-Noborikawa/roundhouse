@@ -6588,11 +6588,10 @@ fn expect_hash_arg_ty(recv: Option<&Expr>, recv_ty: Option<&Ty>, method: &str, a
             ExprNode::Send { recv: Some(receiver), method, args, .. }
                 if matches!(&*receiver.node, ExprNode::SelfRef)
                     && method.as_str() == "params" && args.is_empty()))
-        && (matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionController::Parameters")
-            || recv.is_some_and(|expr| matches!(&*expr.node,
+        && recv.is_some_and(|expr| matches!(&*expr.node,
                 ExprNode::Send { recv: None, method, args, .. }
                     if method.as_str() == "params" && args.is_empty())
-                || matches!(&*expr.node, ExprNode::Ivar { name } if name.as_str() == "params")))
+                || matches!(&*expr.node, ExprNode::Ivar { name } if name.as_str() == "params"))
         && fields.iter().all(|field| match &*field.node {
             ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } } => true,
             ExprNode::Hash { entries, .. } => entries.iter().all(|(name, filter)| {
