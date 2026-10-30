@@ -515,15 +515,16 @@ fn splice_form_wrapper(
     let ExprNode::Send { method, args: wargs, parenthesized, .. } = &*w.call.node else {
         return None;
     };
+    let args = wargs
+        .iter()
+        .map(|a| fold_static_merge(&substitute_vars(a, &binding)))
+        .collect::<Option<Vec<_>>>()?;
     Some(Expr::new(
         w.call.span,
         ExprNode::Send {
             recv: None,
             method: method.clone(),
-            args: wargs
-                .iter()
-                .map(|a| fold_static_merge(&substitute_vars(a, &binding)))
-                .collect(),
+            args,
             block: Some(block.clone()),
             parenthesized: *parenthesized,
         },
@@ -543,27 +544,28 @@ fn splice_form_wrapper(
 ///
 /// Later keys win, which is Ruby's `merge` and also the point of the
 /// wrapper: the caller's options override the helper's defaults.
-fn fold_static_merge(e: &Expr) -> Expr {
+fn fold_static_merge(e: &Expr) -> Option<Expr> {
     let ExprNode::Send { recv: Some(base), method, args, block: None, .. } = &*e.node else {
-        return e.clone();
+        return Some(e.clone());
     };
-    if method.as_str() != "merge" || args.len() != 1 {
-        return e.clone();
+    if method.as_str() != "merge" {
+        return Some(e.clone());
+    }
+    if args.len() != 1 {
+        return None;
     }
     let (ExprNode::Hash { entries: base_entries, kwargs }, ExprNode::Hash { entries: over, .. }) =
         (&*base.node, &*args[0].node)
     else {
-        return e.clone();
+        return None;
     };
     let key_of = |k: &Expr| match &*k.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
         ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
         _ => None,
     };
-    // A key this cannot compare cannot be overridden safely — leave the
-    // chain alone rather than merge past it.
     if base_entries.iter().chain(over.iter()).any(|(k, _)| key_of(k).is_none()) {
-        return e.clone();
+        return None;
     }
     let mut merged: Vec<(Expr, Expr)> = Vec::new();
     for (k, v) in base_entries {
@@ -577,7 +579,7 @@ fn fold_static_merge(e: &Expr) -> Expr {
             merged.push((k.clone(), v.clone()));
         }
     }
-    Expr::new(e.span, ExprNode::Hash { entries: merged, kwargs: *kwargs })
+    Some(Expr::new(e.span, ExprNode::Hash { entries: merged, kwargs: *kwargs }))
 }
 
 /// A read with no side effect and no cost worth worrying about, so
