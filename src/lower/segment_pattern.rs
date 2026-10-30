@@ -751,6 +751,9 @@ pub fn compile(src: &str) -> Option<String> {
     Some(encode_alternatives(&encoded))
 }
 
+// A copy of router.rb's `format_extension` list, not read from it: the runtime is Ruby source, not data lowering can load.
+const ROUTER_FORMATS: &str = "html text js css ics csv vcf vtt png jpeg jpg gif bmp tiff svg webp mpeg mp3 mp4 ogg webm otf ttf woff woff2 pdf zip gzip xml rss atom yaml json turbo_stream";
+
 /// A requirement that stops a lazy segment before one of the listed
 /// extensions, the end of the segment or the next `/` (lobsters'
 /// `DOMAINS_IDENTIFIER = /([^\/]+?)(?=\.json|\.rss|$|\/)/`): the segment
@@ -766,7 +769,8 @@ pub fn split_format_lookahead(src: &str) -> Option<(String, Vec<String>)> {
             "$" | "/" | "\\/" => {}
             _ => {
                 let ext = alt.strip_prefix("\\.")?;
-                if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                // Not any word: `Router.match` peels only a registered format, so another listed suffix would stay in the param.
+                if !ROUTER_FORMATS.split(' ').any(|f| f == ext) {
                     return None;
                 }
                 exts.push(ext.to_string());
@@ -814,6 +818,8 @@ mod tests {
         // Not a greedy body (it would swallow the extension), and not without `$`.
         assert_eq!(super::split_format_lookahead(r"(.+)(?=\.json|\.rss|$|\/)"), None);
         assert_eq!(super::split_format_lookahead(r"([^\/]+?)(?=\.json|\.rss)"), None);
+        // An extension the router does not peel would stay in the param.
+        assert_eq!(super::split_format_lookahead(r"([^\/]+?)(?=\.foo|$)"), None);
     }
 
     use super::*;
