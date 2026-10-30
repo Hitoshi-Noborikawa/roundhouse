@@ -93,6 +93,12 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "elastic_apm",
 ];
 
+/// Requires in `GEM_REQUIRES` a tree loads only when `app/` names the
+/// constant: (require, constant). Loading rest-client pulls in
+/// http-cookie, whose circular require warns under `-w` in every app
+/// that has the gem installed, used or not.
+pub(crate) const DEMAND_REQUIRES: &[(&str, &str)] = &[("rest-client", "RestClient"), ("elastic_apm", "ElasticAPM")];
+
 /// Whether the compiler's own tables have a Ruby-family tree declare or
 /// require `gem`: the runtime gems the emitted Gemfile declares on demand
 /// and the guarded requires in `gem_facades.rb`. Extensions validate a

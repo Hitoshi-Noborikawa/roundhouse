@@ -29,7 +29,7 @@ use zip::write::SimpleFileOptions;
 
 use crate::App;
 use crate::emit::{self, EmittedFile};
-use crate::gems::{GEM_REQUIRES, Marker, VARIATION_MARKER, compiler_runtime_gems};
+use crate::gems::{DEMAND_REQUIRES, GEM_REQUIRES, Marker, VARIATION_MARKER, compiler_runtime_gems};
 use crate::ingest::ingest_app;
 
 pub use crate::build_target::{BuildTarget, ParamBindCapability};
@@ -4456,6 +4456,13 @@ fn ruby_family_runtime_files(
     // conditional on the app naming the constant, not on the require
     // graph's shape (which is what kept the blog's JRuby tree booting
     // with no jars).
+    // A demand-gated require (`gems::DEMAND_REQUIRES`) whose constant no
+    // app body names stays out of the list.
+    let undemanded: Vec<&str> = DEMAND_REQUIRES
+        .iter()
+        .filter(|(_, konst)| !files.iter().any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, konst)))
+        .map(|(require, _)| *require)
+        .collect();
     let gem_facades = match flavor {
         RubyFlavor::CRuby => format!(
             "# Gem façades are spinel-only (no native gems there). On the CRuby\n\
@@ -4472,7 +4479,7 @@ fn ruby_family_runtime_files(
              require_relative \"module_delegate\"\n\
              require_relative \"open_telemetry_facade\"\n\
              {}{}",
-            gem_require_block(&[], &lock_gated_requires(app)),
+            gem_require_block(&undemanded, &lock_gated_requires(app)),
             WEB_PUSH_STUB_REOPEN
         ),
         RubyFlavor::JRuby => {
@@ -4497,7 +4504,7 @@ fn ruby_family_runtime_files(
                  require_relative \"open_telemetry_facade\"\n\
                  {}{}",
                 markly_require,
-                gem_require_block(&["markly"], &lock_gated_requires(app)),
+                gem_require_block(&[&["markly"][..], &undemanded].concat(), &lock_gated_requires(app)),
                 WEB_PUSH_STUB_REOPEN
             )
         }
