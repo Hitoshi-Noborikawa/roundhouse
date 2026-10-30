@@ -7,8 +7,10 @@
 //! `to_s` there. The `route_for` rewrite in a `direct` helper builds its
 //! call separately and kept `RouteHelpers.strike_path(123)` against
 //! `(String id)`, which Spinel's `--rbs .` rejects. Rails writes either
-//! with `to_param`: `strike_path(123)` is `/strikes/123`. A segment that
-//! stays `Integer` keeps its Integer.
+//! with `to_param`: `strike_path(123)` is `/strikes/123`. An optional
+//! segment (`/archive(/:period)`) is declared `String | nil` and is a
+//! String slot too (`archive_path(2026)` is `/archive/2026`). A segment
+//! that stays `Integer` keeps its Integer.
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -22,6 +24,10 @@ const ROUTES: &str = "Rails.application.routes.draw do
   end
   direct :first_note do |options|
     route_for :note, 7
+  end
+  get \"archive(/:period)\", to: \"archives#show\", as: :archive
+  direct :this_year do |options|
+    route_for :archive, 2026
   end
 end
 ";
@@ -46,6 +52,7 @@ const RUN: &str = r#"
 raise "first_strike: " + RouteHelpers.first_strike_path.inspect unless RouteHelpers.first_strike_path == "/strikes/123"
 raise "first_note: " + RouteHelpers.first_note_path.inspect unless RouteHelpers.first_note_path == "/notes/7"
 raise "named: " + RouteHelpers.strike_path("abc").inspect unless RouteHelpers.strike_path("abc") == "/strikes/abc"
+raise "this_year: " + RouteHelpers.this_year_path.inspect unless RouteHelpers.this_year_path == "/archive/2026"
 puts "direct route_for passed"
 "#;
 
@@ -55,6 +62,8 @@ fn route_for_converts_an_integer_only_for_a_string_slot() {
     let helpers = std::fs::read_to_string(emitted.join("app/route_helpers.rb")).expect("read the emitted route helpers");
     assert!(helpers.contains("RouteHelpers.strike_path(123.to_s)"), "{helpers}");
     assert!(helpers.contains("RouteHelpers.note_path(7)"), "{helpers}");
+    // An optional segment is `String | nil`: still a String slot.
+    assert!(helpers.contains("RouteHelpers.archive_path(2026.to_s)"), "{helpers}");
 }
 
 #[test]

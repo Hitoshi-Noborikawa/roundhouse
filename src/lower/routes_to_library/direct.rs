@@ -149,7 +149,12 @@ fn rewrite_route_for(
         .iter()
         .enumerate()
         .map(|(i, arg)| {
-            let wants_str = matches!(declared.and_then(|tys| tys.get(i)), Some(crate::ty::Ty::Str));
+            // An optional segment (`/archive(/:period)`) is declared
+            // `String | nil`: a String slot too.
+            let wants_str = matches!(
+                declared.and_then(|tys| tys.get(i)).map(crate::ty::Ty::peel_nilable),
+                Some(crate::ty::Ty::Str)
+            );
             let is_int = matches!(arg.ty, Some(crate::ty::Ty::Int))
                 || matches!(&*arg.node, ExprNode::Lit { value: Literal::Int { .. } });
             if wants_str && is_int { to_s(arg.clone(), arg.span) } else { arg.clone() }
