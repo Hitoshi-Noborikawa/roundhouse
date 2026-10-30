@@ -49,15 +49,18 @@ use crate::span::Span;
 use super::super::routes::FlatRoute;
 
 /// One `RouteHelpers.<name>_path` per `direct` declaration.
+/// `helper_params`: each generated route helper's parameter types, by
+/// name, so a `route_for` argument can meet its target's signature.
 pub fn lower_direct_helpers(
     module_path: &[Symbol],
     app: &App,
     flat: &[FlatRoute],
+    helper_params: &crate::det::HashMap<String, Vec<crate::ty::Ty>>,
 ) -> Vec<LibraryFunction> {
     app.routes
         .direct_helpers
         .iter()
-        .map(|h| build_direct_helper(module_path, h, flat))
+        .map(|h| build_direct_helper(module_path, h, flat, helper_params))
         .collect()
 }
 
@@ -65,6 +68,7 @@ fn build_direct_helper(
     module_path: &[Symbol],
     helper: &DirectHelper,
     flat: &[FlatRoute],
+    helper_params: &crate::det::HashMap<String, Vec<crate::ty::Ty>>,
 ) -> LibraryFunction {
     // The trailing options hash takes a `{}` default — see the header.
     let last = helper.params.len().saturating_sub(1);
@@ -81,7 +85,7 @@ fn build_direct_helper(
         })
         .collect();
     let mut body = helper.body.clone();
-    rewrite_route_for(&mut body, flat);
+    rewrite_route_for(&mut body, flat, helper_params);
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(format!("{}_path", helper.name.as_str())),
@@ -100,9 +104,13 @@ fn empty_hash() -> Expr {
 }
 
 /// `route_for :target, arg…, k: v` → `<target>_path(arg…)` + query.
-fn rewrite_route_for(expr: &mut Expr, flat: &[FlatRoute]) {
+fn rewrite_route_for(
+    expr: &mut Expr,
+    flat: &[FlatRoute],
+    helper_params: &crate::det::HashMap<String, Vec<crate::ty::Ty>>,
+) {
     expr.node
-        .for_each_child_mut(&mut |c| rewrite_route_for(c, flat));
+        .for_each_child_mut(&mut |c| rewrite_route_for(c, flat, helper_params));
 
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return;
@@ -132,7 +140,22 @@ fn rewrite_route_for(expr: &mut Expr, flat: &[FlatRoute]) {
         return;
     }
     let span = expr.span;
-    let base = route_helpers_call(&helper, positional.to_vec(), span);
+    // An Integer into a segment the helper types `String` (a call site
+    // elsewhere fills it with a String) is its `to_s`, as Rails writes
+    // it with `to_param` and as the other call sites' rewrite does. A
+    // record and an Integer segment stay as they are.
+    let declared = helper_params.get(&helper);
+    let positional: Vec<Expr> = positional
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            let wants_str = matches!(declared.and_then(|tys| tys.get(i)), Some(crate::ty::Ty::Str));
+            let is_int = matches!(arg.ty, Some(crate::ty::Ty::Int))
+                || matches!(&*arg.node, ExprNode::Lit { value: Literal::Int { .. } });
+            if wants_str && is_int { to_s(arg.clone(), arg.span) } else { arg.clone() }
+        })
+        .collect();
+    let base = route_helpers_call(&helper, positional, span);
     *expr = with_query(base, &query, span);
 }
 
