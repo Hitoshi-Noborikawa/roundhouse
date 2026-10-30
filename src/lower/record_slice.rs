@@ -121,6 +121,15 @@ fn lower_slice(expr: &Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<
     // would skip it, and a binding nothing reads does not compile in Go.
     let effect_free = recv.as_ref().map_or(true, |r| super::blank::is_effect_free_reader(r));
     if readers.is_empty() && !effect_free {
+        diags.push(super::residue_diagnostic(
+            "record_slice",
+            "record-slice",
+            span,
+            "effectful-no-names",
+            "`slice` with no names on a receiver with effects is left as a runtime call, \
+             which strict targets cannot compile; it answers `{}`, so drop the call or name the columns"
+                .to_string(),
+        ));
         return None;
     }
     let (binding, read) = match recv {

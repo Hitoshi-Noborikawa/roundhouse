@@ -3184,8 +3184,11 @@ ways.
 calls: `a.slice(:id, :title)` becomes `{"id" => a.id, "title" =>
 a.title}`, typed `Hash[String, <union of the readers>]`. The receiver
 is evaluated once: a receiver with effects read more than once is bound
-in a `Let` under a name unique to the site, and one sliced with no names
-keeps the call, so it still runs. A name the model has no reader for leaves the call
+in a `Let` under a name unique to the site. A receiver with effects
+sliced with NO names (`Article.find(id).slice`) keeps the call, with an
+`effectful-no-names` lower-residue warning, and does not build on a
+strict target. That is an accepted gap: the call always answers `{}`,
+and binding a receiver nothing reads does not compile in Go. A name the model has no reader for leaves the call
 as written with a `record-slice` lower-residue warning, and a model
 that defines its own `slice` keeps it.
 
