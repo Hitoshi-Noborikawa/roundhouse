@@ -7474,6 +7474,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "Arel::Nodes::Ascending",
     "Arel::Nodes::Descending",
     "Arel::Nodes::Predicate",
+    // `runtime/ruby/active_record/unknown_attribute_error.rb`, beside the next three.
     "ActiveModel::UnknownAttributeError",
     // `runtime/ruby/active_record/connection_not_established.rb`,
     // `encryption_errors.rb` and `stale_object_error.rb`. A rescue of
