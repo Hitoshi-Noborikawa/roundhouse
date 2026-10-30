@@ -2031,6 +2031,14 @@ pub enum RouteSpec {
         /// verb declared directly in the block and any other case.
         #[serde(default, skip_serializing_if = "ResourceScope::is_nested")]
         scope: ResourceScope,
+        /// Written as an action symbol (`get :index`) rather than a path
+        /// string (`get "index"`). Rails derives a symbol's path from the
+        /// action, and a canonical action (`index`, `create`, `new`,
+        /// `show`, `update`, `destroy`) on a member or collection scope
+        /// adds no segment: `collection { get :index }` is the
+        /// collection's own path, where `get "index"` is `…/index`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        action_symbol: bool,
     },
     /// `root "controller#action"` — shorthand for `GET /` routed to the
     /// given target. Helper name defaults to `{prefix}root`; `as:`

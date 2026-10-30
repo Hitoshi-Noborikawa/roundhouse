@@ -220,9 +220,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let route_helper_funcs_for_extras = crate::lower::lower_routes_to_library_functions(app);
     let route_helper_extras = crate::lower::extras_from_funcs(&route_helper_funcs_for_extras);
 
-    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
+    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_params_and_views(
         &app.models,
         &app.schema,
+        &app.views,
         view_extras,
         &params_specs,
     );
@@ -794,6 +795,10 @@ fn emit_app_cr(emitted: &[EmittedFile]) -> EmittedFile {
         "param_value",
         "hash_with_indifferent_access",
         "inflector",
+        // Ruby's core error classes (`NoMethodError`, `NameError`): errors
+        // subclasses them (`ActiveModel::UnknownAttributeError <
+        // NoMethodError`), and a superclass resolves at parse time.
+        "core_errors",
         // active_record_base → errors keeps the forward-ref chain
         // resolvable at parse time. Base is referenced by errors'
         // RecordInvalid as a property type (parse-time class macro);

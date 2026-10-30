@@ -1,4 +1,21 @@
 # frozen_string_literal: true
+module ActiveModel
+  # Rails' (activemodel 8.1.4) `initialize(record, attribute)` builds its
+  # message from `record.class.name`; this file transpiles into the strict
+  # runtimes, which have no `class` reflection. So the caller builds the
+  # message, as for the ActiveRecord classes below: the Ruby targets'
+  # `_unknown_mass_attribute` (connection.rb) passes Rails' text.
+  class UnknownAttributeError < NoMethodError
+    attr_reader :record, :attribute
+
+    def initialize(record, attribute, message = "ActiveModel::UnknownAttributeError")
+      @record = record
+      @attribute = attribute
+      super(message)
+    end
+  end
+end
+
 module ActiveRecord
   # Not StandardError subclasses each: Rails' hierarchy (8.1.4), so `rescue ActiveRecord::StatementInvalid` catches what Rails' does.
   class ActiveRecordError < StandardError

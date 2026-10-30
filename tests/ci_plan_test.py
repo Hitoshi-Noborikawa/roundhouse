@@ -689,6 +689,21 @@ class Routing(unittest.TestCase):
         self.assertEqual(shared["spinel_tests"], ci.SPINEL_TESTS)
         self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
 
+    def test_app_reopens_runtime_class_owns_its_pass_and_runtime_inputs(self):
+        suite = "app_reopens_runtime_class"
+        paths = [
+            "tests/app_reopens_runtime_class.rs",
+            "src/emit/ruby/reopen.rs",
+            "runtime/ruby/active_storage.rb",
+            "runtime/ruby/active_storage.rbs",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn(suite, plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+        self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
+
     def test_array_column_storage_spinel_owns_its_pass_and_runtime_inputs(self):
         suite = "array_column_storage_spinel"
         paths = [

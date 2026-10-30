@@ -57,9 +57,10 @@ pub struct OverlayLcs {
 pub fn lower_overlay(app: &App) -> OverlayLcs {
     let params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let (models, model_registry) = crate::lower::lower_models_with_registry_and_params(
+    let (models, model_registry) = crate::lower::lower_models_with_registry_params_and_views(
         &app.models,
         &app.schema,
+        &app.views,
         vec![],
         &params_specs,
     );

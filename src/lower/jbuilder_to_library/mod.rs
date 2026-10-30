@@ -93,6 +93,7 @@ use record_value::{RecordShapes, RecordValue};
 
 use super::view_to_library::{
     build_view_signature, infer_view_arg, insert_framework_stubs, split_view_name, view_module_id,
+    PartialStems,
 };
 
 /// Bulk entry: lower every json-format view to a `LibraryClass`. Mirrors
@@ -274,7 +275,7 @@ fn build_library_class(
     // whose name one of its locals takes reads its own parameter
     // (`PartialParams`), so the two stay apart.
     let partial_key = is_partial.then(|| {
-        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir, &partials.stems);
         partial_key(&mod_path, &method)
     });
     let mut rewritten = rewrite_ivars_to_locals(&view.body);
@@ -434,7 +435,11 @@ fn jbuilder_method_parts(
     partials: &PartialParams,
 ) -> (ClassId, MethodDef, String, Vec<String>, Vec<String>) {
     let module_id = view_module_id(dir);
-    let method_name = Symbol::from(format!("{stem}_json"));
+    let method_stem = match is_partial {
+        true => partial_target(&format!("{dir}/{stem}"), dir, &partials.stems).1,
+        false => stem.to_string(),
+    };
+    let method_name = Symbol::from(format!("{method_stem}_json"));
 
     let known_models: Vec<String> = app
         .models
@@ -477,7 +482,7 @@ fn jbuilder_method_parts(
     // the partial's own file name, and a partial reads its renderer's
     // ivars.
     let local_params: Option<&Vec<Symbol>> = if is_partial {
-        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir, &partials.stems);
         partials.params.get(&partial_key(&mod_path, &method))
     } else {
         None
@@ -524,7 +529,8 @@ fn jbuilder_method_parts(
         // the convention's type (the model of the partial's
         // directory); any other takes the model its own name gives.
         let key = {
-            let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+            let (mod_path, method) =
+                partial_target(&format!("{dir}/{stem}"), dir, &partials.stems);
             partial_key(&mod_path, &method)
         };
         let ivar_of = |p: &Symbol| {
@@ -2760,7 +2766,7 @@ fn emit_partial_call(partial_path: &str, locals: Vec<(Symbol, Expr)>, ctx: &Ctx)
 /// it a parameter there too. A partial this app has no jbuilder
 /// template for takes the values in call order.
 fn partial_call(partial_path: &str, locals: Vec<(Symbol, Expr)>, ctx: &Ctx) -> Expr {
-    let (mod_path, method) = partial_target(partial_path, &ctx.resource_dir);
+    let (mod_path, method) = partial_target(partial_path, &ctx.resource_dir, &ctx.partials.stems);
     let key = partial_key(&mod_path, &method);
     let args: Vec<Expr> = match ctx.partials.params.get(&key) {
         Some(params) => {
@@ -2821,6 +2827,8 @@ pub(crate) struct PartialParams {
     /// Each partial's ivar parameters: the ivar, then its parameter.
     ivars: crate::det::HashMap<(String, String), Vec<(Symbol, Symbol)>>,
     closures: crate::det::HashMap<Symbol, Vec<Symbol>>,
+    /// The stem each partial's key and `<stem>_json` method go by.
+    stems: PartialStems,
     /// The partials whose every render is a non-empty value: an object
     /// with a pair on every path, or an array. A render of any other
     /// partial may come out `{}`, which Jbuilder treats as BLANK.
@@ -2841,8 +2849,9 @@ impl PartialParams {
 fn partial_params(app: &App) -> PartialParams {
     let known_models: Vec<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    let stems = PartialStems::of(&app.views);
     let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    let edges = render_edges(&views, &app.models);
+    let edges = render_edges(&views, &app.models, &stems);
     let closures = ivar_closures(&views, &edges);
     let mut bound: crate::det::HashMap<(String, String), Vec<Symbol>> =
         crate::det::HashMap::default();
@@ -2857,11 +2866,11 @@ fn partial_params(app: &App) -> PartialParams {
             }
         }
     }
-    let mut out = PartialParams { closures, ..Default::default() };
+    let mut out = PartialParams { closures, stems, ..Default::default() };
     for v in &views {
         let (dir, base) = split_view_name(v.name.as_str());
         let Some(stem) = base.strip_prefix('_') else { continue };
-        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+        let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir, &out.stems);
         let key = partial_key(&mod_path, &method);
         let mut names = bound.get(&key).cloned().unwrap_or_default();
         let mut optional = Vec::new();
@@ -2947,7 +2956,7 @@ fn sets_a_pair(stmts: &[&Expr]) -> bool {
 /// Whether a render of `partial_path` from this template is always a
 /// non-empty value (`PartialParams::filled`).
 fn partial_always_filled(partial_path: &str, ctx: &Ctx) -> bool {
-    let (mod_path, method) = partial_target(partial_path, &ctx.resource_dir);
+    let (mod_path, method) = partial_target(partial_path, &ctx.resource_dir, &ctx.partials.stems);
     ctx.partials.filled.contains(&partial_key(&mod_path, &method))
 }
 
@@ -2956,13 +2965,17 @@ fn partial_always_filled(partial_path: &str, ctx: &Ctx) -> bool {
 /// local names the render binds.
 type RenderSites = Vec<((String, String), Option<Symbol>, Vec<Symbol>)>;
 
-fn render_edges(views: &[&View], models: &[crate::dialect::Model]) -> Vec<(Symbol, RenderSites)> {
+fn render_edges(
+    views: &[&View],
+    models: &[crate::dialect::Model],
+    stems: &PartialStems,
+) -> Vec<(Symbol, RenderSites)> {
     let mut partial_views: crate::det::HashMap<(String, String), Symbol> =
         crate::det::HashMap::default();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
         if let Some(stem) = base.strip_prefix('_') {
-            let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir);
+            let (mod_path, method) = partial_target(&format!("{dir}/{stem}"), dir, stems);
             partial_views.insert(partial_key(&mod_path, &method), v.name.clone());
         }
     }
@@ -2972,7 +2985,7 @@ fn render_edges(views: &[&View], models: &[crate::dialect::Model]) -> Vec<(Symbo
             let (dir, _) = split_view_name(v.name.as_str());
             let mut sites = Vec::new();
             let records = record_partial::record_sites(&v.body, models);
-            collect_partial_sites(&v.body, dir, &records, &mut sites);
+            collect_partial_sites(&v.body, dir, &records, stems, &mut sites);
             let sites = sites
                 .into_iter()
                 .map(|(key, names)| {
@@ -3082,8 +3095,9 @@ fn ivar_closures(
 /// partials it renders, so a partial is typed with its renderers'
 /// ivars as an ERB partial is.
 pub(crate) fn jbuilder_render_edges(app: &App) -> Vec<(Symbol, Vec<Symbol>)> {
+    let stems = PartialStems::of(&app.views);
     let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    render_edges(&views, &app.models)
+    render_edges(&views, &app.models, &stems)
         .into_iter()
         .map(|(name, sites)| (name, sites.into_iter().filter_map(|(_, t, _)| t).collect()))
         .collect()
@@ -3095,8 +3109,9 @@ pub(crate) fn jbuilder_ivar_closures(
     views: &[View],
     models: &[crate::dialect::Model],
 ) -> crate::det::HashMap<Symbol, Vec<Symbol>> {
+    let stems = PartialStems::of(views);
     let views: Vec<&View> = views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    let edges = render_edges(&views, models);
+    let edges = render_edges(&views, models, &stems);
     ivar_closures(&views, &edges)
 }
 
@@ -3129,6 +3144,7 @@ fn collect_partial_sites(
     e: &Expr,
     dir: &str,
     records: &record_partial::RecordSites,
+    stems: &PartialStems,
     out: &mut Vec<((String, String), Vec<Symbol>)>,
 ) {
     if let ExprNode::Send { recv: Some(recv), block: None, .. } = &*e.node {
@@ -3141,7 +3157,7 @@ fn collect_partial_sites(
                 JbStmt::PairPartial { partial_path, as_name, .. } => Some((partial_path, vec![as_name])),
                 JbStmt::PartialRecord { arg, as_name } => {
                     for (path, local, _) in record_partial_path(arg, as_name.as_ref(), dir, records).map(|r| r.branches).unwrap_or_default() {
-                        let (mod_path, method) = partial_target(&path, dir);
+                        let (mod_path, method) = partial_target(&path, dir, stems);
                         out.push((partial_key(&mod_path, &method), vec![local]));
                     }
                     None
@@ -3149,12 +3165,12 @@ fn collect_partial_sites(
                 _ => None,
             };
             if let Some((path, names)) = site {
-                let (mod_path, method) = partial_target(&path, dir);
+                let (mod_path, method) = partial_target(&path, dir, stems);
                 out.push((partial_key(&mod_path, &method), names));
             }
         }
     }
-    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, records, out));
+    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, records, stems, out));
 }
 
 /// The `local_assigns[:x]` keys a template reads, in first-seen order.
@@ -3177,12 +3193,12 @@ fn partial_key(mod_path: &[Symbol], method: &str) -> (String, String) {
 /// Resolve a Jbuilder partial path to (module-path, base-method-name).
 /// `"articles/article"` → (["Views","Articles"], "article")
 /// `"article"` (no slash) → (["Views","<current-dir-camel>"], "article")
-fn partial_target(path: &str, resource_dir: &str) -> (Vec<Symbol>, String) {
+/// The base is the stem `stems` gives the partial.
+fn partial_target(path: &str, resource_dir: &str, stems: &PartialStems) -> (Vec<Symbol>, String) {
     let (dir, base) = match path.rsplit_once('/') {
         Some((d, b)) => (d.to_string(), b.to_string()),
         None => (resource_dir.to_string(), path.to_string()),
     };
-    let base = base.trim_start_matches('_').to_string();
     // `camelize_path`, not `camelize`: a NESTED partial dir carries a
     // slash (`autocompletable/users`) and the module it names is
     // `Views::Autocompletable::Users`. The plain camelizer left the
@@ -3196,6 +3212,7 @@ fn partial_target(path: &str, resource_dir: &str) -> (Vec<Symbol>, String) {
     let module_path: Vec<Symbol> = std::iter::once(Symbol::from("Views"))
         .chain(module_camel.split("::").map(Symbol::from))
         .collect();
+    let base = stems.stem(&module_camel, &base);
     (module_path, base)
 }
 
