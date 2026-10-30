@@ -1,6 +1,6 @@
 module ActiveSupport
   module Notifications
-    SUBSCRIBERS: Array[Subscriber]
+    SUBSCRIBERS: Array[::ActiveSupport::Notifications::Subscriber]
 
     class Subscriber
       @pattern: String | ::Regexp
@@ -19,11 +19,11 @@ module ActiveSupport
     self.@render_listening: bool
     self.@process_listening: bool
 
-    def self.subscribe: (String | ::Regexp pattern, ?untyped? callback, ?monotonic: bool) ?{ () -> untyped } -> Subscriber
-    def self.monotonic_subscribe: (String | ::Regexp pattern, ?untyped? callback) ?{ () -> untyped } -> Subscriber
-    def self.unsubscribe: (Subscriber subscriber) -> nil
+    def self.subscribe: (String | ::Regexp pattern, ?untyped? callback, ?monotonic: bool) ?{ () -> untyped } -> ::ActiveSupport::Notifications::Subscriber
+    def self.monotonic_subscribe: (String | ::Regexp pattern, ?untyped? callback) ?{ () -> untyped } -> ::ActiveSupport::Notifications::Subscriber
+    def self.unsubscribe: (::ActiveSupport::Notifications::Subscriber subscriber) -> nil
     def self.refresh_listening: () -> nil
-    def self.subscribers: () -> Array[Subscriber]
+    def self.subscribers: () -> Array[::ActiveSupport::Notifications::Subscriber]
     def self.listening?: (String name) -> bool
     def self.sql_listening?: () -> bool
     def self.render_listening?: () -> bool
