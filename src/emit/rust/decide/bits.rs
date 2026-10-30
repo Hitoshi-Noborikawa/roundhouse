@@ -96,3 +96,25 @@ pub const CLONE_AT: u64 = 1 << 34;
 // pub const COERCE_FAMILY_MASK:  u64 = 0xF << COERCE_FAMILY_SHIFT;
 //
 // Left unallocated until Stage 4 lands the enum shape.
+
+#[cfg(test)]
+mod tests {
+    /// `Expr.decisions` bits are declared here and in `crate::expr`. Two
+    /// flags given one bit in different changes merge without a textual
+    /// conflict, so check that each position is declared once.
+    #[test]
+    fn each_decision_bit_is_declared_once() {
+        let mut owners = std::collections::BTreeMap::new();
+        for source in [include_str!("bits.rs"), include_str!("../../../expr.rs")] {
+            for line in source.lines() {
+                let Some(rest) = line.trim().strip_prefix("pub const ") else { continue };
+                let Some((name, bit)) = rest.split_once(": u64 = 1 << ") else { continue };
+                let bit: u32 = bit.split(';').next().unwrap().trim().parse().expect(name);
+                if let Some(other) = owners.insert(bit, name) {
+                    panic!("decision bit {bit} is both {other} and {name}");
+                }
+            }
+        }
+        assert!(owners.len() > 30, "{owners:?}");
+    }
+}

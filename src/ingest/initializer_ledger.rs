@@ -208,6 +208,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         reads: |p| extract_collection_cache_store(p.text.as_bytes(), PROBE).is_some(),
     },
     Recognizer {
+        name: "view_paths (X.prepend_view_path / X.append_view_path / X.view_paths =, bare or in ActiveSupport.on_load)",
+        origins: INIT,
+        levels: TOP_HOOK,
+        reads: |p| super::view_paths::reads_initializer_statement(p.text.as_bytes()),
+    },
+    Recognizer {
         name: "initializer_filters (X.before_action :m, only:)",
         origins: INIT,
         levels: TOP_HOOK,
@@ -227,6 +233,12 @@ const RECOGNIZERS: &[Recognizer] = &[
             (p.text.contains("create_function") || p.text.contains("create_aggregate"))
                 && !super::sql_functions::scan_sql_functions(p.text.as_bytes(), PROBE).is_empty()
         },
+    },
+    Recognizer {
+        name: "gem_package_settings (<package config receiver>.<attr> = literal, replayed after the Spinel package loads)",
+        origins: INIT,
+        levels: TOP_HOOK,
+        reads: |p| super::gem_package_settings::extract(p.text.as_bytes(), PROBE).iter().any(|s| s.carried()),
     },
     Recognizer {
         name: "default_per_page (Kaminari.configure { |c| c.default_per_page = })",

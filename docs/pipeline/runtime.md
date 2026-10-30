@@ -3320,21 +3320,61 @@ Rails with the gem installed and no `SENTRY_DSN` also transmits
 nothing, so the *delivery* half of this is not a divergence for an
 unconfigured deployment; the lost detail is.
 
-### rack-mini-profiler authorizes a request, and no profiler runs
+### rack-mini-profiler: the panel and request time on Spinel, nothing on CRuby
 
-`Rack::MiniProfiler.authorize_request`, `deauthorize_request` and
-`request_authorized?` are the gem's own three bodies, a flag on
-`Thread.current`, in `runtime/ruby/gem_facades.rb` on the Spinel tree;
-the CRuby tree loads the real gem. lobsters authorizes every moderator's
-request, and without the constant each of their pages was a 500.
+On the Spinel tree the gem is a package, `runtime/gems/rack_mini_profiler/`
+(registered by `src/gems/rack_mini_profiler.rs`, shipped when
+`Gemfile.lock` pins the gem). It ports the gem 4.0.0's middleware over
+the framework's gem-agnostic request hooks (`runtime/spinel/request_hooks.rb`,
+run by `Main.dispatch` outside everything else, where the Railtie inserts
+the middleware) and vendors the gem's `includes.js`, `includes.css` and
+`vendor.js`. Its Railtie's production setup applies (`:allow_authorized`,
+the file store under `tmp/miniprofiler`), and the app's literal
+`Rack::MiniProfiler.config.<x> = …` lines in `config/initializers/` are
+replayed after it loads. Compared on the wire against the real gem: the
+injected `<script>`, `X-MiniProfiler-Ids`, the `__profilin` cookie (its
+tokens, `dp`, `bt`), `/mini-profiler-resources/results` (JSON and the
+share page, client timings included), the asset routes, `?pp=help` and
+the disabled-tool answers.
 
-**The middleware is not on either tree.** Nothing times the request,
-records its SQL, injects the panel into the page or serves
-`/mini-profiler-resources`. An authorized page is the page Rails renders
-minus the profiler's `<script>`, and the `__profilin` cookie is never
-set. The flame graph and memory views need CRuby internals and have no
-Spinel counterpart; request, SQL and render timing could be built on
-the runtime's own call sites.
+What differs:
+
+- **Only the request is timed.** SQL and render timings are empty lists;
+  they are the next stages, over the same hooks.
+- **The tools that read CRuby's heap or stack are not there.** The
+  Railtie turns on `enable_advanced_debugging_tools` in development; this
+  tree keeps it off, so `profile-gc`, `profile-memory`, `env` and
+  `analyze-memory` answer the gem's "disabled" message in every
+  environment. `flamegraph` answers the gem's "install stackprof" message,
+  and `trace-exceptions` is not recognized (it needs TracePoint).
+- **Only the three files the panel loads are served** from
+  `/mini-profiler-resources/`; the gem's other `html/` files (speedscope,
+  the templates) are a 404.
+- **The user key is empty.** The gem keys unviewed results by
+  `Rack::Request#ip`, and the Spinel server does not record the peer
+  address (`request.remote_ip` is empty on this tree generally), so every
+  client shares one list.
+- **A response the gem sends without a Content-Type** (the results 404)
+  gets the server's `text/html; charset=utf-8`.
+- **The CSP nonce attribute is empty**, as on the CRuby tree; Rails fills
+  it when the layout generated one.
+- **The share page escapes what the gem writes raw.** Its `<title>` is
+  HTML-escaped and the page JSON in its `<script>` is `json_escape`d
+  (`<`, `>`, `&` as `\u003c` …): the Spinel server accepts a raw `<` in
+  the request line, which Puma refuses, so request data could otherwise
+  close the script. The browser reads the same values; the bytes differ
+  wherever the data holds one of those characters.
+- Only literal initializer settings are replayed, and only those the
+  package's `Config` has a writer for (`config_setters` in
+  `src/gems/rack_mini_profiler.rs`). Any other literal setting is an
+  `unsupported (spinel)` error at emit and stays an unconsumed-initializer
+  warning; a computed one is only the warning.
+- A Gemfile line with `require: false` keeps the package out, as Bundler
+  would keep the gem's Railtie from loading.
+
+**The middleware is not on the CRuby tree.** It loads the real gem for
+the `authorize_request` gate only, so an authorized page there renders
+without the panel.
 
 ### `ActionText::ContentHelper.allowed_attributes` answers the list, not `nil`
 

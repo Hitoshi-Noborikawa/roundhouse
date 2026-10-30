@@ -1443,6 +1443,15 @@ pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport::Cache::NullStore", "fetch"),
     ("ActiveSupport::Notifications", "subscribed"),
     ("ActiveJob::Continuable", "step"),
+    // rest-client: a verb given a block hands it the response and answers
+    // the block's value (a 4xx/5xx does not raise then).
+    ("RestClient", "get"),
+    ("RestClient", "post"),
+    ("RestClient", "put"),
+    ("RestClient", "patch"),
+    ("RestClient", "delete"),
+    ("RestClient", "head"),
+    ("RestClient", "options"),
 ];
 
 fn register_stdlib_class(

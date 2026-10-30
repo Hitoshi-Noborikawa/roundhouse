@@ -468,6 +468,27 @@ fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
         || body_has_constant_decl(m.body())
         || body_has_route_helpers_include(m.body())
         || body_runs_module_code(m.body())
+        || body_includes_into_constant(m.body())
+}
+
+/// A namespace whose body includes one constant into another:
+/// activemerchant's `module Billing` ends `Compatibility::Model.include
+/// Rails::Model`. Ruby runs it as the body loads, so the module surfaces
+/// for the call to have a body to be carried from
+/// (`external_include`).
+fn body_includes_into_constant(body: Option<Node<'_>>) -> bool {
+    let Some(body) = body else { return false };
+    flatten_statements(body).iter().any(|stmt| {
+        stmt.as_call_node().is_some_and(|call| {
+            constant_id_str(&call.name()) == "include"
+                && call.block().is_none()
+                && call.receiver().is_some_and(|r| constant_path_segments_strs(&r).is_some())
+                && call.arguments().is_some_and(|a| {
+                    let args: Vec<_> = a.arguments().iter().collect();
+                    args.len() == 1 && constant_path_segments_strs(&args[0]).is_some()
+                })
+        })
+    })
 }
 
 /// A module whose body runs one of Ruby's own `Module` methods on itself

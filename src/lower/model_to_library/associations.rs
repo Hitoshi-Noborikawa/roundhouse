@@ -30,6 +30,14 @@ pub(crate) enum ThroughWriterJoin {
     /// convention. The fourth field is the through association's `as:`
     /// interface: a polymorphic join row also carries `<as>_type`.
     Resolved(ClassId, Symbol, Symbol, Option<Symbol>),
+    /// `Resolved`, through a polymorphic source `belongs_to` named by
+    /// `source_type:` (lobsters' `ModMail has_many :comment_references,
+    /// through: :mod_mail_references, source: :reference, source_type:
+    /// "Comment"`): the join row also carries the source's `<name>_type`
+    /// (the fifth field, or its `foreign_type:`), set to the target class,
+    /// and keys the target by its `primary_key:` (the sixth). Only the
+    /// writer and the reader take it.
+    ResolvedPolymorphic(ClassId, Symbol, Symbol, Option<Symbol>, Symbol, Symbol),
     /// No join row to write. The first hop is itself `:through`, or the
     /// source association is not a `belongs_to` (`Category has_many
     /// :stories, through: :tags`, where `Tag#stories` goes through
@@ -63,7 +71,7 @@ impl ThroughJoins {
 
     /// A collection writer, and its `_stale` flag, exists for this name.
     pub(super) fn writer(&self, name: &Symbol) -> bool {
-        matches!(self.get(name), Some(ThroughWriterJoin::Resolved(..)))
+        matches!(self.get(name), Some(ThroughWriterJoin::Resolved(..) | ThroughWriterJoin::ResolvedPolymorphic(..)))
     }
 }
 
@@ -122,16 +130,25 @@ pub(crate) fn through_writer_join(
     // The source association, by name. Matching a `belongs_to` by target
     // class instead picks the wrong key when the join model points at
     // that class twice (`source_article` and `target_article`).
-    let src_fk = model.associations().find(|a| a.name() == through_name).and_then(|assoc| {
+    let src = model.associations().find(|a| a.name() == through_name).and_then(|assoc| {
         match join_model.through_source(assoc) {
             Some(Association::BelongsTo { foreign_key, polymorphic: false, .. }) => {
-                Some(foreign_key.clone())
+                Some((foreign_key.clone(), None))
+            }
+            // Not without `source_type:`: Rails cannot tell which class the rows are (HasManyThroughAssociationPolymorphicSourceError).
+            Some(Association::BelongsTo { name: src_name, foreign_key, polymorphic: true, foreign_type, primary_key, .. })
+                if matches!(assoc, Association::HasMany { class_explicit: true, .. }) =>
+            {
+                let type_col = foreign_type.clone().unwrap_or_else(|| Symbol::from(format!("{}_type", src_name.as_str())));
+                let pk = primary_key.clone().unwrap_or_else(|| Symbol::from("id"));
+                Some((foreign_key.clone(), Some((type_col, pk))))
             }
             _ => None,
         }
     });
-    match src_fk {
-        Some(src_fk) => ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as),
+    match src {
+        Some((src_fk, None)) => ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as),
+        Some((src_fk, Some((type_col, pk)))) => ThroughWriterJoin::ResolvedPolymorphic(join_class, owner_fk, src_fk, thr_as, type_col, pk),
         None => ThroughWriterJoin::Nested(join_class),
     }
 }
@@ -328,7 +345,14 @@ pub(super) fn push_association_methods(
                 if let Some(thr_name) = through {
                     let writer_name = Symbol::from(format!("{}=", name.as_str()));
                     match through_joins.get(name) {
-                        Some(ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as)) => {
+                        Some(
+                            ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as)
+                            | ThroughWriterJoin::ResolvedPolymorphic(join_class, owner_fk, src_fk, thr_as, _, _),
+                        ) => {
+                            let source_type = match through_joins.get(name) {
+                                Some(ThroughWriterJoin::ResolvedPolymorphic(.., type_col, pk)) => Some((type_col, target, pk)),
+                                _ => None,
+                            };
                             if !model_defines_instance_method(model, &writer_name)
                                 && !methods.iter().any(|m| {
                                     m.name == writer_name && m.receiver == MethodReceiver::Instance
@@ -342,6 +366,7 @@ pub(super) fn push_association_methods(
                                     owner_fk,
                                     src_fk,
                                     thr_as.as_ref(),
+                                    source_type,
                                 ));
                                 super::markers::fold_into_or_push(
                                     methods,
@@ -2243,6 +2268,7 @@ fn synth_through_sync(
     owner_fk: &Symbol,
     src_fk: &Symbol,
     owner_as: Option<&Symbol>,
+    source_type: Option<(&Symbol, &ClassId, &Symbol)>,
 ) -> MethodDef {
     use crate::ident::VarId;
 
@@ -2286,6 +2312,10 @@ fn synth_through_sync(
                                 lit_sym(Symbol::from(format!("{intf}_type"))),
                                 owner_type(),
                             ));
+                        }
+                        // Not every join row of the owner: its rows of another source type belong to a sibling association.
+                        if let Some((type_col, class, _)) = source_type {
+                            e.push((lit_sym(type_col.clone()), super::lit_str(class.0.as_str().to_string())));
                         }
                         e
                     },
@@ -2347,11 +2377,18 @@ fn synth_through_sync(
             vec![owner_type()],
         ));
     }
+    if let Some((type_col, class, _)) = source_type {
+        insert_stmts.push(send(
+            var_ref(join_var.clone()),
+            &format!("{}=", type_col.as_str()),
+            vec![super::lit_str(class.0.as_str().to_string())],
+        ));
+    }
     insert_stmts.extend([
         send(
             var_ref(join_var.clone()),
             &format!("{}=", src_fk.as_str()),
-            vec![send(var_ref(target_var.clone()), "id", vec![])],
+            vec![send(var_ref(target_var.clone()), source_type.map_or("id", |(_, _, pk)| pk.as_str()), vec![])],
         ),
         send(var_ref(join_var), "save", vec![]),
     ]);

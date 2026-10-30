@@ -255,10 +255,12 @@ module Main
     inbound_flash = {}
     host_flash = env["roundhouse.flash"]
     if host_flash.nil?
-      %w[notice alert].each do |kind|
-        name = "flash_#{kind}"
-        value = ActionDispatch::SignedCookie.verified(cookies[name.to_sym].to_s, name)
-        inbound_flash[kind] = value unless value.empty?
+      # Every `flash_<key>` cookie, not only notice/alert: lobsters' layout shows `flash[:error]` / `[:success]`.
+      cookies.each do |cname, cvalue|
+        name = cname.to_s
+        next unless name.start_with?("flash_")
+        value = ActionDispatch::SignedCookie.verified(cvalue.to_s, name)
+        inbound_flash[name.delete_prefix("flash_")] = value unless value.empty?
       end
     else
       host_flash.each { |k, v| inbound_flash[k.to_s] = v }
@@ -336,17 +338,15 @@ module Main
       # The host keeps the flash in its own session; hand back what
       # survives this request (nothing, once displayed).
       env["roundhouse.flash.out"] = persisted
-    elsif persisted.key?("notice")
-      out_cookies[:flash_notice] = ActionDispatch::SignedCookie.sign(persisted["notice"], "flash_notice")
-    elsif cookies.key?(:flash_notice)
-      out_cookies[:flash_notice] = nil
-    end
-    if !host_flash.nil?
-      # Handed back above, with the notice.
-    elsif persisted.key?("alert")
-      out_cookies[:flash_alert] = ActionDispatch::SignedCookie.sign(persisted["alert"], "flash_alert")
-    elsif cookies.key?(:flash_alert)
-      out_cookies[:flash_alert] = nil
+    else
+      persisted.each do |kind, value|
+        name = "flash_#{kind}"
+        out_cookies[name.to_sym] = ActionDispatch::SignedCookie.sign(value, name)
+      end
+      cookies.each_key do |cname|
+        name = cname.to_s
+        out_cookies[name.to_sym] = nil if name.start_with?("flash_") && !persisted.key?(name.delete_prefix("flash_"))
+      end
     end
     # Cookies the action wrote (`cookies[:k] = v` / `cookies.permanent`)
     # ride out alongside the flash cookies. Flag maps stay off the
