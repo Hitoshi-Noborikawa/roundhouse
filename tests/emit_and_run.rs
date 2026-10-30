@@ -413,6 +413,8 @@ mod uniqueness_association_attribute;
 mod default_scope_static;
 #[path = "emit_and_run/default_scope_dynamic.rs"]
 mod default_scope_dynamic;
+#[path = "emit_and_run/acts_as_tenant.rs"]
+mod acts_as_tenant;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]
