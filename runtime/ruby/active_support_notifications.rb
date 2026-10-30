@@ -17,16 +17,30 @@ module ActiveSupport
     @render_listening = false
     @process_listening = false
 
+    class Subscriber
+      attr_reader :pattern, :listener, :monotonic
+
+      def initialize(pattern, listener, monotonic)
+        @pattern = pattern
+        @listener = listener
+        @monotonic = monotonic
+      end
+
+      def matches?(name)
+        @pattern === name
+      end
+    end
+
     def self.subscribe(pattern, callback = nil, monotonic: false, &block)
       listener = callback.nil? ? block : callback
-      subscriber = [pattern, listener, monotonic]
+      subscriber = Subscriber.new(pattern, listener, monotonic)
       SUBSCRIBERS << subscriber
       refresh_listening
       subscriber
     end
 
     def self.monotonic_subscribe(pattern, callback = nil, &block)
-      subscribe(pattern, callback.nil? ? block : callback, monotonic: true)
+      subscribe(pattern, callback, monotonic: true, &block)
     end
 
     def self.unsubscribe(subscriber)
@@ -56,10 +70,15 @@ module ActiveSupport
       @process_listening
     end
 
+    def self.subscribers
+      SUBSCRIBERS
+    end
+
     def self.listening?(name)
+      list = subscribers
       i = 0
-      while i < SUBSCRIBERS.length
-        return true if SUBSCRIBERS[i][0] === name
+      while i < list.length
+        return true if list[i].matches?(name)
         i += 1
       end
       false
@@ -83,13 +102,13 @@ module ActiveSupport
 
     def self.publish(name, start, finish, payload)
       wall = Time.now.to_f - monotonic_now
+      list = subscribers
       i = 0
-      while i < SUBSCRIBERS.length
-        entry = SUBSCRIBERS[i]
-        pattern = entry[0]
-        callback = entry[1]
-        if pattern === name
-          if entry[2] == true
+      while i < list.length
+        entry = list[i]
+        if entry.matches?(name)
+          callback = entry.listener
+          if entry.monotonic
             callback.call(name, start, finish, nil, payload)
           elsif callback.arity == 1
             callback.call(Event.new(name, Time.at(wall + start), Time.at(wall + finish), nil, payload, finish - start))

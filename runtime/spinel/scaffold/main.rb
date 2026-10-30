@@ -643,6 +643,7 @@ module Main
       controller.params.key?("format") || !matched.req_format.nil?)
 
     begin
+      # Not the class name built per request: only a start_processing / process_action listener reads it.
       processing = ActiveSupport::Notifications.process_listening? ? ActiveSupport::Notifications.start_processing(controller.class.name, matched.action.to_s) : 0.0
       begin
         controller.process_action(matched.action)
