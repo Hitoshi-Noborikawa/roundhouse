@@ -122,6 +122,7 @@ SPINEL_TESTS = [
     "row_from_raw_hash_spinel",
     "helper_method_instance_state_spinel",
     "render_relation_chain",
+    "rails_cache_entry_options_spinel",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.

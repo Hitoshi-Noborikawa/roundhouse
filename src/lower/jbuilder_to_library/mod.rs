@@ -1640,7 +1640,9 @@ fn object_keys(stmt: &JbStmt<'_>, ctx: &Ctx) -> Option<Vec<String>> {
             Some(pairs) => Some(pairs.into_iter().map(|(k, _)| k).collect()),
             None => attributes_merge(value, ctx).map(|(_, attrs)| attrs.iter().map(|a| a.as_str().to_string()).collect()),
         },
-        JbStmt::Local => Some(Vec::new()),
+        // Refused: the statement lowers to a raise, so a run that
+        // reaches it renders nothing and sets no key in this object.
+        JbStmt::Local | JbStmt::ExtractDynamic => Some(Vec::new()),
         JbStmt::Cond { then_branch, else_branch, .. } => {
             let mut keys = branch(then_branch)?;
             keys.extend(branch(else_branch)?);
@@ -3410,7 +3412,11 @@ fn rewrite_route_helpers(e: &Expr, ctx: &Ctx) -> Expr {
         },
         other => other.clone(),
     };
-    Expr::new(e.span, new_node)
+    let mut out = Expr::new(e.span, new_node);
+    // The same send, rebuilt: keep a grounded `iso8601`'s flag, as
+    // `rewrite_ivars_to_locals` does.
+    out.decisions |= e.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    out
 }
 
 /// Route-helper positional args want `record.id` instead of bare
@@ -3859,7 +3865,13 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
         }
         other => other.clone(),
     };
-    Expr::new(expr.span, new_node)
+    let mut out = Expr::new(expr.span, new_node);
+    // A rebuilt send keeps the lowering's decisions about it: a grounded
+    // `iso8601` (`expr::GROUNDED_TIME_FORMAT`) whose receiver was an
+    // ivar is now a parameter the emitter cannot type as a time, and
+    // the flag is all that tells it to print `iso8601` again.
+    out.decisions |= expr.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    out
 }
 
 fn rewrite_lvalue(lv: &LValue) -> LValue {
