@@ -59,7 +59,7 @@ mod harvest_return;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod fixpoint_rounds;
-pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
+pub use fixpoint_rounds::{FixpointRounds, LoopEnd, Restamp};
 mod dirty_retype;
 mod typing_mode;
 mod inferred_types;
@@ -1478,6 +1478,7 @@ impl Analyzer {
             production: LoopEnd::RanToCap,
             views_and_tests: LoopEnd::RanToCap,
             absorb: LoopEnd::NotRun,
+            restamp: Restamp { end: LoopEnd::RanToCap, rounds: 0, passes: 0 },
         };
         // Whole-program fixpoint: harvest returns + unify params, re-type,
         // repeat until the registry signature stabilizes. Each round
@@ -1708,7 +1709,6 @@ impl Analyzer {
                 production_view_params.as_mut(),
             );
         }
-        self.fixpoint_rounds = rounds;
         // Wave 12 types views once against production-only helper
         // returns, then unifies helper params from those sites. Helper
         // returns therefore settle only after the absorb/harvest above.
@@ -1727,16 +1727,26 @@ impl Analyzer {
             )
         });
         // Not done at the restamp: lobsters' `upvoter_score` kept the `String` its view site saw before `comment_score_for_user` widened to `Integer | String`.
-        for _ in 0..FIXPOINT_CAP {
+        // Both loops share one budget of FIXPOINT_CAP production passes: on an app whose production loop ran to its cap, the params or returns here may never settle, and a cap per loop spent up to 12 × 12 full passes.
+        let mut returns_settled = true;
+        for round in 0..FIXPOINT_CAP {
+            rounds.restamp.rounds = round + 1;
             let before = self.inferred_params.clone();
             self.unify_params_from_call_sites(app, UnifyScope::WithViews);
             self.overlay_test_params(app);
             if self.inferred_params == before {
+                if returns_settled {
+                    rounds.restamp.end = LoopEnd::Settled(round);
+                }
+                break;
+            }
+            if rounds.restamp.passes == FIXPOINT_CAP {
                 break;
             }
             crate::timings::phase("typing passes (after view param restamp)", || {
                 // Not one production pass: a helper return the new params move is read by production callers typed before its harvest.
-                for _ in 0..FIXPOINT_CAP {
+                loop {
+                    rounds.restamp.passes += 1;
                     let hints = self.capture_dirty_hints();
                     self.run_typing_passes(
                         app,
@@ -1748,7 +1758,8 @@ impl Analyzer {
                         TypingMode::Production { dirty: None },
                     );
                     self.harvest_returns_to_registry(app, true);
-                    if self.inference_matches(&hints.sig) {
+                    returns_settled = self.inference_matches(&hints.sig);
+                    if returns_settled || rounds.restamp.passes == FIXPOINT_CAP {
                         break;
                     }
                 }
@@ -1763,6 +1774,7 @@ impl Analyzer {
                 )
             });
         }
+        self.fixpoint_rounds = rounds;
         // Effects are a function of the converged typed trees, not of
         // the fixpoint. Collecting inside every typing round walked
         // the same bodies two or three times per round for no harvest
