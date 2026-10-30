@@ -2684,11 +2684,16 @@ impl Analyzer {
                 };
 
                 // The class body has run before any class method does, so its writes are not nilable there.
+                // Nor do an instance method's writes reach the class object's ivars.
+                let mut class_method_ivars: HashMap<Symbol, Ty> = HashMap::default();
+                for method in model.methods().filter(|m| m.receiver == MethodReceiver::Class) {
+                    extract_ivar_assignments(&method.body, &mut class_method_ivars);
+                }
                 let mut class_side_ctx = reseeded_ctx.clone();
                 for (name, ty) in class_body_ivars {
-                    // Merged, not replaced: a class method's own write (`@state = "ready"`) is a value too.
-                    let merged = match class_side_ctx.ivar_bindings.get(&name) {
-                        Some(existing) => crate::analyze::body::union_of(existing.clone(), ty),
+                    // Merged: a class method's own write (`@state = "ready"`) is a value too.
+                    let merged = match class_method_ivars.get(&name) {
+                        Some(written) => crate::analyze::body::union_of(written.clone(), ty),
                         None => ty,
                     };
                     class_side_ctx.ivar_bindings.insert(name, merged);
@@ -5894,6 +5899,18 @@ impl Analyzer {
                 if let Some(body) = block_callback_body(expr) {
                     let from = sites.len();
                     self.collect_send_sites(body, Some(&model.name), false, helpers, &mut sites);
+                    self.record_callers(&model.name, &sites[from..]);
+                    continue;
+                }
+                // A class-body call of the model's own class method
+                // (`custom_strategy :title, with: proc { … }`) is the call
+                // site that types it, as a controller's macro call is.
+                let ExprNode::Send { recv, method, .. } = &*expr.node else { continue };
+                if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                    && model.methods().any(|m| m.receiver == MethodReceiver::Class && m.name == *method)
+                {
+                    let from = sites.len();
+                    self.collect_send_sites(expr, Some(&model.name), true, helpers, &mut sites);
                     self.record_callers(&model.name, &sites[from..]);
                 }
             }

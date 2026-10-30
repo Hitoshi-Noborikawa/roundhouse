@@ -904,7 +904,16 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             app.file_programs.push(program);
                         }
                     }
-                    app.library_classes.extend(classes)
+                    app.library_classes.extend(classes);
+                    // A Concern here runs its `included do` in a model that
+                    // includes it, as one under app/models/concerns does.
+                    let (concern_items, concern_enum_decls, concern_guarded) =
+                        ingest_concern_model_items_with_constants(&source, &path_str, &enum_constants);
+                    for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
+                        app.concern_included_redefs.entry(id).or_default().push(name);
+                    }
+                    append_concern_items(&mut app, concern_items, concern_guarded, |_| true);
+                    concern_enums.extend(concern_enum_decls);
                 }
                 Err(err) => {
                     if survey::is_active() {
@@ -2564,7 +2573,7 @@ end
     super::channel_callbacks::lower_channel_callbacks(&mut app);
     super::channel_callbacks::lower_channel_names(&mut app);
     super::on_load_reopen::apply_pending(&mut app);
-    splice_concerns_into_models(&mut app);
+    splice_concerns_into_models(&mut app, &concern_class_method_spans);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
     // After the splice, so a concern's DSL on a tableless parent reaches
     // its subclasses too; before the macros, which read the result.
@@ -2667,7 +2676,7 @@ end
     // first pass (doubled scopes, unique-constraint failures at run).
     let late_on_load = super::on_load_reopen::apply_pending(&mut app);
     if !late_on_load.is_empty() {
-        splice_concerns_into_models_named(&mut app, &late_on_load);
+        splice_concerns_into_models_named(&mut app, &late_on_load, &concern_class_method_spans);
     }
     super::model_delegate::lower_model_delegates(&mut app);
     super::on_load_reopen::drain_pending(&mut app);
@@ -3142,8 +3151,8 @@ fn gap_uniqueness_on_polymorphic_attribute(app: &mut App) {
 /// its DSL never ran; that's exactly the half this splice supplies).
 /// Strict targets get the DSL items the same way; module
 /// methods-via-include remain their separate, ledger-visible gap.
-fn splice_concerns_into_models(app: &mut App) {
-    splice_concerns_into_models_named(app, &[]);
+fn splice_concerns_into_models(app: &mut App, carriers: &[ConcernClassMethodSpans]) {
+    splice_concerns_into_models_named(app, &[], carriers);
 }
 
 /// Splice concern `included do` bodies into models.
@@ -3153,7 +3162,7 @@ fn splice_concerns_into_models(app: &mut App) {
 /// `on_load(:active_storage_attachment)` path after Attachment /
 /// Markdown synthesis, which must not re-expand includes already
 /// spliced on the first pass.
-fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol]) {
+fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol], carriers: &[ConcernClassMethodSpans]) {
     use crate::dialect::ModelBodyItem;
     use crate::expr::ExprNode;
 
@@ -3186,6 +3195,8 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
         })
         .filter(|(_, consts)| !consts.is_empty())
         .collect();
+
+    let dependencies = concern_dependencies(app, carriers);
 
     for model in &mut app.models {
         if !only.is_empty() && !only.iter().any(|n| n == &model.name.0) {
@@ -3225,6 +3236,10 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
                 },
                 _ => Vec::new(),
             };
+            // A Concern's own Concern includes run on the includer first
+            // (concern.rb `append_features`).
+            let concern_ids: Vec<crate::ident::ClassId> =
+                concern_ids.iter().flat_map(|id| with_dependencies(id, &dependencies, &mut Vec::new())).collect();
             let model_name = model.name.clone();
             let items: Vec<ModelBodyItem> = concern_ids
                 .iter()
@@ -3270,6 +3285,61 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
             i += 1;
         }
     }
+}
+
+/// Each ActiveSupport::Concern's includes that are Concerns too: Ruby
+/// defers them to the Concern's includer (concern.rb's `@_dependencies`),
+/// resolved from the Concern's namespace outward.
+fn concern_dependencies(
+    app: &App,
+    carriers: &[ConcernClassMethodSpans],
+) -> crate::det::HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> {
+    let concerns: crate::det::HashSet<&str> =
+        carriers.iter().filter(|c| !c.concern_extensions.is_empty()).map(|c| c.owner.0.as_str()).collect();
+    let mut out: crate::det::HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> = Default::default();
+    for lc in app.library_classes.iter().filter(|lc| lc.is_module && concerns.contains(lc.name.0.as_str())) {
+        for include in &lc.includes {
+            let written = include.0.as_str();
+            let found = match written.strip_prefix("::") {
+                Some(top) => concerns.contains(top).then(|| top.to_string()),
+                None => {
+                    let mut scope = Some(lc.name.0.as_str());
+                    let mut found = None;
+                    while let Some(prefix) = scope {
+                        let candidate = format!("{prefix}::{written}");
+                        if concerns.contains(candidate.as_str()) {
+                            found = Some(candidate);
+                            break;
+                        }
+                        scope = prefix.rsplit_once("::").map(|(prefix, _)| prefix);
+                    }
+                    found.or_else(|| concerns.contains(written).then(|| written.to_string()))
+                }
+            };
+            let Some(found) = found.map(|name| crate::ident::ClassId(crate::ident::Symbol::from(name))) else { continue };
+            let deps = out.entry(lc.name.clone()).or_default();
+            if found != lc.name && !deps.contains(&found) {
+                deps.push(found);
+            }
+        }
+    }
+    out
+}
+
+/// `id` after its dependencies, each after its own.
+fn with_dependencies(
+    id: &crate::ident::ClassId,
+    dependencies: &crate::det::HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+    seen: &mut Vec<crate::ident::ClassId>,
+) -> Vec<crate::ident::ClassId> {
+    if seen.contains(id) {
+        return Vec::new();
+    }
+    seen.push(id.clone());
+    let mut out: Vec<crate::ident::ClassId> =
+        dependencies.get(id).into_iter().flatten().flat_map(|dep| with_dependencies(dep, dependencies, seen)).collect();
+    out.push(id.clone());
+    out
 }
 
 /// An enclosing module's constant keeps its lexical meaning after splicing.

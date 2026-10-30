@@ -161,6 +161,16 @@ written in source order. A hook with a declaration this cannot read (a
 computed name or flag, a block, an unknown option) keeps its text and
 still fails at the include. So does a model's include of such a module.
 
+A model's own `class_attribute`, and one a Concern's `included do`
+declares, are the same defs on the model; an app class below it reads
+the model's value until it writes its own. A Concern's `included` block
+runs in the model for each of the Concern's own Concern includes first,
+as `append_features` runs them, wherever the Concern lives (app, `lib/`
+or a gem's source). A model body's call of its own class method
+(`custom_strategy :title, with: proc { … }`, written there or spliced
+from a Concern's block) runs as the class loads, after the Concern's
+class methods it may call.
+
 ### An include written in another body
 
 `Other.include(M)`, where `Other` and `M` are the app's own and Ruby

@@ -3518,9 +3518,17 @@ pub(super) fn hash_method(
             (_, Some(default), _) if !default.is_open() => union_of(value.clone(), default),
             _ => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         },
-        "merge" => Ty::Hash {
-            key: std::sync::Arc::new(key.clone()),
-            value: std::sync::Arc::new(value.clone()),
+        // The other Hash's entries join the receiver's: `{}.merge(k => v)`
+        // has `v`s, which the empty literal alone does not say.
+        "merge" => match (args, block_ret) {
+            ([other], None) => match other.ty.as_ref() {
+                Some(Ty::Hash { key: other_key, value: other_value }) => Ty::Hash {
+                    key: std::sync::Arc::new(union_of(key.clone(), (**other_key).clone())),
+                    value: std::sync::Arc::new(union_of(value.clone(), (**other_value).clone())),
+                },
+                _ => Ty::Hash { key: std::sync::Arc::new(key.clone()), value: std::sync::Arc::new(value.clone()) },
+            },
+            _ => Ty::Hash { key: std::sync::Arc::new(key.clone()), value: std::sync::Arc::new(value.clone()) },
         },
         // The supported Rails subset is the non-mutating, one-argument,
         // no-block form. Keep block conflicts and `deep_merge!` unresolved
