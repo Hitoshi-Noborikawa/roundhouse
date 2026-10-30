@@ -20562,3 +20562,7 @@ mod find_each_mailer;
 
 #[path = "emit_and_run/model_class_attribute.rs"]
 mod model_class_attribute;
+#[path = "support/record_slice_app.rs"]
+mod record_slice_app;
+#[path = "emit_and_run/record_slice.rs"]
+mod record_slice;
