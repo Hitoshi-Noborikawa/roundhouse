@@ -643,7 +643,6 @@ module Main
       controller.params.key?("format") || !matched.req_format.nil?)
 
     begin
-X
       processing = ActiveSupport::Notifications.process_listening? ? ActiveSupport::Notifications.start_processing(controller.class.name, matched.action.to_s) : 0.0
       begin
         controller.process_action(matched.action)
