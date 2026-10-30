@@ -305,9 +305,11 @@ fn has_unsupported_ancestry(
         // Class.new calls inherited before assigning the constant: the child
         // is still anonymous. An ordinary header supplies its name to the hook,
         // so application-defined hooks cannot share the class-header assumption.
+        // A module's include hook ran on its includer and can give it one.
         if id == *factory
             || id.0.as_str() == "Class"
             || mutations.targets(id.0.as_str())
+            || mutations.include_hooks.contains(id.0.as_str())
             || inherited_hooks.contains(&id)
             || resolver.source_singleton_method(id.0.as_str(), "inherited")
             || classes
@@ -336,6 +338,10 @@ struct Mutations {
     constants: HashSet<String>,
     constant_namespaces: HashSet<String>,
     constructors: HashSet<String>,
+    /// Modules whose singleton side defines `included` or `append_features`.
+    /// The hook gets the includer as an argument, so a class body's own
+    /// `include` of one is not the plain ancestry main models.
+    include_hooks: HashSet<String>,
     /// `const_set(:Class, …)` under a namespace, at this source offset.
     /// A factory later in that namespace is not a call to `::Class.new`.
     constructor_shadows: Vec<(String, crate::span::FileId, u32)>,
@@ -431,6 +437,15 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                 };
                 if name == "new" {
                     self.mutations.constructors.extend(targets.iter().cloned());
+                }
+                if matches!(name.as_ref(), "included" | "append_features")
+                    && (node.receiver().is_some()
+                        || self
+                            .singleton_receivers
+                            .last()
+                            .is_some_and(|(depth, _)| *depth == self.owners.len()))
+                {
+                    self.mutations.include_hooks.extend(targets.iter().cloned());
                 }
                 self.construction.extend(targets);
             }
@@ -1066,6 +1081,7 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
         (&mut scan.mutations.constants, false),
         (&mut scan.mutations.constant_namespaces, true),
         (&mut scan.mutations.constructors, true),
+        (&mut scan.mutations.include_hooks, true),
         (&mut scan.construction, true),
     ] {
         for name in std::mem::take(targets) {

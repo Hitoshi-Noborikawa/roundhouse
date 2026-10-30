@@ -462,6 +462,17 @@ fn inherited_hooks_exclude_factories_through_the_entire_ancestry() {
             "Owner::Parent",
             None,
         ),
+        // An included module's own hook can give its includer one.
+        (
+            "module Tracking; def self.included(base) = base.define_singleton_method(:inherited) { |child| child.name.split(\"::\") }; end; class Parent; include Tracking; end",
+            "Parent",
+            None,
+        ),
+        (
+            "module Tracking; class << self; def append_features(base) = super; end; end; class Grandparent; include Tracking; end; class Parent < Grandparent; end",
+            "Parent",
+            None,
+        ),
     ] {
         let factory = format!("{declarations}\nclass Owner; Child = Class.new({parent}) {{}}; end");
         let raw = ingest(&factory, "Owner::Child.new", extra);
@@ -549,6 +560,10 @@ fn ruby_inherited_hooks_observe_anonymous_factories_and_named_headers() {
         (
             "class Parent < StandardError; def self.inherited(child); child.define_singleton_method(:new) { 7 } if child.name.nil?; end; end",
             "Owner::Child.new.message",
+        ),
+        (
+            "module Tracking; def self.included(base) = base.define_singleton_method(:inherited) { |child| child.name.split(\"::\") }; end; class Parent; include Tracking; end",
+            "Owner::Child.new",
         ),
     ] {
         let factory =
