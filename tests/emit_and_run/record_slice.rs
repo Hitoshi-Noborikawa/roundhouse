@@ -2,10 +2,10 @@
 
 use super::emit_and_run;
 
-const SUMMARY: &str = "  include Sliceable\n  def summary = slice(:id, :title)\n  def self.no_names_of(id) = find(id).slice\n  def self.slice(*names) = names.join(\",\")\n  def self.class_side = slice(:id, :title)\n";
+const SUMMARY: &str = "  include Sliceable\n  def summary = slice(:id, :title)\n  def shadowed(title) = slice(:title, \"title\")\n  def by_name(name) = slice(name)\n  def self.no_names_of(id) = find(id).slice\n  def self.slice(*names) = names.join(\",\")\n  def self.class_side = slice(:id, :title)\n";
 
 /// A concern's bare `slice` reads the columns of the model it belongs to.
-const CONCERN: &str = "module Article::Sliceable\n  extend ActiveSupport::Concern\n\n  def card = slice(:id, :title)\nend\n";
+const CONCERN: &str = "module Article::Sliceable\n  extend ActiveSupport::Concern\n\n  def card = slice(:id, :title)\n  def card_shadowed(title) = slice(:title)\nend\n";
 
 /// A module in the model's namespace whose class methods are not run on
 /// a record: its bare `slice` is its own.
@@ -18,8 +18,11 @@ end
 a = Article.create!(title: "Sliced", body: "A sufficiently long body.")
 check("typed call site", a.summary, { "id" => a.id, "title" => "Sliced" })
 check("concern call site", a.card, { "id" => a.id, "title" => "Sliced" })
+check("concern shadowing local", a.card_shadowed("Local"), { "title" => "Sliced" })
 check("model class method", Article.class_side, "id,title")
 check("namespaced module class method", Article::Utilities.count_of, 2)
+check("shadowing local", a.shadowed("Local"), { "title" => "Sliced" })
+check("run-time name", a.by_name(:title), { "title" => "Sliced" })
 check("untyped call site", Article.all.first.slice(:title, :body), { "title" => "Sliced", "body" => "A sufficiently long body." })
 check("untyped String and Array names", Article.all.first.slice("title", [:body, :title]), { "title" => "Sliced", "body" => "A sufficiently long body." })
 stamp = Article.all.first.slice(:created_at)["created_at"]
@@ -85,6 +88,6 @@ fn a_concerns_bare_slice_lowers_against_its_model() {
     let (emitted, errors) = sliced_app().emit(roundhouse::project::BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:?}");
     let concern = std::fs::read_to_string(emitted.join("app/models/article/sliceable.rb")).expect("emitted concern");
-    assert!(concern.contains("\"title\" => title"), "{concern}");
+    assert!(concern.contains("\"title\" => self.title"), "{concern}");
     assert!(!concern.contains("slice("), "{concern}");
 }

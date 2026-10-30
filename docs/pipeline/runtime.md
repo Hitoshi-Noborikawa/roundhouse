@@ -3186,15 +3186,20 @@ the strict targets do not mix a
 model concern's methods into the model yet, so a concern's lowered
 `slice` builds on the ruby family only) and whose names are literals into a Hash literal of reader
 calls: `a.slice(:id, :title)` becomes `{"id" => a.id, "title" =>
-a.title}`, typed `Hash[String, <union of the readers>]`. The receiver
+a.title}`, typed `Hash[String, <union of the readers>]`. A name given
+twice is one entry, as Rails' indifferent Hash keeps one key, and a
+bare `slice` reads through an explicit `self`, so a local of the same
+name does not answer for the attribute. The receiver
 is evaluated once: a receiver with effects read more than once is bound
 in a `Let` under a name unique to the site. A receiver with effects
 sliced with NO names (`Article.find(id).slice`) keeps the call, with an
 `effectful-no-names` lower-residue warning, and does not build on a
 strict target. That is an accepted gap: the call always answers `{}`,
 and binding a receiver nothing reads does not compile in Go. A name the model has no reader for leaves the call
-as written with a `record-slice` lower-residue warning, and a model
-that defines its own `slice` keeps it.
+as written with a `record-slice` lower-residue warning, as does a name
+known only at run time (`slice(name)`, a `dynamic-names` warning); the
+ruby family answers both from the runtime, a strict target does not
+build them. A model that defines its own `slice` keeps it.
 
 **Untyped sites, ruby family only.** A receiver the analyzer cannot
 type keeps the call, which `runtime/ruby/active_record/connection.rb`

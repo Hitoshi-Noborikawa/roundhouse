@@ -120,7 +120,20 @@ fn lower_slice(expr: &Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<
     if inherits_own_slice(ctx, &model) {
         return None;
     }
-    let names = literal_names(args)?;
+    let Some(names) = literal_names(args) else {
+        diags.push(super::residue_diagnostic(
+            "record_slice",
+            "record-slice",
+            expr.span,
+            "dynamic-names",
+            format!(
+                "`slice` on {} names its attributes at run time — left as a runtime call, \
+                 which strict targets cannot compile",
+                model.0
+            ),
+        ));
+        return None;
+    };
 
     let span = expr.span;
     let mut readers = Vec::with_capacity(names.len());
@@ -162,8 +175,15 @@ fn lower_slice(expr: &Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<
         ));
         return None;
     }
+    // A bare `slice` reads through an explicit `self`: in a concern no
+    // later pass marks a receiverless `title` as self-dispatched, and
+    // there it would read a local of that name.
     let (binding, read) = match recv {
-        None => (None, None),
+        None => {
+            let mut this = Expr::new(span, ExprNode::SelfRef);
+            this.ty = Some(Ty::Class { id: model.clone(), args: vec![].into() });
+            (None, Some(this))
+        }
         Some(r) if readers.len() == 1 || effect_free => (None, Some(r.clone())),
         Some(r) => {
             let name = Symbol::from(format!("slice_record_{}", ctx.next_binding.get()));
@@ -237,17 +257,28 @@ fn inherits_own_slice(ctx: &Ctx, model: &ClassId) -> bool {
     false
 }
 
-/// `slice(:a, "b")` or Rails' flattened `slice([:a, :b])`; `None` for a
-/// name only known at run time.
+/// `slice(:a, "b")` or Rails' flattened `slice([:a, :b])`, each name
+/// once, first-seen order: Rails' indifferent Hash keeps one `"a"` for
+/// `slice(:a, "a")`. `None` for a name only known at run time.
 fn literal_names(args: &[Expr]) -> Option<Vec<String>> {
-    let mut names = Vec::new();
-    for arg in args {
-        match &*arg.node {
-            ExprNode::Lit { value: Literal::Sym { value } } => names.push(value.as_str().to_string()),
-            ExprNode::Lit { value: Literal::Str { value } } => names.push(value.clone()),
-            ExprNode::Array { elements, .. } => names.extend(literal_names(elements)?),
-            _ => return None,
+    fn collect(args: &[Expr], names: &mut Vec<String>) -> Option<()> {
+        for arg in args {
+            let name = match &*arg.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                ExprNode::Array { elements, .. } => {
+                    collect(elements, names)?;
+                    continue;
+                }
+                _ => return None,
+            };
+            if !names.contains(&name) {
+                names.push(name);
+            }
         }
+        Some(())
     }
+    let mut names = Vec::new();
+    collect(args, &mut names)?;
     Some(names)
 }
