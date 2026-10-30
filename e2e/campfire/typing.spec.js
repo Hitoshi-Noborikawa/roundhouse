@@ -24,6 +24,23 @@ const TYPIST = `Typist ${STAMP}`
 // default is not a budget for that (see cable.spec.js).
 test.setTimeout(90_000)
 
+// `done` once the server has confirmed a `TypingNotificationsChannel`
+// subscription on a socket that is still open. Action Cable confirms
+// with `{"type":"confirm_subscription","identifier":"{\"channel\":…}"}`.
+// Open sockets only: a page that navigates closes its socket, and the
+// confirmation it had does not carry over to the next page.
+function typingSubscribed(page) {
+  const confirmed = new Set()
+  page.on('websocket', ws => {
+    ws.on('framereceived', ({ payload }) => {
+      const frame = String(payload)
+      if (frame.includes('confirm_subscription') && frame.includes('TypingNotificationsChannel')) confirmed.add(ws)
+    })
+    ws.on('close', () => confirmed.delete(ws))
+  })
+  return { get done() { return confirmed.size > 0 } }
+}
+
 test("a user typing in a room shows their name to the room's other members", async ({ browser }) => {
   const contextA = await browser.newContext()
   const contextB = await browser.newContext()
@@ -47,19 +64,23 @@ test("a user typing in a room shows their name to the room's other members", asy
     await pageB.locator('button[type="submit"]').click()
     await expect(pageB.locator('#user_sidebar')).toBeAttached({ timeout: 15_000 })
 
+    // Typing only reaches A once both ends of the typing channel are
+    // subscribed: B's to perform `start`, A's to receive it. The page
+    // shows nothing for that subscription (the room stream's
+    // `connected` attribute is a different one), so read the server's
+    // confirmation off the socket. Watch before navigating, or the
+    // frame can arrive first.
+    const typingA = typingSubscribed(pageA)
+    const typingB = typingSubscribed(pageB)
+
     // Room 1 is the first-run room, an open room every user belongs to.
     await pageA.goto('/rooms/1')
     await pageB.goto('/rooms/1')
 
-    // Typing only reaches A once A's subscription is confirmed. The
-    // room stream's `connected` attribute shares the consumer the
-    // typing channel subscribes on, so it is the nearest observable
-    // "cable is up" signal on the page.
-    for (const [name, page] of [['A', pageA], ['B', pageB]]) {
-      await expect(
-        page.locator('turbo-cable-stream-source[connected]').first(),
-        `tab ${name} has a live cable connection`,
-      ).toBeAttached({ timeout: 20_000 })
+    for (const [name, confirmed] of [['A', typingA], ['B', typingB]]) {
+      await expect
+        .poll(() => confirmed.done, { message: `tab ${name} is subscribed to typing notifications`, timeout: 20_000 })
+        .toBe(true)
     }
 
     // Typed keys, not `fill()`: the editor is a custom element, and the
