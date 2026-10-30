@@ -85,7 +85,7 @@ fn build_direct_helper(
         })
         .collect();
     let mut body = helper.body.clone();
-    rewrite_route_for(&mut body, flat, helper_params);
+    rewrite_route_for(&mut body, flat, helper_params, &std::cell::Cell::new(0));
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(format!("{}_path", helper.name.as_str())),
@@ -108,9 +108,10 @@ fn rewrite_route_for(
     expr: &mut Expr,
     flat: &[FlatRoute],
     helper_params: &crate::det::HashMap<String, Vec<crate::ty::Ty>>,
+    next_local: &std::cell::Cell<usize>,
 ) {
     expr.node
-        .for_each_child_mut(&mut |c| rewrite_route_for(c, flat, helper_params));
+        .for_each_child_mut(&mut |c| rewrite_route_for(c, flat, helper_params, next_local));
 
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return;
@@ -151,13 +152,24 @@ fn rewrite_route_for(
         .map(|(i, arg)| {
             // An optional segment (`/archive(/:period)`) is declared
             // `String | nil`: a String slot too.
-            let wants_str = matches!(
-                declared.and_then(|tys| tys.get(i)).map(crate::ty::Ty::peel_nilable),
-                Some(crate::ty::Ty::Str)
-            );
+            let slot = declared.and_then(|tys| tys.get(i));
+            let wants_str = matches!(slot.map(crate::ty::Ty::peel_nilable), Some(crate::ty::Ty::Str));
             let is_int = matches!(arg.ty, Some(crate::ty::Ty::Int))
                 || matches!(&*arg.node, ExprNode::Lit { value: Literal::Int { .. } });
-            if wants_str && is_int { to_s(arg.clone(), arg.span) } else { arg.clone() }
+            // An Integer that can be nil, into an optional segment, keeps
+            // its nil (Rails drops the segment) and converts otherwise. A
+            // required segment is left as it was: Rails raises on nil there.
+            let optional_slot = matches!(slot, Some(crate::ty::Ty::Union { variants }) if variants.contains(&crate::ty::Ty::Nil));
+            let nilable_int = matches!(&arg.ty, Some(crate::ty::Ty::Union { variants })
+                if variants.contains(&crate::ty::Ty::Int)
+                    && variants.iter().all(|v| matches!(v, crate::ty::Ty::Int | crate::ty::Ty::Nil)));
+            if wants_str && is_int {
+                to_s(arg.clone(), arg.span)
+            } else if wants_str && optional_slot && nilable_int {
+                to_s_keeping_nil(arg.clone(), next_local)
+            } else {
+                arg.clone()
+            }
         })
         .collect();
     let base = route_helpers_call(&helper, positional, span);
@@ -315,6 +327,31 @@ fn send0(recv: Expr, method: &str, span: Span) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+/// `value`'s `to_s`, or nil when it is nil: bound once to a fresh
+/// `route_for_arg_<n>` local, then `nil? ? nil : to_s`.
+fn to_s_keeping_nil(value: Expr, next_local: &std::cell::Cell<usize>) -> Expr {
+    use crate::ty::Ty;
+    let span = value.span;
+    let n = next_local.get();
+    next_local.set(n + 1);
+    let name = Symbol::from(format!("route_for_arg_{n}"));
+    let value_ty = value.ty.clone().unwrap_or(Ty::Untyped);
+    let typed = |node: ExprNode, ty: Ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
+    let read = || typed(ExprNode::Var { id: VarId(0), name: name.clone() }, value_ty.clone());
+    let opt_str = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    let mut is_nil = send0(read(), "nil?", span);
+    is_nil.ty = Some(Ty::Bool);
+    let check = typed(
+        ExprNode::If {
+            cond: is_nil,
+            then_branch: typed(ExprNode::Lit { value: Literal::Nil }, Ty::Nil),
+            else_branch: to_s(read(), span),
+        },
+        opt_str.clone(),
+    );
+    typed(ExprNode::Let { id: VarId(0), name, value, body: check }, opt_str)
 }
 
 fn to_s(e: Expr, span: Span) -> Expr {

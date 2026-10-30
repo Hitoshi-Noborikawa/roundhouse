@@ -9,8 +9,9 @@
 //! `(String id)`, which Spinel's `--rbs .` rejects. Rails writes either
 //! with `to_param`: `strike_path(123)` is `/strikes/123`. An optional
 //! segment (`/archive(/:period)`) is declared `String | nil` and is a
-//! String slot too (`archive_path(2026)` is `/archive/2026`). A segment
-//! that stays `Integer` keeps its Integer.
+//! String slot too (`archive_path(2026)` is `/archive/2026`); an
+//! Integer that can be nil keeps its nil there (`archive_path(nil)` is
+//! `/archive`). A segment that stays `Integer` keeps its Integer.
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -29,6 +30,12 @@ const ROUTES: &str = "Rails.application.routes.draw do
   direct :this_year do |options|
     route_for :archive, 2026
   end
+  direct :pick_archive do |note, options|
+    route_for :archive, note&.id
+  end
+  direct :pick_strike do |note, options|
+    route_for :strike, note&.id
+  end
 end
 ";
 
@@ -38,14 +45,24 @@ const HELPER: &str = "module LinkHelper
   def named_strike
     strike_path(\"abc\")
   end
+
+  def first_note_archive
+    pick_archive_path(Note.first)
+  end
+
+  def first_note_strike
+    pick_strike_path(Note.first)
+  end
 end
 ";
 
 fn example() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
-        .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n  end\nend\n")
         .write("config/routes.rb", ROUTES)
         .write("app/helpers/link_helper.rb", HELPER)
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/models/note.rb", "class Note < ApplicationRecord\nend\n")
 }
 
 const RUN: &str = r#"
@@ -53,6 +70,7 @@ raise "first_strike: " + RouteHelpers.first_strike_path.inspect unless RouteHelp
 raise "first_note: " + RouteHelpers.first_note_path.inspect unless RouteHelpers.first_note_path == "/notes/7"
 raise "named: " + RouteHelpers.strike_path("abc").inspect unless RouteHelpers.strike_path("abc") == "/strikes/abc"
 raise "this_year: " + RouteHelpers.this_year_path.inspect unless RouteHelpers.this_year_path == "/archive/2026"
+raise "pick_archive nil: " + RouteHelpers.pick_archive_path(nil).inspect unless RouteHelpers.pick_archive_path(nil) == "/archive"
 puts "direct route_for passed"
 "#;
 
@@ -64,6 +82,14 @@ fn route_for_converts_an_integer_only_for_a_string_slot() {
     assert!(helpers.contains("RouteHelpers.note_path(7)"), "{helpers}");
     // An optional segment is `String | nil`: still a String slot.
     assert!(helpers.contains("RouteHelpers.archive_path(2026.to_s)"), "{helpers}");
+    // An Integer that can be nil, into the optional segment, keeps its nil.
+    assert!(helpers.contains(".nil?") && helpers.contains("pick_archive_path"), "{helpers}");
+    let archive_for = helpers.split("def self.pick_archive_path").nth(1).expect("pick_archive_path emitted");
+    let archive_for = archive_for.split("\n  def ").next().unwrap_or(archive_for);
+    assert!(archive_for.contains(".nil?") && archive_for.contains(".to_s"), "{archive_for}");
+    // Into a REQUIRED String segment it stays as it was: Rails raises on a
+    // nil there (a separate question from this conversion).
+    assert!(helpers.contains("RouteHelpers.strike_path(note && note.id)"), "{helpers}");
 }
 
 #[test]
