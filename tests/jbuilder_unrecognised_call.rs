@@ -109,6 +109,24 @@ const INLINE_PARTIAL: &[(&str, &str, &str)] = &[
         "json.count @widgets.size\njson.set! :gadgets, @widgets, partial: \"widgets/widget\", as: :widget\n",
         r#"{"count":2,"gadgets":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}"#,
     ),
+    // A nil positional: jbuilder's `_set_inline_partial` answers `[]`
+    // without calling the partial.
+    (
+        "partial_nil",
+        "json.count @widgets.size\njson.gadgets nil, partial: \"widgets/widget\", as: :widget\n",
+        r#"{"count":2,"gadgets":[]}"#,
+    ),
+    (
+        "set_partial_nil",
+        "json.count @widgets.size\njson.set! :gadgets, nil, partial: \"widgets/widget\", as: :widget\n",
+        r#"{"count":2,"gadgets":[]}"#,
+    ),
+    // A record read that is nil at run time.
+    (
+        "set_partial_missing_record",
+        "json.count @widgets.size\njson.set! :gadget, @widgets[2], partial: \"widgets/widget\", as: :widget\n",
+        r#"{"count":2,"gadget":[]}"#,
+    ),
 ];
 
 /// `json.set!` with a literal key, which lowers as `json.<key>` does,

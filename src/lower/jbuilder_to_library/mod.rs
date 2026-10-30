@@ -1292,12 +1292,43 @@ fn emit_pairs(
                 ));
                 let arg_ty = ctx.span_types.get(&arg.span);
                 let arg = rewrite_h_escape(&rewrite_route_helpers(arg, ctx));
-                if arg_ty.is_some_and(is_collection_ty) {
-                    // A collection: Jbuilder renders the partial once
-                    // per element, into an array.
-                    out.extend(emit_array_partial(&arg, partial_path, as_name, ctx));
+                // Jbuilder's `_set_inline_partial` answers `[]` for a
+                // nil value without rendering the partial, whatever
+                // the value's static type.
+                if matches!(&*arg.node, ExprNode::Lit { value: Literal::Nil }) {
+                    out.push(io_append_lit(&ctx.accumulator, "[]"));
                 } else {
-                    out.extend(emit_partial_call(partial_path, vec![(as_name.clone(), arg)], ctx));
+                    // The value is bound once to a `__val<n>` local unless it
+                    // is a plain variable, so the nil check does not
+                    // evaluate it twice.
+                    let value = match &*arg.node {
+                        ExprNode::Var { .. } | ExprNode::Ivar { .. } => arg,
+                        _ => {
+                            let n = ctx.temps.get();
+                            ctx.temps.set(n + 1);
+                            let val = Symbol::from(format!("__val{n}"));
+                            out.push(Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Assign { target: LValue::Var { id: VarId(0), name: val.clone() }, value: arg },
+                            ));
+                            var_ref(val)
+                        }
+                    };
+                    let render = if arg_ty.is_some_and(is_collection_ty) {
+                        // A collection: Jbuilder renders the partial once
+                        // per element, into an array.
+                        emit_array_partial(&value, partial_path, as_name, ctx)
+                    } else {
+                        emit_partial_call(partial_path, vec![(as_name.clone(), value.clone())], ctx)
+                    };
+                    out.push(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::If {
+                            cond: send(Some(value), "nil?", Vec::new(), None, false),
+                            then_branch: io_append_lit(&ctx.accumulator, "[]"),
+                            else_branch: seq(render),
+                        },
+                    ));
                 }
                 sep = Sep::After;
             }
