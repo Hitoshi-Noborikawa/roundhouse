@@ -2,7 +2,10 @@
 
 use super::emit_and_run;
 
-const SUMMARY: &str = "  def summary = slice(:id, :title)\n  def self.no_names_of(id) = find(id).slice\n";
+const SUMMARY: &str = "  include Sliceable\n  def summary = slice(:id, :title)\n  def self.no_names_of(id) = find(id).slice\n";
+
+/// A concern's bare `slice` reads the columns of the model it belongs to.
+const CONCERN: &str = "module Article::Sliceable\n  extend ActiveSupport::Concern\n\n  def card = slice(:id, :title)\nend\n";
 
 const ASSERTIONS: &str = r##"
 def check(label, got, want)
@@ -10,6 +13,7 @@ def check(label, got, want)
 end
 a = Article.create!(title: "Sliced", body: "A sufficiently long body.")
 check("typed call site", a.summary, { "id" => a.id, "title" => "Sliced" })
+check("concern call site", a.card, { "id" => a.id, "title" => "Sliced" })
 check("untyped call site", Article.all.first.slice(:title, :body), { "title" => "Sliced", "body" => "A sufficiently long body." })
 check("no names", a.slice, {})
 check("no names, found receiver", Article.no_names_of(a.id), {})
@@ -28,11 +32,13 @@ puts "slice passed"
 "##;
 
 fn sliced_app() -> emit_and_run::Overlay {
-    emit_and_run::real_blog().edit(
-        "app/models/article.rb",
-        "class Article < ApplicationRecord\n",
-        &format!("class Article < ApplicationRecord\n{SUMMARY}"),
-    )
+    emit_and_run::real_blog()
+        .write("app/models/article/sliceable.rb", CONCERN)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            &format!("class Article < ApplicationRecord\n{SUMMARY}"),
+        )
 }
 
 #[test]
@@ -59,4 +65,15 @@ fn the_cross_target_slice_probe_answers_as_rails() {
     ));
     run.assert_passes();
     assert!(run.stdout.contains("probe passed"));
+}
+
+/// The concern's `slice` is lowered against its model, not left to the
+/// runtime: the emitted method builds the Hash from reader calls.
+#[test]
+fn a_concerns_bare_slice_lowers_against_its_model() {
+    let (emitted, errors) = sliced_app().emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let concern = std::fs::read_to_string(emitted.join("app/models/article/sliceable.rb")).expect("emitted concern");
+    assert!(concern.contains("\"title\" => title"), "{concern}");
+    assert!(!concern.contains("slice("), "{concern}");
 }

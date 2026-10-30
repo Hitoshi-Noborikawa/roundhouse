@@ -46,7 +46,26 @@ pub fn apply_record_slice_lowering(app: &mut App, registry: &HashMap<ClassId, Cl
         .map(|m| m.name.clone())
         .chain(app.library_classes.iter().filter(|lc| lc.methods.iter().any(defines_slice)).map(|lc| lc.name.clone()))
         .collect();
-    let ctx = Ctx { registry, models: &models, own_slice: &own_slice, next_binding: std::cell::Cell::new(0) };
+    // A model's concern (`User::Bannable`, a module nested under the
+    // model) runs on that model's records, so its bare `slice` reads the
+    // model's columns, the rule `for_each_model_body_named` applies.
+    let concern_models: HashMap<ClassId, ClassId> = app
+        .library_classes
+        .iter()
+        .filter(|lc| lc.is_module)
+        .filter_map(|lc| {
+            let (namespace, _) = lc.name.0.as_str().rsplit_once("::")?;
+            let model = models.iter().find(|m| m.0.as_str() == namespace)?;
+            Some((lc.name.clone(), model.clone()))
+        })
+        .collect();
+    let ctx = Ctx {
+        registry,
+        models: &models,
+        own_slice: &own_slice,
+        concern_models: &concern_models,
+        next_binding: std::cell::Cell::new(0),
+    };
     let mut diags = Vec::new();
     super::for_each_owned_hook_body(app, &mut |owner, body| rewrite(body, owner, &ctx, &mut diags));
     for view in &mut app.views {
@@ -60,6 +79,8 @@ struct Ctx<'a> {
     registry: &'a HashMap<ClassId, ClassInfo>,
     models: &'a BTreeSet<ClassId>,
     own_slice: &'a BTreeSet<ClassId>,
+    /// A model concern → the model whose records it runs on.
+    concern_models: &'a HashMap<ClassId, ClassId>,
     /// Numbers each site's receiver binding, so no two share a name.
     next_binding: std::cell::Cell<usize>,
 }
@@ -76,13 +97,17 @@ fn lower_slice(expr: &Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<
     if method.as_str() != "slice" {
         return None;
     }
-    // Implicit self reads against the class whose method this is.
+    // Implicit self reads against the class whose method this is, or
+    // for a concern, the model it belongs to.
     let model = match recv {
         Some(r) => match r.ty.as_ref() {
             Some(Ty::Class { id, .. }) => id.clone(),
             _ => return None,
         },
-        None => owner?.clone(),
+        None => {
+            let owner = owner?;
+            ctx.concern_models.get(owner).unwrap_or(owner).clone()
+        }
     };
     if !ctx.models.contains(&model) {
         return None;
