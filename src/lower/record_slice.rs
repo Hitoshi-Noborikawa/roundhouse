@@ -28,7 +28,7 @@ use crate::det::HashMap;
 use crate::analyze::ClassInfo;
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::ty::Ty;
 
@@ -46,7 +46,7 @@ pub fn apply_record_slice_lowering(app: &mut App, registry: &HashMap<ClassId, Cl
         .map(|m| m.name.clone())
         .chain(app.library_classes.iter().filter(|lc| lc.methods.iter().any(defines_slice)).map(|lc| lc.name.clone()))
         .collect();
-    let ctx = Ctx { registry, models: &models, own_slice: &own_slice };
+    let ctx = Ctx { registry, models: &models, own_slice: &own_slice, next_binding: std::cell::Cell::new(0) };
     let mut diags = Vec::new();
     super::for_each_owned_hook_body(app, &mut |owner, body| rewrite(body, owner, &ctx, &mut diags));
     for view in &mut app.views {
@@ -60,6 +60,8 @@ struct Ctx<'a> {
     registry: &'a HashMap<ClassId, ClassInfo>,
     models: &'a BTreeSet<ClassId>,
     own_slice: &'a BTreeSet<ClassId>,
+    /// Numbers each site's receiver binding, so no two share a name.
+    next_binding: std::cell::Cell<usize>,
 }
 
 fn rewrite(expr: &mut Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<Diagnostic>) {
@@ -113,17 +115,23 @@ fn lower_slice(expr: &Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<
     }
 
     // The receiver is read once, as Rails reads it, unless reading it
-    // again cannot be told apart.
-    let (prelude, read) = match recv {
+    // again cannot be told apart. Several reads bind it in a `Let`, a
+    // value in every target, under a name unique to the site. With no
+    // reads at all, an effectful receiver keeps the call: an empty Hash
+    // would skip it, and a binding nothing reads does not compile in Go.
+    let effect_free = recv.as_ref().map_or(true, |r| super::blank::is_effect_free_reader(r));
+    if readers.is_empty() && !effect_free {
+        return None;
+    }
+    let (binding, read) = match recv {
         None => (None, None),
-        Some(r) if readers.len() <= 1 || super::blank::is_effect_free_reader(r) => (None, Some(r.clone())),
+        Some(r) if readers.len() == 1 || effect_free => (None, Some(r.clone())),
         Some(r) => {
-            let name = Symbol::from("__slice_record");
+            let name = Symbol::from(format!("slice_record_{}", ctx.next_binding.get()));
+            ctx.next_binding.set(ctx.next_binding.get() + 1);
             let mut read = Expr::new(span, ExprNode::Var { id: VarId(0), name: name.clone() });
             read.ty = r.ty.clone();
-            let mut assign = Expr::new(span, ExprNode::Assign { target: LValue::Var { id: VarId(0), name }, value: r.clone() });
-            assign.ty = r.ty.clone();
-            (Some(assign), Some(read))
+            (Some((name, r.clone())), Some(read))
         }
     };
 
@@ -159,13 +167,13 @@ fn lower_slice(expr: &Expr, owner: Option<&ClassId>, ctx: &Ctx, diags: &mut Vec<
     // (rust's `HashMap::from`) builds it entry by entry under a Cast.
     let mut hash = Expr::new(span, ExprNode::Cast { value: literal, target_ty: hash_ty.clone() });
     hash.ty = Some(hash_ty);
-    Some(match prelude {
+    Some(match binding {
         None => hash,
-        Some(assign) => {
+        Some((name, value)) => {
             let ty = hash.ty.clone();
-            let mut seq = Expr::new(span, ExprNode::Seq { exprs: vec![assign, hash] });
-            seq.ty = ty;
-            seq
+            let mut bound = Expr::new(span, ExprNode::Let { id: VarId(0), name, value, body: hash });
+            bound.ty = ty;
+            bound
         }
     })
 }

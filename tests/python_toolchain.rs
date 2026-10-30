@@ -167,7 +167,7 @@ fn real_blog_record_slice_runs() {
     std::fs::write(emitted.join("probe.py"), r#"from app.v2.models import Article
 
 got = Article.sliced()
-if got != ["2", "Sliced", "7", "1", "Other", "3"]:
+if got != ["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."]:
     raise AssertionError(f"sliced: {got!r}")
 print("slice passed")
 "#).expect("write probe");

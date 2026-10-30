@@ -254,7 +254,7 @@ public class RecordSliceProbeTest
     public void SliceAnswersAsRails()
     {
         var got = System.Text.Json.JsonSerializer.Serialize(Article.Sliced());
-        var want = System.Text.Json.JsonSerializer.Serialize(new List<object?> { "2", "Sliced", "7", "1", "Other", "3" });
+        var want = System.Text.Json.JsonSerializer.Serialize(new List<object?> { "2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body." });
         Assert.True(got == want, "sliced: " + got);
     }
 }

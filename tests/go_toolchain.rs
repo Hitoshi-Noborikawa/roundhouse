@@ -219,7 +219,7 @@ import (
 )
 
 func TestRecordSliceProbe(t *testing.T) {
-	if got := Article_sliced(); !reflect.DeepEqual(got, []string{"2", "Sliced", "7", "1", "Other", "3"}) {
+	if got := Article_sliced(); !reflect.DeepEqual(got, []string{"2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."}) {
 		t.Fatalf("sliced: %#v", got)
 	}
 }

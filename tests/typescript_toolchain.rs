@@ -642,7 +642,7 @@ fn real_blog_record_slice_runs_under_tsx() {
         &emitted,
         r#"import { Article } from "./app/models/article.js";
 const got = Article.sliced();
-if (JSON.stringify(got) !== JSON.stringify(["2", "Sliced", "7", "1", "Other", "3"])) throw new Error("sliced: " + JSON.stringify(got));
+if (JSON.stringify(got) !== JSON.stringify(["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."])) throw new Error("sliced: " + JSON.stringify(got));
 console.log("slice passed");
 "#,
     );

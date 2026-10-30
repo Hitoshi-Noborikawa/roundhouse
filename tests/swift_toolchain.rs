@@ -212,7 +212,7 @@ fn real_blog_record_slice_runs() {
 
 final class RecordSliceProbeTests: XCTestCase {
     func testSliceAnswersAsRails() throws {
-        XCTAssertEqual(try Article.sliced(), ["2", "Sliced", "7", "1", "Other", "3"])
+        XCTAssertEqual(try Article.sliced(), ["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."])
     }
 }
 "#).expect("write probe test");

@@ -3183,7 +3183,9 @@ ways.
 `self`) and whose names are literals into a Hash literal of reader
 calls: `a.slice(:id, :title)` becomes `{"id" => a.id, "title" =>
 a.title}`, typed `Hash[String, <union of the readers>]`. The receiver
-is evaluated once. A name the model has no reader for leaves the call
+is evaluated once: a receiver with effects read more than once is bound
+in a `Let` under a name unique to the site, and one sliced with no names
+keeps the call, so it still runs. A name the model has no reader for leaves the call
 as written with a `record-slice` lower-residue warning, and a model
 that defines its own `slice` keeps it.
 

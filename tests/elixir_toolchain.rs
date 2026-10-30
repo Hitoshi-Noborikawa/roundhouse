@@ -240,7 +240,7 @@ defmodule RecordSliceProbeTest do
   use ExUnit.Case, async: false
 
   test "slice" do
-    assert Article.sliced() == ["2", "Sliced", "7", "1", "Other", "3"]
+    assert Article.sliced() == ["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."]
   end
 end
 "#).expect("write probe");

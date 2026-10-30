@@ -201,7 +201,7 @@ fn real_blog_record_slice_runs() {
 def expect(what, got, want)
   raise "#{what}: #{got.inspect}" unless got == want
 end
-expect("sliced", Article.sliced, ["2", "Sliced", "7", "1", "Other", "3"])
+expect("sliced", Article.sliced, ["2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body."])
 puts "slice passed"
 "##,
     )

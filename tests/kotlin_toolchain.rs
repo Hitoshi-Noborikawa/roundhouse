@@ -224,7 +224,7 @@ class RecordSliceProbeTest {
     @org.junit.jupiter.api.Test
     fun sliceAnswersAsRails() {
         val got = Article.sliced()
-        if (got != listOf("2", "Sliced", "7", "1", "Other", "3")) throw AssertionError("sliced: $got")
+        if (got != listOf("2", "Sliced", "7", "1", "Other", "3", "Bound", "5", "4", "A comment body.")) throw AssertionError("sliced: $got")
     }
 }
 "#).expect("write probe test");

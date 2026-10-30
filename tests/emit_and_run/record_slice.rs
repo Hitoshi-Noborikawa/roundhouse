@@ -2,7 +2,7 @@
 
 use super::emit_and_run;
 
-const SUMMARY: &str = "  def summary = slice(:id, :title)\n";
+const SUMMARY: &str = "  def summary = slice(:id, :title)\n  def self.no_names_of(id) = find(id).slice\n";
 
 const ASSERTIONS: &str = r##"
 def check(label, got, want)
@@ -12,6 +12,12 @@ a = Article.create!(title: "Sliced", body: "A sufficiently long body.")
 check("typed call site", a.summary, { "id" => a.id, "title" => "Sliced" })
 check("untyped call site", Article.all.first.slice(:title, :body), { "title" => "Sliced", "body" => "A sufficiently long body." })
 check("no names", a.slice, {})
+check("no names, found receiver", Article.no_names_of(a.id), {})
+begin
+  Article.no_names_of(-1)
+  raise "an empty slice skipped its receiver"
+rescue ActiveRecord::RecordNotFound
+end
 begin
   a.slice(:id, :comments)
   raise "a name that is not a column answered"
