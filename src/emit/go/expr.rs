@@ -4318,14 +4318,15 @@ pub(super) fn set_nullable_columns(cols: Vec<(String, String)>) {
 }
 
 thread_local! {
-    /// Every model's nullable columns, app-wide: `(Model, column)`.
+    /// Every model's nullable columns, app-wide: `(Model, column, Go
+    /// pointer type)`.
     /// The per-class table above only knows the class being emitted,
     /// but a VIEW reads another record's column (`article.title`), so
     /// the cross-class lookup needs the whole set. Keyed by the
     /// receiver's resolved model, never by column name alone — the
     /// same column name can be nullable on one table and NOT NULL on
     /// another.
-    static ALL_NULLABLE_COLUMNS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    static ALL_NULLABLE_COLUMNS: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
 }
 
 thread_local! {
@@ -4356,18 +4357,14 @@ fn raised_error_class(ctx: &EmitCtx, path: &[crate::ident::Symbol]) -> Option<St
     is_error_class(&nested).then_some(nested)
 }
 
-pub(super) fn set_all_nullable_columns(pairs: Vec<(String, String)>) {
-    ALL_NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = pairs);
+pub(super) fn set_all_nullable_columns(columns: Vec<(String, String, String)>) {
+    ALL_NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = columns);
 }
 
 /// Is `column` nullable on the model this expression's receiver
 /// resolves to?
 fn recv_column_is_nullable(recv: &Expr, column: &str) -> bool {
-    let Some(Ty::Class { id, .. }) = recv.ty.as_ref() else { return false };
-    let model = id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str());
-    ALL_NULLABLE_COLUMNS.with(|c| {
-        c.borrow().iter().any(|(m, col)| m == model && col == column)
-    })
+    recv_column_go_ty(recv, column).is_some()
 }
 
 fn nullable_column_go_ty(field_ruby: &str) -> Option<String> {
@@ -4493,11 +4490,9 @@ fn unbox_nullable_column(v: &Expr, v_s: &str, slot_go: &str) -> Option<String> {
 /// The Go pointer type of `column` on the model this receiver resolves
 /// to, when the schema declares it nullable.
 fn recv_column_go_ty(recv: &Expr, column: &str) -> Option<String> {
-    if !recv_column_is_nullable(recv, column) {
-        return None;
-    }
-    // Every nullable scalar column renders as one of these; string is
-    // the overwhelmingly common case and the only one the fixtures
-    // exercise through an untyped seam.
-    Some("*string".to_string())
+    let Some(Ty::Class { id, .. }) = recv.ty.as_ref() else { return None };
+    let model = id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str());
+    ALL_NULLABLE_COLUMNS.with(|c| {
+        c.borrow().iter().find(|(m, col, _)| m == model && col == column).map(|(_, _, ty)| ty.clone())
+    })
 }
