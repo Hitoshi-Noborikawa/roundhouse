@@ -27,8 +27,13 @@ const SCHEMA: &str = "ActiveRecord::Schema.define do
   create_table \"gadgets\", force: :cascade do |t|
     t.string \"name\"
   end
+  create_table \"orders\", force: :cascade do |t|
+    t.string \"code\"
+  end
   create_table \"widgets\", force: :cascade do |t|
+    t.string \"name\"
     t.bigint \"gadget_id\"
+    t.bigint \"order_id\"
   end
 end
 ";
@@ -52,9 +57,20 @@ const CONTROLLER: &str = "class WidgetsController < ApplicationController
     redirect_to edit_gadget_path(@thing)
   end
 
+  # `Widget#order` is also an association reader; called on the class
+  # with an argument, `order` is still the builder.
   def through_order
     @widget = Widget.order(:id).find(params[:id])
     @thing = @widget.gadget
+    redirect_to edit_gadget_path(@thing)
+  end
+
+  # A class-side definition named like a builder is the model's own:
+  # `Widget.select(name)` answers the record `find_by` finds. (Only its
+  # typing is checked here; the emitted call itself is rewritten to the
+  # Relation builtin, a separate gap.)
+  def through_class_side_override
+    @thing = Widget.select(params[:name]).gadget
     redirect_to edit_gadget_path(@thing)
   end
 end
@@ -64,7 +80,7 @@ const ASSERTIONS: &str = r##"
 require_relative "app/controllers/widgets_controller"
 
 gadget = Gadget.create!(name: "g")
-widget = Widget.create!(gadget_id: gadget.id)
+widget = Widget.create!(name: "w", gadget_id: gadget.id)
 expected = "/gadgets/" + gadget.id.to_s + "/edit"
 
 c = WidgetsController.new
@@ -87,20 +103,32 @@ c.params = {"id" => widget.id.to_s}
 c.process_action(:through_order)
 raise "order: " + c.location.inspect unless c.location == expected
 
+
 puts "relation builder heads passed"
 "##;
+
+const WIDGET: &str = "class Widget < ApplicationRecord
+  belongs_to :gadget
+  belongs_to :order, optional: true
+
+  def self.select(name)
+    find_by(name: name)
+  end
+end
+";
 
 fn example() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("db/schema.rb", SCHEMA)
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write("app/models/gadget.rb", "class Gadget < ApplicationRecord\nend\n")
-        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  belongs_to :gadget\nend\n")
+        .write("app/models/order.rb", "class Order < ApplicationRecord\nend\n")
+        .write("app/models/widget.rb", WIDGET)
         .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
         .write("app/controllers/widgets_controller.rb", CONTROLLER)
         .write(
             "config/routes.rb",
-            "Rails.application.routes.draw do\n  resources :gadgets, only: :edit\n  get \"widgets/:id/includes\", to: \"widgets#through_includes\"\n  get \"widgets/:id/preload\", to: \"widgets#through_preload\"\n  get \"widgets/:id/eager_load\", to: \"widgets#through_eager_load\"\n  get \"widgets/:id/order\", to: \"widgets#through_order\"\nend\n",
+            "Rails.application.routes.draw do\n  resources :gadgets, only: :edit\n  get \"widgets/:id/includes\", to: \"widgets#through_includes\"\n  get \"widgets/:id/preload\", to: \"widgets#through_preload\"\n  get \"widgets/:id/eager_load\", to: \"widgets#through_eager_load\"\n  get \"widgets/:id/order\", to: \"widgets#through_order\"\n  get \"widgets/by_name\", to: \"widgets#through_class_side_override\"\nend\n",
         )
 }
 
@@ -109,7 +137,7 @@ fn a_record_read_after_a_builder_head_projects_to_its_id() {
     let (emitted, _) = example().emit(BuildTarget::Ruby);
     let controller = std::fs::read_to_string(emitted.join("app/controllers/widgets_controller.rb")).expect("read the emitted controller");
     assert!(controller.contains("redirect_to(RouteHelpers.edit_gadget_path(@part.id))"), "{controller}");
-    assert_eq!(controller.matches("redirect_to(RouteHelpers.edit_gadget_path(@thing.id))").count(), 3, "{controller}");
+    assert_eq!(controller.matches("redirect_to(RouteHelpers.edit_gadget_path(@thing.id))").count(), 4, "{controller}");
 }
 
 #[test]
