@@ -1,4 +1,6 @@
-//! Sponge's real OpenSSL::Random facade must use entropy, even after srand.
+//! `OpenSSL::Random.random_bytes` — the openssl library's on the ruby
+//! family, spinel's `packages/openssl` on spinel — must use entropy, even
+//! after srand.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
@@ -22,8 +24,7 @@ const UTILS: &str = r#"class Utils
 end
 "#;
 
-const CONTRACT: &str = r#"require_relative "app/models/sponge"
-require_relative "app/models/utils"
+const CONTRACT: &str = r#"require_relative "app/models/utils"
 require_relative "runtime/secure_random_stub"
 
 def assert_binary_bytes(bytes, length)
@@ -43,26 +44,16 @@ second = OpenSSL::Random.random_bytes(32)
 raise "random bytes repeated after srand" if first == second
 
 # Cover empty, single-draw, and multi-draw results, including both sides of
-# successive native chunk boundaries. Both facade names must preserve the
-# binary contract when the draw is nested in another call.
+# successive native chunk boundaries, and a draw nested in another call.
 [0, 1, 16, 32, 255, 256, 257, 511, 512, 513, 1024].each do |length|
   assert_binary_bytes(OpenSSL::Random.random_bytes(length), length)
-  assert_binary_bytes(OpenSSL::RandomSource.random_bytes(length), length)
 end
 
-assert_binary_bytes(OpenSSL::Random.random_bytes(257), 257)
-assert_binary_bytes(OpenSSL::RandomSource.random_bytes(256 + 1), 257)
-assert_binary_bytes(OpenSSL::RandomSource.random_bytes(OpenSSL::Random.random_bytes(1).bytesize + 256), 257)
+assert_binary_bytes(OpenSSL::Random.random_bytes(OpenSSL::Random.random_bytes(1).bytesize + 256), 257)
 
 begin
   OpenSSL::Random.random_bytes(-1)
   raise "negative length was accepted"
-rescue ArgumentError
-end
-
-begin
-  OpenSSL::RandomSource.random_bytes(-1)
-  raise "negative length was accepted through RandomSource"
 rescue ArgumentError
 end
 
@@ -79,13 +70,12 @@ end
 puts first.unpack1("H*")
 "#;
 
-fn facade_tree() -> emit_and_run::Emitted {
+fn utils_tree() -> emit_and_run::Emitted {
     let (emitted, errors) = emit_and_run::empty_app()
-        .write("extras/sponge.rb", "class Sponge\nend\n")
         .write("extras/utils.rb", UTILS)
         .emit(roundhouse::project::BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:?}");
-    std::fs::write(emitted.join("contract.rb"), CONTRACT).expect("write facade consumer");
+    std::fs::write(emitted.join("contract.rb"), CONTRACT).expect("write consumer");
     emitted
 }
 
@@ -100,8 +90,8 @@ fn assert_success(output: &Output) {
 }
 
 fn run_twice(mut command: Command) {
-    let first = command.output().expect("run facade consumer");
-    let second = command.output().expect("run facade consumer again");
+    let first = command.output().expect("run consumer");
+    let second = command.output().expect("run consumer again");
     for output in [&first, &second] {
         assert_success(output);
         let hex = String::from_utf8_lossy(&output.stdout);
@@ -115,10 +105,8 @@ fn run_twice(mut command: Command) {
 }
 
 #[test]
-fn sponge_random_uses_entropy_and_preserves_binary_strings() {
-    let emitted = facade_tree();
-    // General consumer aliases are supported by CRuby; the native SDK only
-    // admits the facade's declared OpenSSL::Random alias in this contract.
+fn openssl_random_uses_entropy_and_preserves_binary_strings() {
+    let emitted = utils_tree();
     let aliases = r#"
 RandomBytes = OpenSSL::Random
 [0, 1, 16, 32, 255, 256, 257, 511, 512, 513, 1024].each do |length|
@@ -139,14 +127,14 @@ end
 
 #[test]
 #[ignore = "requires the Spinel toolchain"]
-fn sponge_random_uses_entropy_in_a_native_binary() {
-    let emitted = facade_tree();
+fn openssl_random_uses_entropy_in_a_native_binary() {
+    let emitted = utils_tree();
     let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
     let compiled = Command::new(compiler)
         .args(["--jobs=1", "--rbs", ".", "contract.rb", "-o", "contract"])
         .current_dir(&emitted)
         .output()
-        .expect("compile facade consumer with Spinel");
+        .expect("compile consumer with Spinel");
     assert_success(&compiled);
     let mut command = Command::new(emitted.join("contract"));
     command.current_dir(&emitted);

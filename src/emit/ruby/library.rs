@@ -908,7 +908,8 @@ pub(super) fn apply_extras_facades(files: &mut [(String, String)], app: &App) {
                 // consumer read roundhouse's own inference instead of the
                 // hand-written contract sitting beside the façade.
                 //
-                // What that cost, end to end: the contract declares
+                // What that cost, end to end: the (since retired) Sponge
+                // contract declared
                 // `OpenSSL::RandomSource.random_bytes: (Integer) -> String`,
                 // and without it that call typed untyped, which widened
                 // `str` in `Utils.random_str`, which made
