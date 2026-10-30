@@ -431,6 +431,19 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                     // assumption the heuristic makes and the shape every
                     // Ruby hash key emits as.
                     let k_ty = if key.is_open() { "string".to_string() } else { k_raw };
+                    // A nullable column read is a Go pointer; the map
+                    // holds the value (`map[string]string`) or boxes it
+                    // (`map[string]interface{}`), so unbox it here.
+                    let parts: Vec<String> = entries
+                        .iter()
+                        .zip(parts)
+                        .map(|((k, v), part)| {
+                            match unbox_nullable_column(v, &emit_expr(ctx, v), &v_ty) {
+                                Some(unboxed) => format!("{}: {unboxed}", emit_expr(ctx, k)),
+                                None => part,
+                            }
+                        })
+                        .collect();
                     return format!("map[{k_ty}]{v_ty}{{{}}}", parts.join(", "));
                 }
             }
@@ -4445,6 +4458,36 @@ fn box_nullable_column_arg(method: &str, arg: &Expr, arg_s: &str) -> Option<Stri
         _ => return None,
     };
     Some(format!("{f}({arg_s})"))
+}
+
+/// A nullable column read (`@title`, `article.title`) stored into a map
+/// whose Go value type is `slot_go`: `DerefString(..)` into a `string`
+/// slot (nil reads as "", the zero value), `AnyString(..)` into an
+/// `interface{}` slot (nil stays nil). `None` when `v` is no such read
+/// or the slot already holds the pointer.
+fn unbox_nullable_column(v: &Expr, v_s: &str, slot_go: &str) -> Option<String> {
+    let ptr = match &*v.node {
+        ExprNode::Ivar { name } => nullable_column_go_ty(name.as_str()),
+        ExprNode::Send { recv: Some(inner), method: m, args, .. } if args.is_empty() => {
+            recv_column_go_ty(inner, m.as_str())
+        }
+        _ => None,
+    }?;
+    let (scalar, deref, any) = match ptr.as_str() {
+        "*string" => ("string", "DerefString", "AnyString"),
+        "*int64" => ("int64", "DerefInt64", "AnyInt64"),
+        "*float64" => ("float64", "DerefFloat64", "AnyFloat64"),
+        "*bool" => ("bool", "DerefBool", "AnyBool"),
+        _ => return None,
+    };
+    let helper = if slot_go == scalar {
+        deref
+    } else if slot_go == "interface{}" {
+        any
+    } else {
+        return None;
+    };
+    Some(format!("{helper}({v_s})"))
 }
 
 /// The Go pointer type of `column` on the model this receiver resolves
