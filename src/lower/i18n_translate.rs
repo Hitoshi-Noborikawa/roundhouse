@@ -305,8 +305,26 @@ pub(crate) fn split_key(args: &[Expr]) -> Option<(Expr, Vec<Expr>, Vec<Expr>)> {
 }
 
 thread_local! {
-    static PLANNED: std::cell::RefCell<Option<crate::det::HashMap<PlanKey, Result<Vec<(Variant, Plan)>, String>>>> =
+    static PLANNED: std::cell::RefCell<Option<SharedPlanCache>> =
         const { std::cell::RefCell::new(None) };
+}
+
+// Pure answers shared only within one app/session, including its scoped workers.
+#[derive(Clone, Default)]
+pub(crate) struct SharedPlanCache(std::sync::Arc<std::sync::Mutex<
+    crate::det::HashMap<PlanKey, Result<Vec<(Variant, Plan)>, String>>
+>>);
+
+pub(crate) fn plan_cache_snapshot() -> Option<SharedPlanCache> {
+    PLANNED.with(|c| c.borrow().clone())
+}
+
+pub(crate) fn install_plan_cache(cache: Option<SharedPlanCache>) -> impl Drop {
+    struct Restore(Option<SharedPlanCache>);
+    impl Drop for Restore {
+        fn drop(&mut self) { PLANNED.with(|c| *c.borrow_mut() = self.0.take()); }
+    }
+    Restore(PLANNED.with(|c| c.replace(cache)))
 }
 
 /// A call by where it sits, its source spans and its literal arguments.
@@ -321,10 +339,8 @@ pub fn with_plan_cache<T>(f: impl FnOnce() -> T) -> T {
     if PLANNED.with(|c| c.borrow().is_some()) {
         return f();
     }
-    PLANNED.with(|c| *c.borrow_mut() = Some(Default::default()));
-    let out = f();
-    PLANNED.with(|c| *c.borrow_mut() = None);
-    out
+    let _cache = install_plan_cache(Some(Default::default()));
+    f()
 }
 
 fn plan_key(recv: Option<&Expr>, method: &str, args: &[Expr], block: Option<&Expr>, site: Site<'_>) -> Option<PlanKey> {
@@ -367,15 +383,15 @@ fn plan_key(recv: Option<&Expr>, method: &str, args: &[Expr], block: Option<&Exp
 /// `plans` for the call written as `recv.method(args)`, kept for the length of `with_plan_cache`.
 fn plans_at(catalog: &Catalog, call: &Call, key: Option<PlanKey>, in_view: bool) -> Result<Vec<(Variant, Plan)>, String> {
     if let Some(key) = &key
-        && let Some(hit) = PLANNED.with(|c| c.borrow().as_ref().and_then(|m| m.get(key).cloned()))
+        && let Some(hit) = PLANNED.with(|c| c.borrow().as_ref().and_then(|m| m.0.lock().unwrap().get(key).cloned()))
     {
         return hit;
     }
     let out = plans(catalog, call, in_view);
     if let Some(key) = key {
         PLANNED.with(|c| {
-            if let Some(m) = c.borrow_mut().as_mut() {
-                m.insert(key, out.clone());
+            if let Some(m) = c.borrow().as_ref() {
+                m.0.lock().unwrap().insert(key, out.clone());
             }
         });
     }
