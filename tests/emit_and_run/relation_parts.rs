@@ -1,6 +1,7 @@
 //! Relation methods the PostgreSQL fork specs reach, on SQLite: `and`,
 //! `unscope` of the order, limit and offset, an offset with no limit, and
-//! `readonly`, whose records refuse to be saved or destroyed.
+//! `readonly`, whose records refuse to be saved, destroyed, updated by
+//! column or touched.
 
 use super::emit_and_run;
 
@@ -29,7 +30,11 @@ class RelationPartsTest < ActiveSupport::TestCase
     assert_not Article.find_by(title: "a").readonly?
     assert_raises(ActiveRecord::ReadOnlyRecord) { held.update!(title: "z") }
     assert_raises(ActiveRecord::ReadOnlyRecord) { held.destroy }
+    assert_raises(ActiveRecord::ReadOnlyRecord) { held.update_column(:title, "z") }
+    assert_raises(ActiveRecord::ReadOnlyRecord) { held.update_columns(title: "z") }
+    assert_raises(ActiveRecord::ReadOnlyRecord) { held.touch }
     assert_equal 1, Article.where(title: "a").count
+    assert_equal [], left.and(Article.none).unscope(:where).pluck(:title)
   end
 end
 "#,

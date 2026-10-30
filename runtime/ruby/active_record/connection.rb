@@ -443,7 +443,8 @@ module ActiveRecord
 
   class Base
     # Rails' read-only records: one a `readonly` relation loaded, or one
-    # `readonly!` marked, raises ReadOnlyRecord on save or destroy.
+    # `readonly!` marked, raises ReadOnlyRecord on save, destroy,
+    # `update_column(s)` or `touch`.
     def readonly?
       @readonly == true
     end
@@ -1308,6 +1309,7 @@ module ActiveRecord
     # value via the `[]=` indexer, then persists via the same adapter
     # path `save` uses.
     def update_column(name, value)
+      _raise_readonly_record_error if readonly?
       self[name] = value
       _adapter_update
       true
@@ -1316,6 +1318,7 @@ module ActiveRecord
     # `record.update_columns(a: 1, b: 2)` — several attributes at once,
     # the same way: no validations, no callbacks, no timestamps.
     def update_columns(attributes)
+      _raise_readonly_record_error if readonly?
       attributes.each { |name, value| self[name] = value }
       _adapter_update
       true
@@ -1960,6 +1963,7 @@ module ActiveRecord
     # guards its index rewrite because boosts touch the message). The
     # bodies are base.rb's, restated for the transaction.
     def touch
+      _raise_readonly_record_error if readonly?
       self.class.transaction do
         fill_timestamps(false)
         _adapter_touch
@@ -1971,6 +1975,7 @@ module ActiveRecord
     end
 
     def touch_written
+      _raise_readonly_record_error if readonly?
       self.class.transaction do
         fill_timestamps(false)
         _adapter_update

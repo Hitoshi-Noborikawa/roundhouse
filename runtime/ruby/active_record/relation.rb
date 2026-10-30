@@ -459,6 +459,7 @@ module ActiveRecord
         end
       end
       mark_null! if other.null_relation?
+      @none = true if other.explicit_none?
       self
     end
 
