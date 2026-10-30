@@ -102,7 +102,6 @@ SPINEL_TESTS = [
     "after_initialize_bare_new_spinel",
     "find_or_create_bang_records",
     "before_action_return_spinel",
-    "partial_flash_from_caller_spinel",
     "plain_class_optional_keywords_spinel",
     "jbuilder_array_value_spinel",
     "active_job_payload",

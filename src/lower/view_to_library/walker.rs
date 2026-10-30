@@ -38,14 +38,7 @@ pub(super) fn walk_body(body: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         _ => vec![body],
     };
     let mut out = Vec::new();
-    // A statement assigning a local over a flash param shadows it for the
-    // rest of the body (`ViewCtx::after_assigning`).
-    let mut shadowed: Option<ViewCtx> = None;
     for stmt in &stmts {
-        if let Some(next) = shadowed.as_ref().unwrap_or(ctx).after_assigning(stmt) {
-            shadowed = Some(next);
-        }
-        let ctx = shadowed.as_ref().unwrap_or(ctx);
         let mut lowered = walk_stmt(stmt, ctx);
         // Synthesis choke point: everything walk_stmt invented for this
         // source statement (helper sends, io appends, TODO markers, …)
@@ -1844,7 +1837,6 @@ mod tests {
             ivar_models: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
-            own_flash: Default::default(),
         }
     }
 
