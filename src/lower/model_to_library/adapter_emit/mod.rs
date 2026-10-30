@@ -345,6 +345,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema, writes_
         assignments,
         returns_rowid: supplied_key.is_none(),
     };
+    let insert_with_key = insert.clone();
     let op = ArelOp::Insert(insert.clone());
     let generated: Vec<&crate::schema::Column> =
         table.columns.iter().filter(|c| c.generated.is_some()).collect();
@@ -385,6 +386,33 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema, writes_
             &returning_columns,
         );
         let hydrated = hydrate_generated_after_insert(table, &generated, insert, &ret_ty);
+        // The supplied integer key on this path too: the same RETURNING
+        // insert with the key named, chosen as `supplied_key_insert` chooses.
+        let hydrated = match key.filter(|c| writes_supplied_keys && supplied_key.is_none() && c.generated.is_none()) {
+            Some(k) => {
+                let mut keyed = insert_with_key.clone();
+                keyed.assignments.insert(
+                    0,
+                    Assignment { column: k.name.clone(), value: Value::Runtime { expr: storage_value(k), ty: value_type_for_column(k) } },
+                );
+                let written = SqliteVisitor::default().visit_insert_returning(
+                    &keyed,
+                    schema,
+                    &returning_key,
+                    key_is_integer(table),
+                    &returning_columns,
+                );
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: supplied_key_given(k),
+                        then_branch: hydrate_generated_after_insert(table, &generated, written, &ret_ty),
+                        else_branch: hydrated,
+                    },
+                )
+            }
+            None => hydrated,
+        };
         if let Some(mint) = uuid_mint {
             Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![mint, hydrated] })
         } else {
@@ -1271,7 +1299,19 @@ fn supplied_key_insert(owner: &ClassId, table: &Table, schema: &Schema, key: &cr
         .collect();
     let insert = Insert { table: TableRef(table.name.clone()), assignments, returns_rowid: false };
     let written = SqliteVisitor::default().visit(&ArelOp::Insert(insert), schema, owner);
-    let given = Expr::new(
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: supplied_key_given(key),
+            then_branch: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![written, ivar_ref(&key.name)] }),
+            else_branch: assigned,
+        },
+    )
+}
+
+/// `@id.to_i != 0`: the record was given its integer key.
+fn supplied_key_given(key: &crate::schema::Column) -> Expr {
+    Expr::new(
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(Expr::new(
@@ -1282,14 +1322,6 @@ fn supplied_key_insert(owner: &ClassId, table: &Table, schema: &Schema, key: &cr
             args: vec![crate::lower::typing::lit_int(0)],
             block: None,
             parenthesized: false,
-        },
-    );
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::If {
-            cond: given,
-            then_branch: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![written, ivar_ref(&key.name)] }),
-            else_branch: assigned,
         },
     )
 }

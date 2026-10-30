@@ -142,7 +142,7 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
 /// existed before lived in the CRuby overlay's core_ext, which the
 /// strict targets never apply — so campfire's avatar helper
 /// (`Zlib.crc32(user.to_param)`) 500'd every avatar on the binary.
-pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model) {
+pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model, table: Option<&crate::schema::Table>) {
     if is_primary_abstract_class(model) {
         return;
     }
@@ -164,10 +164,11 @@ pub(super) fn push_to_param_method(methods: &mut Vec<MethodDef>, model: &Model) 
             Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
-                    // The key column's slot: `@cityhash` under `self.primary_key = "cityhash"`.
+                    // The key column's slot: `@cityhash` under `self.primary_key = "cityhash"`,
+                    // or under a composite table whose key a reopen or ancestor declared.
                     recv: Some(Expr::new(
                         Span::synthetic(),
-                        ExprNode::Ivar { name: model.primary_key.clone().unwrap_or_else(|| Symbol::from("id")) },
+                        ExprNode::Ivar { name: model.primary_key.clone().or_else(|| composite_key(table)).unwrap_or_else(|| Symbol::from("id")) },
                     )),
                     method: Symbol::from("to_s"),
                     args: Vec::new(),
@@ -2237,4 +2238,11 @@ fn push_block_callback(
             });
         }
     }
+}
+
+/// The column `ingest::app::key_composite_tables` keyed a composite table
+/// on: it was declared by the model, a reopen of it, or a model ancestor.
+fn composite_key(table: Option<&crate::schema::Table>) -> Option<Symbol> {
+    let table = table.filter(|t| !t.primary_key_columns.is_empty())?;
+    table.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone())
 }

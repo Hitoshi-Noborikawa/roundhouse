@@ -65,3 +65,15 @@ fn an_undeclared_key_stays_the_tables_composite_across_a_reopen() {
     );
     assert!(event.contains("def self.composite_primary_key?"), "{event}");
 }
+
+/// `to_param` answers the declared key, even when only a reopen declares it.
+#[test]
+fn to_param_reads_the_key_a_reopen_declares() {
+    let event = emitted_event(
+        "class Event < ApplicationRecord\nend\n",
+        "class Event < ApplicationRecord\n  self.primary_key = :shop_id\nend\n",
+    );
+    let to_param = event.split("def to_param").nth(1).expect("a to_param");
+    let body = to_param.split("\n  end").next().unwrap_or_default();
+    assert!(body.contains("@shop_id.to_s"), "{body}");
+}

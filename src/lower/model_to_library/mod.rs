@@ -1616,7 +1616,7 @@ fn build_methods_with_finder_inputs(
     // AFTER push_user_methods, unlike the macros above: its skip guard
     // reads the accumulated list, so a model's own `to_param` (already
     // pushed) wins over the synthesized `@id.to_s`.
-    self::markers::push_to_param_method(&mut methods, model);
+    self::markers::push_to_param_method(&mut methods, model, schema.tables.get(&model.table.0));
     // Not before push_user_methods: its skip guard has to see the model's own methods.
     self::select_aliases::push_select_alias_methods(&mut methods, model, runtime_relation);
     // Also after push_user_methods: its BODY branches on whether the
