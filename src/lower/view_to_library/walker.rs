@@ -496,7 +496,10 @@ fn splice_form_wrapper(
         match args.last() {
             Some(last) => match &*last.node {
                 ExprNode::Hash { kwargs: true, .. } => (&args[..args.len() - 1], Some(last)),
-                ExprNode::KeywordSplat { value } => (&args[..args.len() - 1], Some(value)),
+                ExprNode::KeywordSplat { value } if matches!(&*value.node, ExprNode::Hash { .. }) => {
+                    (&args[..args.len() - 1], Some(value))
+                }
+                ExprNode::KeywordSplat { .. } => return None,
                 _ => (args, None),
             },
             None => (args, None),

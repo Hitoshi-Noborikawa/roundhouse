@@ -84,6 +84,46 @@ fn app_with_helper_target(call_tail: &str, helper: &str, target: Option<roundhou
 }
 
 #[test]
+fn a_native_keyword_rest_wrapper_splices_literal_keyword_packets() {
+    for tail in [", class: \"literal\"", ", **{ class: \"literal\" }"] {
+        let app = app_with_helper_target(
+            tail,
+            r#"module ThingsHelper
+  def thing_form_with(model, **params, &)
+    form_with model: @thing, url: thing_path(model), method: :patch, **params, &
+  end
+end
+"#,
+            Some(roundhouse::project::BuildTarget::Ruby),
+        );
+        let files = roundhouse::emit::ruby::emit_lowered_views(&app);
+        let source = &files.iter().find(|file| file.path.to_string_lossy().ends_with("things/show.rb")).unwrap().content;
+        assert!(source.contains("<form"), "{source}");
+        assert!(source.contains("literal"), "{source}");
+        assert!(!source.contains("thing_form_with"), "{source}");
+    }
+}
+
+#[test]
+fn a_native_keyword_rest_wrapper_does_not_splice_dynamic_options() {
+    let app = app_with_helper_target(
+        ", **options",
+        r#"module ThingsHelper
+  def thing_form_with(model, **params, &)
+    form_with model: @thing, url: thing_path(model), method: :patch, **params, &
+  end
+end
+"#,
+        Some(roundhouse::project::BuildTarget::Ruby),
+    );
+    let files = roundhouse::emit::ruby::emit_lowered_views(&app);
+    let source = &files.iter().find(|file| file.path.to_string_lossy().ends_with("things/show.rb")).unwrap().content;
+    assert!(source.contains("thing_form_with"), "{source}");
+    assert!(source.contains("**options"), "{source}");
+    assert!(!source.contains("<form"), "{source}");
+}
+
+#[test]
 fn a_native_keyword_rest_wrapper_does_not_splice_a_positional_hash() {
     let app = app_with_helper_target(
         ", { class: \"invalid\" }",

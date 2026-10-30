@@ -2,6 +2,33 @@
 mod emit_and_run;
 
 #[test]
+fn test_helpers_keep_their_own_contract_beside_same_named_app_helpers() {
+    let run = emit_and_run::real_blog()
+        .write("app/helpers/native_label_helper.rb", r#"module NativeLabelHelper
+  def native_label(style: :app, suffix: "app")
+    [style, suffix]
+  end
+end
+"#)
+        .write("test/models/native_label_test.rb", r#"require "test_helper"
+class NativeLabelTest < ActiveSupport::TestCase
+  def native_label(style: :test, suffix: "test")
+    [style, suffix]
+  end
+  setup do
+    @setup_label = native_label(suffix: "setup")
+  end
+  test "test helper keywords" do
+    assert_equal [:test, "setup"], @setup_label
+    assert_equal [:test, "body"], native_label(suffix: "body")
+  end
+end
+"#)
+        .run_test("test/models/native_label_test.rb");
+    run.assert_passes();
+}
+
+#[test]
 fn a_cross_helper_keyword_packet_keeps_the_exported_contract() {
     let run = emit_and_run::real_blog()
         .write("app/helpers/native_target_helper.rb", r#"module NativeTargetHelper

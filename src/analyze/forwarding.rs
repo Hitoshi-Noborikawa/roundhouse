@@ -626,6 +626,7 @@ fn keyword_calls_with_index(
         e: &Expr,
         plans: &mut HashMap<Span, KeywordPolicy>,
         fallback: bool,
+        helper_fallback: bool,
     ) {
         let args = match &*e.node {
             ExprNode::Send { args, .. } => Some(args.as_slice()),
@@ -637,7 +638,7 @@ fn keyword_calls_with_index(
                 .any(|a| matches!(&*a.node, ExprNode::KeywordSplat { .. }))
         });
         let native = possible_native_keyword_destination(contracts, context, e)
-            && verified_native_library_call(app, contracts, context, e);
+            && verified_native_library_call(app, contracts, context, e, helper_fallback);
         if (has_splat || native) && !(fallback && plans.contains_key(&e.span))
         {
             let policy = if native {
@@ -693,7 +694,7 @@ fn keyword_calls_with_index(
                 .or_insert(policy);
         }
         e.node
-            .for_each_child(&mut |c| visit(app, contracts, context, c, plans, fallback));
+            .for_each_child(&mut |c| visit(app, contracts, context, c, plans, fallback, helper_fallback));
     }
     let mut plans = HashMap::default();
     for (owner, method) in methods(app).chain(actions.iter().map(|(c, m)| (c, m))) {
@@ -704,6 +705,7 @@ fn keyword_calls_with_index(
             &method.body,
             &mut plans,
             false,
+            true,
         );
         for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
             visit(
@@ -713,11 +715,15 @@ fn keyword_calls_with_index(
                 default,
                 &mut plans,
                 false,
+                true,
             );
         }
     }
+    for view in &app.views {
+        visit(app, contracts, None, &view.body, &mut plans, true, true);
+    }
     crate::lower::for_each_forwarding_body_ref(app, &mut |e| {
-        visit(app, contracts, None, e, &mut plans, true)
+        visit(app, contracts, None, e, &mut plans, true, false)
     });
     plans
 }
@@ -769,10 +775,14 @@ fn verified_native_library_call(
     contracts: &SourceContractIndex<'_>,
     context: Option<(&ClassId, &MethodDef)>,
     call: &Expr,
+    helper_fallback: bool,
 ) -> bool {
     if let Some(resolved) = destination(app, contracts, context, call, None) {
         return contracts.native_keyword_methods.contains(&resolved.method.name_span)
             && keyword_contract_error(context, call, Some(resolved), contracts).is_none();
+    }
+    if !helper_fallback {
+        return false;
     }
     let ExprNode::Send { recv: None, method, .. } = &*call.node else { return false };
     let Some(owner) = app.helper_method_index.get(method) else { return false };
