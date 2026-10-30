@@ -1946,6 +1946,22 @@ impl<'a> BodyTyper<'a> {
                     }
                     current_id = cls.parent.as_ref();
                 }
+                // A model's class-side relation builder the walk above
+                // didn't find (`Widget.includes(:gadget)`,
+                // `Widget.order(:id)`). The analyzer's registry seeds the
+                // catalog's builders onto every model; the registry the
+                // lowered bodies are typed against carries only what the
+                // runtime's `ActiveRecord::Base` declares (`where`, `all`),
+                // so a chain that started with any other builder lost its
+                // model there and `find` answered `untyped`. Same answer
+                // as the analyzer, from the same catalog.
+                if !instance_receiver
+                    && self.is_model_class(Some(&Ty::Class { id: id.clone(), args: vec![].into() }))
+                    && let Some(entry) = crate::catalog::lookup(method.as_str(), crate::catalog::ReceiverContext::Class)
+                    && let Some(kind) = entry.return_kind
+                {
+                    return crate::analyze::instantiate_return_kind(kind, id);
+                }
                 let _ = args; // already shadowed below for new-call shortcut
                 // Every class in Ruby responds to `.new`, returning an
                 // instance of itself. Serve this universally — covers
