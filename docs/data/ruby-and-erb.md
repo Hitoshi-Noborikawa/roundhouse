@@ -60,6 +60,13 @@ records each gap and substitutes or skips instead of aborting, so one
 unsupported construct doesn't hide every gap behind it. See
 `src/ingest/survey.rs` (`unwrap_or_record`).
 
+A support file (`lib/`, a gem's source) whose class ingest fails is
+left out and the walk goes on, so one gap does not abort the app. It is
+reported, not dropped in silence: `App::ingest_drops` holds it, and
+analysis reports `error[ingest_unsupported]` at the construct that
+failed it (`ingest::error_site` notes the innermost statement as the
+error passes up through the walk).
+
 ### Surface preservation
 
 Expression-level round-trip (ingest → emit-ruby → ingest ≡ identity,
@@ -106,7 +113,11 @@ methods, and report each such statement as an error
 applies to such a method only when every branch defines it and the
 conditional ends in `else`. A model body's conditional definitions, a
 visibility marker inside a branch, and any other statement in one stay
-refused.
+refused, each named at the statement that keeps it refused, as is a
+`class` / `module` declared in one inside `class << self`. A class
+declared in a branch and also, unconditionally, in another file is an
+error at the declaration: the merged class would load only with the
+branch.
 
 ### Body statements only Ruby answers
 

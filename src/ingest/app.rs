@@ -904,6 +904,11 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             app.file_programs.push(program);
                         }
                     }
+                    let conditional: crate::det::HashSet<&crate::ident::ClassId> =
+                        classes.iter().flat_map(|c| c.conditional_definitions.iter().flat_map(|d| d.declared_names())).collect();
+                    let unconditional =
+                        classes.iter().map(|c| c.name.clone()).filter(|name| !conditional.contains(name)).collect();
+                    app.library_class_files.push((path_str.clone(), unconditional));
                     app.library_classes.extend(classes);
                     // A Concern here runs its `included do` in a model that
                     // includes it, as one under app/models/concerns does.
@@ -918,6 +923,15 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                 Err(err) => {
                     if survey::is_active() {
                         survey::record(&err);
+                    }
+                    // Left out of the IR, and named at what failed it.
+                    if let IngestError::Unsupported { message, .. } = &err {
+                        let (start, end) = super::error_site::of(&err).unwrap_or((0, 0));
+                        let file = super::sources::file_id(&path_str);
+                        app.ingest_drops.push(crate::app::IngestDrop {
+                            span: crate::span::Span { file, start: start as u32, end: end as u32 },
+                            message: message.clone(),
+                        });
                     }
                 }
             }
