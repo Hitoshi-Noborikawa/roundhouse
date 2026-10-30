@@ -355,7 +355,8 @@ module ActionDispatch
         suffix_pattern = segment_pattern_for(seg_constraints, "format_suffix")
         # Retried here rather than left to the unpeeled pass: a later route would take the stripped path first, where Rails keeps declaration order.
         if !suffix_pattern.empty? && !segment_pattern_match(suffix_pattern, format)
-          return match_parts(pattern_parts, (path_parts.join("/") + "." + format).split("/"), int_params, +"", seg_constraints)
+          unpeeled_path = glob_rest(path_parts, 0) + "." + format
+          return match_parts(pattern_parts, unpeeled_path.split("/"), int_params, +"", seg_constraints)
         end
       end
       params = {}
