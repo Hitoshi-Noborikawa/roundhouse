@@ -1286,6 +1286,13 @@ module ActiveRecord
       rows
     end
 
+    # Rails' `composite_primary_key?`: whether the model keys its records
+    # on several columns. Every model here keys on one (a composite table
+    # is keyed on the column its model declares), so the answer is false.
+    def self.composite_primary_key?
+      false
+    end
+
     def self.record_timestamps=(value)
       TimestampSwitches.store(name, value)
     end
