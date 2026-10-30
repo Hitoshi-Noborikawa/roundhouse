@@ -1201,6 +1201,8 @@ impl Analyzer {
                 if expr_calls_super(&method.body) {
                     classes.entry(id.clone()).or_default().delegating_class_methods.insert(method.name.clone());
                 }
+            } else {
+                classes.entry(id.clone()).or_default().source_instance_methods.insert(method.name.clone());
             }
             if method.receiver == crate::dialect::MethodReceiver::Instance
                 && method.name.as_str() == "initialize"
@@ -1212,6 +1214,11 @@ impl Analyzer {
             {
                 classes.entry(id.clone()).or_default().declares_constructor = true;
                 classes.entry(id.clone()).or_default().constructor_calls_super = expr_calls_super(&method.body);
+            }
+        }
+        for controller in &app.controllers {
+            for action in controller.actions() {
+                classes.entry(controller.name.clone()).or_default().source_instance_methods.insert(action.name.clone());
             }
         }
 

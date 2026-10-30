@@ -1148,6 +1148,20 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    /// Whether source defines `method` on `of`'s instances (own, included or inherited), harvested or not.
+    fn declares_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
+        let mut stack = vec![of];
+        let mut seen = crate::det::HashSet::default();
+        while let Some(id) = stack.pop() {
+            let Some(cls) = self.classes().get(id).filter(|_| seen.insert(id)) else { continue };
+            if cls.source_instance_methods.contains(method) {
+                return true;
+            }
+            stack.extend(cls.includes.iter().chain(cls.parent.iter()));
+        }
+        false
+    }
+
     fn defines_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {
@@ -1474,8 +1488,9 @@ impl<'a> BodyTyper<'a> {
                     }
                     _ => None,
                 };
+                // Same receiver, so the same side: an instance's send(:m) is its own m, not a class method m.
                 if let Some(name) = literal_name {
-                    return self.dispatch(recv_ty, &name, block_ret, &args[1..]);
+                    return self.dispatch_on(recv_ty, &name, block_ret, &args[1..], instance_receiver);
                 }
             }
             return match recv_ty {
@@ -2001,6 +2016,9 @@ impl<'a> BodyTyper<'a> {
                 // to wrap String→&str at `instance.clone().set_body
                 // (row.body())` sites).
                 match method.as_str() {
+                    // Not Module#name when the instance's class defines its own `name`: before the
+                    // first harvest registers that method, the send waits for it like any other.
+                    "name" if instance_receiver && self.declares_instance_method(id, method) => return unknown(),
                     "name" => return Ty::Str,
                     "clone" | "dup" => return Ty::Class { id: id.clone(), args: args.clone() },
                     "superclass" => return Ty::Class {
