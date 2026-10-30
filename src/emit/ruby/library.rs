@@ -5511,7 +5511,7 @@ pub(crate) fn apply_duration_lowering(lcs: &mut [LibraryClass], app: &App) {
     let temporal_predicates = !crate::lower::duration::app_defines_temporal_predicates(app);
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
-            crate::lower::duration::apply_duration_rewrites(&mut m.body, temporal_predicates);
+            crate::lower::duration::apply_duration_rewrites(&mut m.body, temporal_predicates, true);
         }
     }
 }

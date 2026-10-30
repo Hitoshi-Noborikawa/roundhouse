@@ -41,12 +41,16 @@ use crate::diagnostic::Diagnostic;
 /// entry points that want source-shaped IR (LSP/MCP/preview/check) call
 /// `Analyzer` directly and skip the lowerings on purpose.
 pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
+    analyze_and_lower_with_target(app, crate::build_target::BuildTarget::Ruby)
+}
+
+fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
     crate::lower::i18n_translate::with_plan_cache(|| {
         let mut analyzer = crate::analyze::Analyzer::new(app);
         analyzer.analyze(app);
         app.helper_diagnostics = Some(crate::analyze::diagnose_helper_modules(app));
         crate::timings::phase("post-analyze lowerings", || {
-            crate::lower::apply_post_analyze_lowerings(app, analyzer.class_registry())
+            crate::lower::apply_post_analyze_lowerings_for(app, analyzer.class_registry(), target)
         })
     })
 }
@@ -80,6 +84,6 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
         refused.extend(crate::ingest::app::refuse_numericality_allow_on_untyped(app, target.as_str()));
     }
     refused.extend(crate::lower::untyped_subclass_diagnostics(app));
-    refused.extend(analyze_and_lower(app));
+    refused.extend(analyze_and_lower_with_target(app, target));
     refused
 }
