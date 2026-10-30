@@ -34,3 +34,11 @@ fn a_flash_param_rendered_as_text_is_borrowed() {
     assert!(!src.contains("(notice.map("), "`<%= notice %>` must not move the param:\n{src}");
 }
 
+#[test]
+fn a_flash_param_captured_by_a_collection_render_is_cloned() {
+    let src = emitted_articles_views();
+    assert!(
+        src.contains("for_each(|a| { io.push_str(&Articles::article(a.clone(), notice.clone(), alert.clone())); })"),
+        "the partial render inside the closure must clone the captured flash:\n{src}"
+    );
+}
