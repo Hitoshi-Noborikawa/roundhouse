@@ -1615,8 +1615,12 @@ module Db
       request_error = e
     ensure
       # Not left for the next statement to close: that may be the next request's, which would record this one's query.
-      ActiveSupport::Notifications.sql_close if sql_events?
       cleanup_error = nil
+      begin
+        ActiveSupport::Notifications.sql_close if sql_events?
+      rescue StandardError => e
+        cleanup_error = e
+      end
       # `Db.close` inside the lease drops `@pools` and closes `conn`.
       # Snapshot and rollback cleanup talk to SQLite, so skip them when
       # this pool is no longer the live one. The lease index still goes
