@@ -2766,11 +2766,13 @@ fn insert_all_bang_returning(arg: Option<&Expr>) -> Option<Vec<String>> {
 }
 
 /// True when `scope_chain` inlines `<recv>.insert_all(args)` /
-/// `insert_all!(args)` on a model, by the call's shape. The strict-target
+/// `insert_all!(args)`: `recv` names a model, as `const_model` reads it,
+/// and the call has the shape the inlining takes. The strict-target
 /// survey reports only the forms this declines, which reach the
 /// Ruby-family runtime's methods.
-pub fn inlines_insert_all(method: &str, args: &[Expr], has_block: bool) -> bool {
+pub fn inlines_insert_all(recv: &Expr, method: &str, args: &[Expr], has_block: bool, models: &HashSet<ClassId>) -> bool {
     !has_block
+        && const_model(recv, models).is_some()
         && match method {
             "insert_all" => args.len() == 1,
             "insert_all!" => (1..=2).contains(&args.len()) && insert_all_bang_returning(args.get(1)).is_some(),

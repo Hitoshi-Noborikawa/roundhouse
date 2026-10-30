@@ -214,3 +214,23 @@ fn inlined_insert_all_is_supported_on_strict_targets() {
         .emit(roundhouse::project::BuildTarget::Rust);
     assert!(!errors.iter().any(|e| e.contains("insert_all")), "{errors:#?}");
 }
+
+/// The lowering inlines only a call on a model constant it resolves: a
+/// receiverless call in the model's own class method, or a rooted
+/// constant, reaches the Ruby-family runtime and is reported.
+#[test]
+fn receiverless_and_rooted_inserts_are_unsupported_on_strict_targets() {
+    let (_emitted, errors) = keystore_app()
+        .edit(
+            "app/models/keystore.rb",
+            "  def self.put(key, value)\n",
+            "  def self.add(key, value)\n    insert!({key: key, value: value})\n    insert_all([{key: key, value: value}])\n    ::Keystore.insert_all([{key: key, value: value}])\n  end\n\n  def self.put(key, value)\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    let reported = |method: &str| {
+        let message = format!("`{method}` is the Ruby-family runtime's");
+        errors.iter().filter(|e| e.contains(&message)).count()
+    };
+    assert_eq!(reported("insert!"), 1, "{errors:#?}");
+    assert_eq!(reported("insert_all"), 2, "{errors:#?}");
+}
