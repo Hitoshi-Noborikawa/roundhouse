@@ -138,6 +138,9 @@ pub struct Analyzer {
     /// `app/helpers` modules, whose bodies run in a view and take
     /// ActionView's `t`.
     helper_modules: crate::det::HashSet<ClassId>,
+    /// Which `app/helpers` module answers each helper name in the view
+    /// (`App::helper_method_index`), for a helper body's bare calls.
+    helper_index: HashMap<Symbol, ClassId>,
     open_classes: open_classes::OpenClasses,
     /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
     /// carried across fixpoint rounds.
@@ -1282,6 +1285,7 @@ impl Analyzer {
             inquirers: inquiry::inquirer_methods(app),
             i18n: app.i18n.clone(),
             helper_modules: app.helper_method_index.values().cloned().collect(),
+            helper_index: helper_instance_index(app),
             open_classes: open_classes::OpenClasses::of(app),
             const_resolver,
             source_indexed: !app.sources.is_empty(),
@@ -1304,6 +1308,7 @@ impl Analyzer {
             .with_materialized_associations(&self.materialized_associations)
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n, &self.helper_modules)
+            .with_helper_index(&self.helper_index)
             .with_open_classes(&self.open_classes)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
@@ -8721,6 +8726,23 @@ fn is_abstract_body(body: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// `App::helper_method_index` without the names whose module defines them
+/// only as `def self.x`: ingest indexes every method of a helper module, and a
+/// helper body's bare call reaches the view's instance methods, never a
+/// module's singleton one.
+fn helper_instance_index(app: &App) -> HashMap<Symbol, ClassId> {
+    app.helper_method_index
+        .iter()
+        .filter(|(name, owner)| {
+            app.library_classes.iter().any(|lc| {
+                &lc.name == *owner
+                    && lc.methods.iter().any(|m| &m.name == *name && m.receiver == crate::dialect::MethodReceiver::Instance)
+            })
+        })
+        .map(|(name, owner)| (name.clone(), owner.clone()))
+        .collect()
 }
 
 fn effective_return_ty(body: &Expr) -> Option<Ty> {
