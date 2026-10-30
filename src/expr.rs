@@ -118,6 +118,10 @@ pub const RESOLVED_MIXIN: u64 = 1 << 22;
 /// can ask; `project::report_unsupported_bundled_constants` reports it elsewhere.
 pub const MODULE_QUERY: u64 = 1 << 23;
 
+/// A runtime Class/Module factory or implicit singleton-class access.
+/// The Ruby and JRuby targets retain these runtime class objects.
+pub const RUNTIME_CLASS_OBJECT: u64 = 1 << 31;
+
 /// The call an `alias new builtin` delegates to (`ingest::library_class::
 /// OBJECT_BUILTINS`): a method every Ruby object answers, which only the
 /// ruby family has; `project::report_builtin_aliases` refuses it elsewhere.
@@ -154,6 +158,13 @@ pub const SINGLETON_BODY: u64 = 1 << 28;
 /// `class << self` (Rubydex's `X::<X>::NAME`): the Ruby and JRuby trees
 /// read it as `X.singleton_class::NAME`, where it lives.
 pub const SINGLETON_CONSTANT_REF: u64 = 1 << 29;
+
+/// Analysis admitted this receiverless send as Kernel's `Rational(...)`,
+/// `Pathname(...)` or `URI(...)`: its own class, on its own side, defines
+/// no method of that name. Only the ruby family and spinel have the
+/// libraries, so `project::report_ruby_only_sends` refuses it elsewhere.
+/// The mark stays when lowering spells `Pathname(x)` as `Pathname.new(x)`.
+pub const KERNEL_CONVERSION: u64 = 1 << 30;
 
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {

@@ -48,7 +48,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     rails_cls.class_methods.insert(Symbol::from("root"), app_path.clone());
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
     register_stdlib_class(classes, "Rails::AppPath", &[], &[
-        ("join", app_path.clone()), ("+", app_path.clone()),
+        ("join", app_path.clone()), ("+", app_path.clone()), ("expand_path", app_path.clone()),
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("read", Ty::Str),
         ("readlines", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }), ("exist?", Ty::Bool),
     ]);
@@ -277,6 +277,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("new", pathname()), ("pwd", pathname()), ("getwd", pathname()),
     ], &[
         ("relative_path_from", pathname()), ("join", pathname()),
+        // `Pathname(a) + Pathname(b)`: a path join (`/` is its alias), in CRuby and spinel's package.
+        ("+", pathname()), ("/", pathname()),
         ("basename", pathname()), ("dirname", pathname()), ("expand_path", pathname()),
         ("parent", pathname()), ("realpath", pathname()),
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("extname", Ty::Str),
@@ -1441,6 +1443,15 @@ pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport::Cache::NullStore", "fetch"),
     ("ActiveSupport::Notifications", "subscribed"),
     ("ActiveJob::Continuable", "step"),
+    // rest-client: a verb given a block hands it the response and answers
+    // the block's value (a 4xx/5xx does not raise then).
+    ("RestClient", "get"),
+    ("RestClient", "post"),
+    ("RestClient", "put"),
+    ("RestClient", "patch"),
+    ("RestClient", "delete"),
+    ("RestClient", "head"),
+    ("RestClient", "options"),
 ];
 
 fn register_stdlib_class(

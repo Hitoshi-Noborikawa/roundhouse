@@ -225,6 +225,9 @@ pub struct ClassInfo {
     /// Catalog entries and source methods can have the same gradual
     /// return type, so a call-site refinement needs their provenance.
     pub source_class_methods: crate::det::HashSet<Symbol>,
+    /// Instance methods a model, library class or controller defines in
+    /// source, known before the first harvest registers their returns.
+    pub source_instance_methods: crate::det::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
     /// A source `new` that calls `super` still needs the inherited constructor.
@@ -419,6 +422,8 @@ pub struct BodyTyper<'a> {
     /// The app's translations; Rails' English when absent.
     i18n: Option<&'a crate::i18n::Catalog>,
     helper_modules: Option<&'a crate::det::HashSet<ClassId>>,
+    /// The `app/helpers` module that answers each helper name in the view.
+    helper_index: Option<&'a HashMap<Symbol, ClassId>>,
     open_classes: Option<&'a crate::analyze::open_classes::OpenClasses>,
     /// Parameter types for the lambda assignment currently being retyped
     /// from its `.call` sites. Empty during an ordinary walk.
@@ -563,6 +568,7 @@ impl<'a> BodyTyper<'a> {
             inquirers: None,
             i18n: None,
             helper_modules: None,
+            helper_index: None,
             open_classes: None,
             lambda_seeds: std::cell::RefCell::new(None),
             block_class_param: std::cell::RefCell::new(None),
@@ -694,6 +700,11 @@ impl<'a> BodyTyper<'a> {
         self
     }
 
+    pub(crate) fn with_helper_index(mut self, index: &'a HashMap<Symbol, ClassId>) -> Self {
+        self.helper_index = Some(index);
+        self
+    }
+
     /// Share the analyzer's immutable source index across typing passes.
     pub(crate) fn with_const_resolver(mut self, resolver: std::sync::Arc<ConstResolver>) -> Self {
         self.const_resolver = Some(resolver);
@@ -759,7 +770,16 @@ impl<'a> BodyTyper<'a> {
         };
         expr.ty = Some(ty.clone());
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
-        if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
+        if self.is_class_object(expr, ctx) {
+            expr.decisions |= crate::expr::CLASS_OBJECT_VALUE;
+            let runtime_class = matches!(&*expr.node, ExprNode::Send { recv, method, .. } if method.as_str() == "singleton_class"
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)))
+                || (matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "new")
+                    && !self.class_factories.is_some_and(|factories| factories.contains_key(&expr.span)));
+            if runtime_class {
+                expr.decisions |= crate::expr::RUNTIME_CLASS_OBJECT;
+            }
+        }
         diagnostic::detect_diagnostic(expr);
         ty
     }
@@ -959,6 +979,40 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
+    fn class_factory_receiver(&self, receiver: &Expr, method: &Symbol, ctx: &Ctx) -> bool {
+        if method.as_str() != "new" { return false; }
+        let ExprNode::Const { path } = &*receiver.node else { return false };
+        let names: Vec<_> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+        let [name @ ("Class" | "Module")] = names.as_slice() else { return false };
+        self.is_class_object(receiver, ctx)
+            && self.const_resolver.as_ref().is_none_or(|r| r.is_runtime_class(receiver.span, path, name))
+            && !self.owns_operator(receiver.ty.as_ref(), method, true)
+            && !self.owns_operator(receiver.ty.as_ref(), &Symbol::from("initialize"), false)
+    }
+
+    fn has_singleton_class(&self, ty: Option<&Ty>, class_object: bool, method: &Symbol) -> bool {
+        let instance = matches!(ty, Some(Ty::Class { id, .. })
+            if self.classes().contains_key(id)
+                && !matches!(id.0.as_str(), "Integer" | "Float" | "Symbol" | "Rational" | "Complex" | "NilClass" | "TrueClass" | "FalseClass")
+                && self.has_kernel(id));
+        (class_object || instance) && !self.owns_operator(ty, method, class_object)
+    }
+
+    // BasicObject instances do not answer Kernel#singleton_class unless
+    // their ancestry includes Kernel. An unknown parent proves neither.
+    fn has_kernel(&self, id: &ClassId) -> bool {
+        let mut current = Some(id);
+        for _ in 0..32 {
+            let Some(id) = current else { return true };
+            if id.0.as_str() == "Object" { return true; }
+            let Some(class) = self.classes.get(id) else { return false };
+            if class.includes.iter().any(|id| id.0.as_str() == "Kernel") { return true; }
+            if id.0.as_str() == "BasicObject" { return false; }
+            current = class.parent.as_ref();
+        }
+        false
+    }
+
     /// Identity evidence for Module protocol, independent of nominal instance type.
     fn is_class_object(&self, expr: &Expr, ctx: &Ctx) -> bool {
         if self.class_factories.is_some_and(|factories| factories.contains_key(&expr.span)) {
@@ -1002,22 +1056,28 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Send { recv: Some(r), method, args, block: None, .. }
                 if method.as_str() == "singleton_class" && args.is_empty() =>
             {
-                let class_object = self.is_class_object(r, ctx);
-                let instance = matches!(r.ty.as_ref(), Some(Ty::Class { id, .. })
-                    if self.classes().contains_key(id)
-                        && !matches!(id.0.as_str(), "Integer" | "Float" | "Symbol" | "Rational" | "Complex" | "NilClass" | "TrueClass" | "FalseClass"));
-                (class_object || instance) && !self.owns_operator(r.ty.as_ref(), method, class_object)
+                self.has_singleton_class(r.ty.as_ref(), self.is_class_object(r, ctx), method)
+            }
+            ExprNode::Send { recv: None, method, args, block: None, .. }
+                if method.as_str() == "singleton_class" && args.is_empty() =>
+            {
+                self.has_singleton_class(ctx.self_ty.as_ref(), ctx.class_side, method)
             }
             // `Module.new` / `Class.new(Parent)` answer a fresh module or
             // class, unless the app overrides `new` on them.
-            ExprNode::Send { recv: Some(r), method, .. }
-                if method.as_str() == "new"
-                    && matches!(&*r.node, ExprNode::Const { path } if matches!(path.as_slice(), [n] if matches!(n.as_str(), "Module" | "Class")))
-                    && self.is_class_object(r, ctx) =>
-            {
-                !self.owns_operator(r.ty.as_ref(), method, true)
-            }
+            ExprNode::Send { recv: Some(r), method, .. } => self.class_factory_receiver(r, method, ctx),
             _ => false,
+        }
+    }
+
+    fn each_branch_is_class_object(&self, expr: &Expr, ctx: &Ctx) -> bool {
+        match &*expr.node {
+            ExprNode::If { then_branch, else_branch, .. } => {
+                self.each_branch_is_class_object(then_branch, ctx) && self.each_branch_is_class_object(else_branch, ctx)
+            }
+            // A local that already answers Module queries passes that on, not an identity.
+            ExprNode::Var { name, .. } if ctx.query_class_objects.contains(name) => true,
+            _ => self.is_class_object(expr, ctx),
         }
     }
 
@@ -1748,8 +1808,9 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
                 // Not an unknown Kernel call: `lambda { |x| … }` is the stabby `->(x) { … }`, whose value is the block (svg-graph's `DataPoint::DEFAULT_SHAPE`).
+                // So is `proc { |x| … }`, whose value calls the same way.
                 if recv.is_none()
-                    && method.as_str() == "lambda"
+                    && matches!(method.as_str(), "lambda" | "proc")
                     && args.is_empty()
                     && !self.owns_operator(ctx.self_ty.as_ref(), method, ctx.class_side)
                     && let Some(b) = block.as_mut().filter(|b| matches!(&*b.node, ExprNode::Lambda { .. }))
@@ -1782,6 +1843,10 @@ impl<'a> BodyTyper<'a> {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
                 }
                 expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
+                // Not on a receiver's call: lowering's `Pathname.new(x)` keeps the mark analysis gave `Pathname(x)`.
+                if recv.is_none() {
+                    expr.decisions &= !crate::expr::KERNEL_CONVERSION;
+                }
                 if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
                     // Only admitted declarations establish a Data class identity.
                     expr.decisions |= crate::expr::RESOLVED_DATA_FACTORY;
@@ -1954,6 +2019,18 @@ impl<'a> BodyTyper<'a> {
                         detail: format!("{owner}.new lacks a shared runtime constructor implementation"),
                     }));
                 }
+                // A self known only as some class or module (a `Class.new`
+                // block, a singleton class): what its `new` builds has no name.
+                if ctx.class_side
+                    && matches!(method.as_str(), "new" | "allocate")
+                    && recv.as_ref().map_or(true, |r| matches!(&*r.node, ExprNode::SelfRef))
+                    && matches!(&recv_ty, Some(Ty::Class { id, args: targs }) if targs.is_empty() && matches!(id.0.as_str(), "Class" | "Module"))
+                {
+                    for a in args.iter_mut() {
+                        self.analyze_expr(a, ctx);
+                    }
+                    return Ty::Untyped;
+                }
                 // `new` on the implicit or explicit `self` of a class-side
                 // method builds an instance of the class that RECEIVED the
                 // call: `CurrencyDb.load` runs `YamlDb.load` with `self ==
@@ -2018,7 +2095,11 @@ impl<'a> BodyTyper<'a> {
                         class_object_receiver,
                         b,
                     );
-                    if matches!(method.as_str(), "instance_eval" | "instance_exec" | "class_eval" | "class_exec" | "module_eval" | "module_exec") {
+                    if matches!(method.as_str(), "instance_eval" | "instance_exec" | "class_eval" | "class_exec" | "module_eval" | "module_exec")
+                        && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver)
+                        && !(matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "Class" | "Module"))
+                            && self.owns_operator(recv_ty.as_ref(), method, false))
+                    {
                         if let Some(receiver) = recv.as_ref() {
                             block_ctx.self_ty = recv_ty.clone();
                             block_ctx.class_side = self.is_class_object(receiver, ctx);
@@ -2028,11 +2109,24 @@ impl<'a> BodyTyper<'a> {
                     }
                     *self.block_selector_param.borrow_mut() = self.iterated_selectors(recv.as_ref(), method, b);
                     // Not any `new` with a block: only `Class.new`/`Module.new` makes the block's self a class it is building
-                    if method.as_str() == "new"
-                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path }
-                            if matches!(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().as_slice(), ["Class"] | ["Module"])))
+                    if recv.as_ref().is_some_and(|r| self.class_factory_receiver(r, method, ctx))
                     {
+                        expr.decisions |= crate::expr::RUNTIME_CLASS_OBJECT;
+                        block_ctx.self_ty = recv_ty.clone();
+                        block_ctx.class_side = true;
+                        block_ctx.instance_body = false;
                         block_ctx.building_self = true;
+                    }
+                    // A method installed on that fresh class runs on its
+                    // instances, not on the class that evaluated the factory.
+                    if ctx.building_self && class_object_receiver && method.as_str() == "define_method"
+                        && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "Class" | "Module"))
+                        && !self.owns_operator(recv_ty.as_ref(), method, true)
+                    {
+                        block_ctx.self_ty = Some(Ty::Untyped);
+                        block_ctx.class_side = false;
+                        block_ctx.instance_body = true;
+                        block_ctx.building_self = false;
                     }
                     let method_ref_ty = self.analyze_expr(b, &block_ctx);
                     self.block_selector_param.borrow_mut().take();
@@ -2293,6 +2387,22 @@ impl<'a> BodyTyper<'a> {
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // An `app/helpers` method runs in the view, so a bare call that finds nothing on the module is the
+                // view's: the helper module that answers the name (`helpers :all`; the module itself while its own
+                // definition is untyped), else ActionView's `link_to`/`tag`/`image_tag`.
+                if recv.is_none()
+                    && !ctx.class_side
+                    && matches!(dispatched, Ty::Var { .. })
+                    && let Some(Ty::Class { id: helper, .. }) = ctx.self_ty.as_ref()
+                    && self.helper_modules.is_some_and(|h| h.contains(helper))
+                {
+                    let owner = self.helper_index.and_then(|index| index.get(method)).cloned();
+                    let view = owner.unwrap_or_else(|| ClassId(Symbol::from("ActionView::Base")));
+                    let alt = self.dispatch_on(Some(&Ty::Class { id: view, args: vec![].into() }), method, block_ret.as_ref(), args, true);
+                    if !matches!(alt, Ty::Var { .. }) {
+                        dispatched = alt;
+                    }
+                }
                 // Not a dispatch miss: a class that defines methods under computed names answers what its own code defines when it runs.
                 if matches!(dispatched, Ty::Var { .. })
                     && let Some(Ty::Class { id, .. }) = recv_ty.as_ref()
@@ -2382,6 +2492,26 @@ impl<'a> BodyTyper<'a> {
                     && !self.app_defines(ctx.self_ty.as_ref(), method)
                 {
                     return if method.as_str() == "Integer" { Ty::Int } else { Ty::Float };
+                }
+                // Kernel's other conversions, never nil under the same rule. `Rational(...)` and
+                // `URI(str)` stay gradual, like `to_r` and `URI.parse`: the registry models neither
+                // result. Only a String makes `Pathname(path)` the `Pathname.new(path)` lowering
+                // writes: given a Pathname, Kernel's answers that same object, frozen or not.
+                // Only a method on the side the call dispatches to shadows Kernel's: a class
+                // body's call does not reach an included module's instance method.
+                if recv.is_none() && block.is_none()
+                    && matches!((method.as_str(), args.len()), ("Pathname" | "URI", 1) | ("Rational", 1 | 2))
+                    && !args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { .. }))
+                    && (method.as_str() != "Pathname" || matches!(args[0].ty, Some(Ty::Str)))
+                    && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body)
+                    && (matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                        || self.app_defines_on_side(ctx.self_ty.as_ref(), method, !ctx.instance_body))
+                {
+                    expr.decisions |= crate::expr::KERNEL_CONVERSION;
+                    return match method.as_str() {
+                        "Pathname" => Ty::Class { id: ClassId(Symbol::from("Pathname")), args: vec![].into() },
+                        _ => Ty::Untyped,
+                    };
                 }
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
@@ -2530,7 +2660,9 @@ impl<'a> BodyTyper<'a> {
                     return dispatched;
                 }
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
-                    && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
+                    && (recv.is_some() || (ctx.self_ty.is_some() && (send::is_module_protocol(method)
+                        || (method.as_str() == "singleton_class"
+                            && self.has_singleton_class(ctx.self_ty.as_ref(), ctx.class_side, method)))))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let class_object = class_object_receiver
                         || (send::is_module_query(method) && recv.as_ref().is_some_and(|r| self.answers_module_queries(r, recv_ty.as_ref(), ctx)));
@@ -2798,6 +2930,8 @@ impl<'a> BodyTyper<'a> {
                         _ => false,
                     };
                     let tail = i + 1 == exprs.len();
+                    // What the statement was typed against, for the retype below.
+                    let entry_ctx = (!nil_seed.is_empty()).then(|| local_ctx.clone());
                     {
                         let e = &mut exprs[i];
                         if !tail {
@@ -2822,12 +2956,18 @@ impl<'a> BodyTyper<'a> {
                         }
                         if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
                             let proven = self.is_class_object(value, &local_ctx);
+                            let query = !proven && self.each_branch_is_class_object(value, &local_ctx);
                             let live = self.is_live_class(value, &local_ctx);
                             forget_class_object_writes(value, &mut local_ctx);
                             local_ctx.class_objects.remove(name);
                             local_ctx.query_class_objects.remove(name);
                             local_ctx.live_class_locals.remove(name);
                             if proven { local_ctx.class_objects.insert(name.clone()); }
+                            // `flag ? A : B` has no single identity to write
+                            // through, but either class answers a Module query.
+                            else if query {
+                                local_ctx.query_class_objects.insert(name.clone());
+                            }
                             self.prove_selector(name, value, &mut local_ctx);
                             if live { local_ctx.live_class_locals.insert(name.clone()); }
                             // Before the binding insert below: the lambda body
@@ -3185,6 +3325,7 @@ impl<'a> BodyTyper<'a> {
                     if !nil_seed.is_empty() {
                         let mut writes: Vec<(Symbol, Ty)> = Vec::new();
                         collect_local_assignment_tys(&exprs[i], &mut writes);
+                        let mut widened: Vec<(Symbol, Ty)> = Vec::new();
                         for (name, ty) in writes {
                             let Some((si, acc)) = nil_seed.get(&name) else {
                                 continue;
@@ -3201,7 +3342,31 @@ impl<'a> BodyTyper<'a> {
                             if let ExprNode::Assign { value, .. } = &mut *seed.node {
                                 value.ty = Some(merged.clone());
                             }
-                            seed.ty = Some(merged);
+                            seed.ty = Some(merged.clone());
+                            widened.push((name.clone(), merged));
+                        }
+                        // Not left as first typed: a read earlier in the same loop body (`if prev … prev = x`) saw the bare nil seed, and a body typed only once (a view) keeps that.
+                        // Not against the context after the statement either: its other writes would reach reads that precede them.
+                        if !widened.is_empty() && si_is_not(i, &nil_seed) {
+                            if let Some(mut retype) = entry_ctx {
+                                for (name, ty) in widened {
+                                    retype.local_bindings.insert(name, ty);
+                                }
+                                let first = match &*exprs[i].node {
+                                    ExprNode::Assign { target: LValue::Var { .. }, value } => value.ty.clone(),
+                                    _ => None,
+                                };
+                                last = self.analyze_expr(&mut exprs[i], &retype);
+                                // Not the binding the first typing exported: `values = xs.map { … prev … }` now answers the widened element.
+                                // Not over a refinement either: an accumulator scan may already have narrowed the binding past the first typing.
+                                if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*exprs[i].node {
+                                    if let Some(ty) = value.ty.clone().filter(|t| !t.is_open()) {
+                                        if !nil_seed.contains_key(name) && local_ctx.local_bindings.get(name) == first.as_ref() {
+                                            local_ctx.local_bindings.insert(name.clone(), ty);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     let e = &exprs[i];
@@ -3983,8 +4148,22 @@ fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
 /// good type. `Untyped` is deliberately NOT skipped: it is an
 /// author-signed "no constraint here", and a hash value flowing into
 /// the accumulator must widen the seed rather than leave it narrow.
+/// Whether statement `i` is not itself one of the nil seeds (only a later
+/// statement's writes can have been typed against the seed).
+fn si_is_not(i: usize, nil_seed: &HashMap<Symbol, (usize, Ty)>) -> bool {
+    nil_seed.values().all(|(si, _)| *si != i)
+}
+
 fn collect_local_assignment_tys(expr: &Expr, out: &mut Vec<(Symbol, Ty)>) {
     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*expr.node {
+        if let Some(t) = value.ty.clone() {
+            if !t.is_open() {
+                out.push((name.clone(), t));
+            }
+        }
+    }
+    // `x ||= v` writes v where x was nil, the seed's own case (lobsters' `top_comment_depth ||= comment.depth`).
+    if let ExprNode::OpAssign { target: LValue::Var { name, .. }, op: crate::expr::OpAssignOp::OrOr, value } = &*expr.node {
         if let Some(t) = value.ty.clone() {
             if !t.is_open() {
                 out.push((name.clone(), t));

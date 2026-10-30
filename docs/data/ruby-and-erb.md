@@ -60,6 +60,13 @@ records each gap and substitutes or skips instead of aborting, so one
 unsupported construct doesn't hide every gap behind it. See
 `src/ingest/survey.rs` (`unwrap_or_record`).
 
+A support file (`lib/`, a gem's source) whose class ingest fails is
+left out and the walk goes on, so one gap does not abort the app. It is
+reported, not dropped in silence: `App::ingest_drops` holds it, and
+analysis reports `error[ingest_unsupported]` at the construct that
+failed it (`ingest::error_site` notes the innermost statement as the
+error passes up through the walk).
+
 ### Surface preservation
 
 Expression-level round-trip (ingest → emit-ruby → ingest ≡ identity,
@@ -106,7 +113,11 @@ methods, and report each such statement as an error
 applies to such a method only when every branch defines it and the
 conditional ends in `else`. A model body's conditional definitions, a
 visibility marker inside a branch, and any other statement in one stay
-refused.
+refused, each named at the statement that keeps it refused, as is a
+`class` / `module` declared in one inside `class << self`. A class
+declared in a branch and also, unconditionally, in another file is an
+error at the declaration: the merged class would load only with the
+branch.
 
 ### Body statements only Ruby answers
 
@@ -139,6 +150,50 @@ module, or a class whose superclasses are the app's own up to a core
 class. Spinel and the other targets keep the constants on the class.
 They drop the statements and report each one by name, as they report
 any other dropped class-body call.
+
+### Class attributes in library classes and included hooks
+
+ActiveSupport's `class_attribute` and its `cattr_*` / `mattr_*` macros
+define methods from names computed at run time, so the emitted runtime
+does not define them. A library class's own `class_attribute :live`, and
+one an app module's `self.included(base)` hook declares on `base`
+(`base.class_attribute :ssl_strict`, `base.cattr_accessor :pem_file`),
+become plain defs on the declaring class or on each app class that
+includes the module (`ingest::hook_class_attribute`). A class attribute
+reads the class's own value once written, else its superclass's. A
+class variable accessor reads and writes `@@name`. The declaration
+becomes its seed. A hook's `if base.respond_to?(:class_attribute)`
+whose branch holds only declarations is that branch, since natively it
+is true.
+
+The Ruby trees write an `include` whose hook calls those writers after
+the defs it needs (`hooked_include_position`), including in a body
+written in source order. A hook with a declaration this cannot read (a
+computed name or flag, a block, an unknown option) keeps its text and
+still fails at the include. So does a model's include of such a module.
+
+A model's own `class_attribute`, and one a Concern's `included do`
+declares, are the same defs on the model; an app class below it reads
+the model's value until it writes its own. A Concern's `included` block
+runs in the model for each of the Concern's own Concern includes first,
+as `append_features` runs them, wherever the Concern lives (app, `lib/`
+or a gem's source). A model body's call of its own class method
+(`custom_strategy :title, with: proc { … }`, written there or spliced
+from a Concern's block) runs as the class loads, after the Concern's
+class methods it may call.
+
+### An include written in another body
+
+`Other.include(M)`, where `Other` and `M` are the app's own and Ruby
+resolves both from the body the call is written in, is an include of
+`Other` (`ingest::external_include`): Ruby gives `Other`'s existing
+includers a module it includes later, so the ancestors are the same.
+activemerchant's `module Billing` ends `Compatibility::Model.include
+Rails::Model`, and a namespace module holding such a call is declared
+for it. The same call inside a railtie's `initializer`,
+`config.to_prepare` or `ActiveSupport.on_load` block makes `M` a
+dependency of `Other`, which is what a Concern does with it, and the
+block stays where it is.
 
 ## ERB → Ruby → IR
 

@@ -1799,18 +1799,39 @@ come from the job's `perform_later` call sites, and
   envelope (`runtime/spinel/sidekiq_push.rb`, `sidekiq_redis.rb`):
   `SADD queues` and `LPUSH queue:<name>`, or `ZADD schedule` for a
   literal `set(wait:)` or `set(wait_until:)` that lands in the future.
-  A pushed job is run by a Ruby Sidekiq process; there is no in-binary
-  worker yet. Redis comes
-  from `Sidekiq.configure_client`'s `url:` and `password:`, then
-  `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
-  process, with 1-second connect and read timeouts, and a dropped
-  connection is retried once. A non-literal `set(...)` is an error
+  Redis comes from `Sidekiq.configure_client`'s `url:` and `password:`,
+  then `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
+  process, with 1-second connect and read timeouts, and a refused or
+  dropped connection, the first one included, is retried once. A job
+  held for COMMIT is dropped when an `after_commit` callback raises, as
+  Rails drops it, and the caller sees the callback's error. A non-literal `set(...)` is an error
   under `:sidekiq`, and `set(priority:)` is dropped with a warning.
   This holds on ruby, jruby and spinel; the other targets warn
   (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
   job carries `"retry":true`, so Sidekiq retries it with its own
   defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
   adapters are still missing.
+- **The worker role has no retries.** The same build runs the pushed
+  jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
+  a Sidekiq 8.1 server process with BasicFetch
+  (`runtime/spinel/sidekiq/sidekiq_worker.rb`); a Ruby Sidekiq process
+  on the Rails app can run them too. `-c`, `-q` and `-t` win over
+  config/sidekiq.yml's literal `:concurrency:`, `:queues:` and
+  `:timeout:` (its `production:` section merged over the top level),
+  which win over `RAILS_MAX_THREADS` and the defaults (5, `default`,
+  25). TSTP quiets it, and TERM or INT waits up to the timeout and
+  pushes unfinished jobs back. A job that raises goes straight to the
+  dead set with Sidekiq's error fields, so the retry set, the scheduler
+  that moves `schedule` and `retry` to their queues, `retry_on`, and the
+  heartbeat Sidekiq's Web UI reads are still missing. Under
+  config/cable.yml's `adapter: redis`, every process's broadcasts go
+  out as `PUBLISH <channel_prefix>:<stream>`, as Action Cable's Redis
+  adapter sends them, and each server process delivers what it
+  receives through one `PSUBSCRIBE <channel_prefix>:*` connection
+  (`runtime/spinel/sidekiq/redis_cable.rb`). On any other cable
+  adapter a job's broadcasts in the worker reach no browser, with a
+  warning. Broadcasts Rails would enqueue (`broadcast_*_later`, and
+  `broadcasts_to`'s create and update) are rendered inline instead.
 - **Some argument types.** A job whose call sites pass a Hash, a Date,
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
@@ -3003,7 +3024,10 @@ Three gaps remain, all on spinel's side:
   alone (`_adapter_touch`), which is what keeps campfire's
   trigger-maintained `rooms.messages_count` correct when a message
   touches its room. A `save`/`update` of a record loaded before a
-  trigger moved one of its columns still writes the stale value back.
+  trigger moved one of its columns still writes the stale value back. The
+  same goes for two jobs the Sidekiq worker runs at once on one
+  record: the later `save` writes back every column it loaded, so the
+  earlier job's change is lost where Rails would keep it.
 
 ### `HashWithIndifferentAccess` is a String-keyed Hash; a call converts its keys at the site
 
@@ -3296,21 +3320,61 @@ Rails with the gem installed and no `SENTRY_DSN` also transmits
 nothing, so the *delivery* half of this is not a divergence for an
 unconfigured deployment; the lost detail is.
 
-### rack-mini-profiler authorizes a request, and no profiler runs
+### rack-mini-profiler: the panel and request time on Spinel, nothing on CRuby
 
-`Rack::MiniProfiler.authorize_request`, `deauthorize_request` and
-`request_authorized?` are the gem's own three bodies, a flag on
-`Thread.current`, in `runtime/ruby/gem_facades.rb` on the Spinel tree;
-the CRuby tree loads the real gem. lobsters authorizes every moderator's
-request, and without the constant each of their pages was a 500.
+On the Spinel tree the gem is a package, `runtime/gems/rack_mini_profiler/`
+(registered by `src/gems/rack_mini_profiler.rs`, shipped when
+`Gemfile.lock` pins the gem). It ports the gem 4.0.0's middleware over
+the framework's gem-agnostic request hooks (`runtime/spinel/request_hooks.rb`,
+run by `Main.dispatch` outside everything else, where the Railtie inserts
+the middleware) and vendors the gem's `includes.js`, `includes.css` and
+`vendor.js`. Its Railtie's production setup applies (`:allow_authorized`,
+the file store under `tmp/miniprofiler`), and the app's literal
+`Rack::MiniProfiler.config.<x> = …` lines in `config/initializers/` are
+replayed after it loads. Compared on the wire against the real gem: the
+injected `<script>`, `X-MiniProfiler-Ids`, the `__profilin` cookie (its
+tokens, `dp`, `bt`), `/mini-profiler-resources/results` (JSON and the
+share page, client timings included), the asset routes, `?pp=help` and
+the disabled-tool answers.
 
-**The middleware is not on either tree.** Nothing times the request,
-records its SQL, injects the panel into the page or serves
-`/mini-profiler-resources`. An authorized page is the page Rails renders
-minus the profiler's `<script>`, and the `__profilin` cookie is never
-set. The flame graph and memory views need CRuby internals and have no
-Spinel counterpart; request, SQL and render timing could be built on
-the runtime's own call sites.
+What differs:
+
+- **Only the request is timed.** SQL and render timings are empty lists;
+  they are the next stages, over the same hooks.
+- **The tools that read CRuby's heap or stack are not there.** The
+  Railtie turns on `enable_advanced_debugging_tools` in development; this
+  tree keeps it off, so `profile-gc`, `profile-memory`, `env` and
+  `analyze-memory` answer the gem's "disabled" message in every
+  environment. `flamegraph` answers the gem's "install stackprof" message,
+  and `trace-exceptions` is not recognized (it needs TracePoint).
+- **Only the three files the panel loads are served** from
+  `/mini-profiler-resources/`; the gem's other `html/` files (speedscope,
+  the templates) are a 404.
+- **The user key is empty.** The gem keys unviewed results by
+  `Rack::Request#ip`, and the Spinel server does not record the peer
+  address (`request.remote_ip` is empty on this tree generally), so every
+  client shares one list.
+- **A response the gem sends without a Content-Type** (the results 404)
+  gets the server's `text/html; charset=utf-8`.
+- **The CSP nonce attribute is empty**, as on the CRuby tree; Rails fills
+  it when the layout generated one.
+- **The share page escapes what the gem writes raw.** Its `<title>` is
+  HTML-escaped and the page JSON in its `<script>` is `json_escape`d
+  (`<`, `>`, `&` as `\u003c` …): the Spinel server accepts a raw `<` in
+  the request line, which Puma refuses, so request data could otherwise
+  close the script. The browser reads the same values; the bytes differ
+  wherever the data holds one of those characters.
+- Only literal initializer settings are replayed, and only those the
+  package's `Config` has a writer for (`config_setters` in
+  `src/gems/rack_mini_profiler.rs`). Any other literal setting is an
+  `unsupported (spinel)` error at emit and stays an unconsumed-initializer
+  warning; a computed one is only the warning.
+- A Gemfile line with `require: false` keeps the package out, as Bundler
+  would keep the gem's Railtie from loading.
+
+**The middleware is not on the CRuby tree.** It loads the real gem for
+the `authorize_request` gate only, so an authorized page there renders
+without the panel.
 
 ### `ActionText::ContentHelper.allowed_attributes` answers the list, not `nil`
 

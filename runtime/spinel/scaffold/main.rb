@@ -303,7 +303,7 @@ module Main
 
   # Tep::Server callback. Routes, runs the controller, copies
   # status/body/location back, and persists per-request flash via
-  # cookies (flash_notice / flash_alert) so a `redirect_to … notice:`
+  # cookies (one flash_<key> each) so a `redirect_to … notice:`
   # shows once on the redirect target and is then swept — matching the
   # cookie-backed Rack path in ruby_overlay/main.rb. Session is still a
   # fresh per-request object (not yet cookie-persisted), same as Rack.
@@ -358,7 +358,18 @@ module Main
   # included. They sit behind ActionDispatch::Static, so a file sent
   # from static/ or public/ carries neither, and the /cable upgrade is
   # left as Action Cable answers it.
+  #
+  # A gem's middleware (runtime/request_hooks.rb) sits outside all of it,
+  # where its Railtie inserts it: at position 0.
   def self.dispatch(req, res)
+    unless RequestHooks.request_begin(req, res)
+      Main.dispatch_app(req, res)
+    end
+    RequestHooks.request_end(req, res)
+    nil
+  end
+
+  def self.dispatch_app(req, res)
     started = ActionDispatch::Runtime.clock_time
     Main.dispatch_request(req, res)
     return nil if res.file_path.length > 0 || res.upgrading_ws
@@ -604,7 +615,7 @@ module Main
     # resolves. Same shared ActionController::CookieJar the CRuby overlay uses.
     controller.cookies = ActionController::CookieJar.new(req.cookies)
     # Inbound flash: each message rides its own SIGNED cookie
-    # (flash_notice / flash_alert; runtime/signed_cookies.rb) — one that
+    # (flash_<key>; runtime/signed_cookies.rb) — one that
     # does not verify reads as no message, so a client cannot make the
     # next page show text of its choosing. Load
     # through the constructor (NOT flash[:k]=) so to_persisted's show-once
@@ -612,10 +623,13 @@ module Main
     # `fetch(name, "")` avoids a missing-key raise; a flash message is
     # never empty, so non-empty == present.
     inbound_flash = Tep.str_hash
-    cin = ActionDispatch::SignedCookie.verified(req.cookies.fetch("flash_notice", ""), "flash_notice")
-    inbound_flash["notice"] = cin if cin.length > 0
-    ain = ActionDispatch::SignedCookie.verified(req.cookies.fetch("flash_alert", ""), "flash_alert")
-    inbound_flash["alert"] = ain if ain.length > 0
+    # Every `flash_<key>` cookie, not only notice/alert: lobsters' layout shows `flash[:error]` / `[:success]`.
+    req.cookies.each do |cname, cvalue|
+      if cname.start_with?("flash_")
+        fin = ActionDispatch::SignedCookie.verified(cvalue, cname)
+        inbound_flash[cname[6, cname.length - 6]] = fin if fin.length > 0
+      end
+    end
     controller.flash = ActionDispatch::Flash.new(inbound_flash)
     controller.request_format = request_format
     controller.accepts_any_format = Main.accepts_any_format?(req.req_headers.fetch("accept", ""))
@@ -711,21 +725,20 @@ module Main
     end
 
     # Outbound flash: persist messages set THIS request for the NEXT one.
-    # `to_persisted` returns only notice/alert that differ from the
-    # carried-in value (show-once); clear any inbound cookie that wasn't
-    # re-persisted so a consumed flash doesn't stick on the next nav.
+    # `to_persisted` returns only the entries this request set (show-once);
+    # clear any inbound cookie that wasn't re-persisted so a consumed flash
+    # doesn't stick on the next nav.
     persisted = controller.flash.to_persisted
-    pn = persisted.fetch("notice", "")
-    if pn.length > 0
-      Main.set_flash_cookie(res, "flash_notice", ActionDispatch::SignedCookie.sign(pn, "flash_notice"), request_obj.ssl?)
-    elsif req.cookies.fetch("flash_notice", "").length > 0
-      Main.clear_flash_cookie(res, "flash_notice")
+    persisted.each do |kind, pv|
+      if pv.length > 0
+        fname = "flash_" + kind
+        Main.set_flash_cookie(res, fname, ActionDispatch::SignedCookie.sign(pv, fname), request_obj.ssl?)
+      end
     end
-    pa = persisted.fetch("alert", "")
-    if pa.length > 0
-      Main.set_flash_cookie(res, "flash_alert", ActionDispatch::SignedCookie.sign(pa, "flash_alert"), request_obj.ssl?)
-    elsif req.cookies.fetch("flash_alert", "").length > 0
-      Main.clear_flash_cookie(res, "flash_alert")
+    req.cookies.each do |cname, cvalue|
+      if cname.start_with?("flash_") && cvalue.length > 0 && persisted.fetch(cname[6, cname.length - 6], "").length == 0
+        Main.clear_flash_cookie(res, cname)
+      end
     end
 
     # Outbound cookies: serialize whatever the action recorded via

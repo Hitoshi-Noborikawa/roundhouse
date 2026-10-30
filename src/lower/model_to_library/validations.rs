@@ -67,6 +67,10 @@ pub(super) fn push_validate_method(
                 // check rejected every record, attached or not. Rails asks
                 // the proxy `blank?`: nothing attached, staged or saved.
                 let attachment = attachment_kind(model, &v.attribute);
+                // A `has_many` the same: Rails asks the collection `blank?` (lobsters' ModMail `validates :recipients`), whose reader holds what the writer assigned.
+                let is_collection = model.associations().any(|a| {
+                    matches!(a, Association::HasMany { name, .. } if name == &v.attribute)
+                });
                 for rule in &v.rules {
                     let mut produced = if is_assoc && matches!(rule, ValidationRule::Presence) {
                         let reader = Expr::new(
@@ -81,6 +85,21 @@ pub(super) fn push_validate_method(
                         );
                         vec![if_with_nil_else(
                             send(reader, "nil?", vec![]),
+                            errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
+                        )]
+                    } else if is_collection && matches!(rule, ValidationRule::Presence) {
+                        let reader = Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Send {
+                                recv: None,
+                                method: v.attribute.clone(),
+                                args: vec![],
+                                block: None,
+                                parenthesized: false,
+                            },
+                        );
+                        vec![if_with_nil_else(
+                            send(reader, "empty?", vec![]),
                             errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
                         )]
                     } else if let (Some(kind), ValidationRule::Presence) = (attachment, rule) {

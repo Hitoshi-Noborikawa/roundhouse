@@ -332,6 +332,8 @@ require_relative "runtime/action_controller_fragment_caching"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.
 require_relative "runtime/action_controller_head"
+# Rails' FlashHash keeps any key; the shared Flash keeps notice/alert, which every target can type.
+require_relative "runtime/flash_any_key"
 # Rails 8.1.4 `send_data(filename:)`: the Content-Disposition escaping
 # works over UTF-8 bytes, so it is a Ruby-family reopen as well.
 require_relative "runtime/action_controller_send_data"

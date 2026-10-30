@@ -97,6 +97,7 @@ SPINEL_TESTS = [
     "spinel_transaction_connection",
     "routes_segment_pattern_spinel",
     "open_telemetry_stub_spinel",
+    "spinel_mini_profiler",
     "around_block_filter_spinel",
     "after_initialize_bare_new_spinel",
     "find_or_create_bang_records",
@@ -109,6 +110,7 @@ SPINEL_TESTS = [
     "jbuilder_extract_attributes_spinel",
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
+    "app_reopens_runtime_class",
     "filter_block_params_spinel",
     "sidekiq_push",
     "sidekiq_worker",
@@ -118,6 +120,8 @@ SPINEL_TESTS = [
     "typed_writer_cast_spinel",
     "pundit_source_spinel",
     "row_from_raw_hash_spinel",
+    "helper_method_instance_state_spinel",
+    "render_relation_chain",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.
@@ -269,6 +273,13 @@ NET_HTTP_INPUTS = {
     "runtime/spinel/http_stub.rbs",
     "runtime/spinel/tcp_socket_stub.rb",
     "runtime/spinel/tcp_socket_stub.rbs",
+}
+# Inputs of the reopen gate (tests/app_reopens_runtime_class.rs): the
+# pass, and the runtime job whose override it builds natively.
+APP_REOPENS_INPUTS = {
+    "src/emit/ruby/reopen.rs",
+    "runtime/ruby/active_storage.rb",
+    "runtime/ruby/active_storage.rbs",
 }
 JSON_TYPES_SPINEL_INPUTS = {
     "src/schema.rs",
@@ -472,7 +483,7 @@ def native_coverage(path):
         "runtime/spinel/module_delegate.rb",
     }
     native = (
-        path.startswith(("runtime/ruby/", "runtime/spinel/", "src/emit/ruby/"))
+        path.startswith(("runtime/ruby/", "runtime/spinel/", "runtime/gems/", "src/emit/ruby/"))
         or path == "src/emit/ruby.rs"
         or (path.startswith("tests/spinel") and path.endswith((".rs", ".rb")))
         or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
@@ -505,6 +516,8 @@ def native_coverage(path):
         suites.add("generated_columns_spinel")
     if path in JSON_TYPES_SPINEL_INPUTS:
         suites.add("postgres_json_types_spinel")
+    if path in APP_REOPENS_INPUTS:
+        suites.add("app_reopens_runtime_class")
     if path in ARRAY_COLUMN_SPINEL_INPUTS or path.startswith("src/lower/model_to_library/adapter_emit/"):
         suites.add("array_column_storage_spinel")
     # Gate drivers stay flat beside their Rust harness. Match the most
@@ -519,6 +532,11 @@ def native_coverage(path):
                 break
     if path == "runtime/spinel/test/statement_cache_cases.rb":
         suites.add("param_binds")
+    if path.startswith("runtime/gems/rack_mini_profiler/") or path in {
+        "src/gems/rack_mini_profiler.rs",
+        "runtime/spinel/request_hooks.rb",
+    }:
+        suites.add("spinel_mini_profiler")
     if path in PG_DB_INPUTS:
         suites.add("spinel_pg_db")
     suites.update(DB_CONTRACT_INPUTS.get(path, ()))

@@ -25,6 +25,10 @@ pub(crate) mod expr;
 mod library;
 pub(crate) use library::install_lookup_indexes;
 mod rbs;
+/// Host-only, like the `project` tree passes that run it and whose RBS
+/// declaration spans it shares; excluded from the wasm build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod reopen;
 pub mod shake;
 mod shared;
 pub mod source_markers;
@@ -266,6 +270,7 @@ fn materialize_models_with_param_binds(
         param_binds,
         crate::lower::model_to_library::ErrorsReaders::CreatedOnFirstRead,
         crate::lower::model_to_library::RuntimeRelation::Present,
+        &crate::lower::view_to_library::PartialStems::of(&app.views),
     ).0;
     (lcs, params_specs)
 }
