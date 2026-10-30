@@ -98,6 +98,7 @@ SPINEL_TESTS = [
     "routes_segment_pattern_spinel",
     "open_telemetry_stub_spinel",
     "spinel_mini_profiler",
+    "spinel_active_support_instrumentation",
     "around_block_filter_spinel",
     "after_initialize_bare_new_spinel",
     "find_or_create_bang_records",
@@ -525,6 +526,13 @@ def native_coverage(path):
         "runtime/spinel/request_hooks.rb",
     }:
         suites.add("spinel_mini_profiler")
+    if path in {
+        "runtime/spinel/active_support_instrumentation.rb",
+        "runtime/ruby/active_support_notifications.rb",
+        "runtime/ruby/active_support_notifications.rbs",
+        "src/lower/view_instrumentation.rs",
+    }:
+        suites.update(("spinel_active_support_instrumentation", "spinel_mini_profiler"))
     if path in PG_DB_INPUTS:
         suites.add("spinel_pg_db")
     suites.update(DB_CONTRACT_INPUTS.get(path, ()))

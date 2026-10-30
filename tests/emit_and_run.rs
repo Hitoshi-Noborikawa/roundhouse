@@ -12,6 +12,8 @@ mod emit_and_run;
 mod i18n_locales_app;
 #[path = "support/pundit_app.rs"]
 mod pundit_app;
+#[path = "emit_and_run/render_notifications.rs"]
+mod render_notifications;
 #[path = "emit_and_run/session_cookie_key.rs"]
 mod session_cookie_key;
 #[path = "emit_and_run/inertia_runtime_props.rs"]

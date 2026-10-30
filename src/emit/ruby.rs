@@ -829,6 +829,7 @@ fn lowered_view_lcs_pre_helper(app: &App) -> (Vec<&crate::dialect::View>, Vec<Li
     // no-op for scope-free apps (the blog), and a view LC is never a
     // model, so only the call-site rewrite arm runs.
     library::apply_scope_lowering(&mut lcs, app);
+    crate::lower::view_instrumentation::apply(&html_views, &mut lcs, app);
     (html_views, lcs)
 }
 

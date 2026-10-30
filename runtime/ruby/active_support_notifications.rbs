@@ -1,10 +1,21 @@
 module ActiveSupport
   module Notifications
     SUBSCRIBERS: Array[Array[untyped]]
+    self.@sql_listening: bool
+    self.@render_listening: bool
+    self.@process_listening: bool
 
     def self.subscribe: (String | Regexp pattern, ?untyped? callback, ?monotonic: bool) ?{ () -> untyped } -> Array[untyped]
+    def self.monotonic_subscribe: (String | Regexp pattern, ?untyped? callback) ?{ () -> untyped } -> Array[untyped]
     def self.unsubscribe: (Array[untyped] subscriber) -> nil
+    def self.refresh_listening: () -> nil
+    def self.listening?: (String name) -> bool
+    def self.sql_listening?: () -> bool
+    def self.render_listening?: () -> bool
+    def self.process_listening?: () -> bool
+    def self.monotonic_now: () -> Float
     def self.instrument: (String name, ?untyped? payload) ?{ () -> untyped } -> untyped
+    def self.publish: (String name, Float start, Float finish, Hash[Symbol, untyped] payload) -> nil
     def self.sql: (String statement) -> nil
     def self.subscribed: (untyped callback, String name, ?monotonic: bool) { () -> untyped } -> untyped
 
