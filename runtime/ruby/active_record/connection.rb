@@ -484,6 +484,23 @@ module ActiveRecord
       self[name] = value
     end
 
+    # Rails' `slice(*methods)`: the named attributes, String-keyed (Rails
+    # wraps the Hash in a HashWithIndifferentAccess). Rails reads each
+    # name through `public_send`; this runtime reads it through the `[]`
+    # column indexer, as `read_attribute` does, so a name that is not a
+    # column raises instead of answering a nil Rails would never give.
+    def slice(*names)
+      columns = self.class.schema_columns
+      h = {}
+      names.each do |name|
+        unless columns.include?(name)
+          raise NotImplementedError, "slice reads columns only; #{name} is not a column of #{self.class.name}"
+        end
+        h[name.to_s] = self[name]
+      end
+      h
+    end
+
     def saved_changes?
       !saved_changes.empty?
     end
