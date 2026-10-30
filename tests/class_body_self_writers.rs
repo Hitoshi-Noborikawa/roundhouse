@@ -135,7 +135,6 @@ fn a_writer_nothing_declares_stays_reported_as_dropped() {
 }
 
 #[test]
-#[ignore = "fork spec: postgresql layout"]
 fn writers_of_the_class_attribute_cattr_and_def_forms_are_carried() {
     let (files, diags) = emitted(&[
         ("app/models/base_task.rb", "class BaseTask\n  class_attribute :label\nend\n"),

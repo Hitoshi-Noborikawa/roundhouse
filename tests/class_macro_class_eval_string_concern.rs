@@ -129,7 +129,6 @@ end
 "#;
 
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn a_model_class_body_macro_that_class_evals_a_string_is_called() {
     roundhouse::ingest::survey::activate();
     let (emitted, _errors) = emit_and_run::empty_app()
