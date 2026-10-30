@@ -57,5 +57,7 @@ fn a_plain_require_of_an_autoloaded_gem_program_defines_its_constant_without_a_w
         run.stderr
     );
     assert_eq!(run.stdout.lines().last(), Some("data"), "{}", run.stderr);
-    assert!(!run.stderr.contains("to define"), "autoload warning in the emitted boot\n{}", run.stderr);
+    // This gem's autoload only: under -w an installed rest-client's
+    // http-cookie warns that it did not define `HTTP::Cookie`.
+    assert!(!run.stderr.contains("to define ErrKit"), "autoload warning in the emitted boot\n{}", run.stderr);
 }
