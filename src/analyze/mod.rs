@@ -35,7 +35,7 @@ mod class_new;
 pub(crate) use body::{indexed_pluck, string_answers};
 #[cfg(test)]
 pub(crate) use body::counted_first_last;
-pub(crate) use body::{ConstResolver, ConstResolverTask, definition_index};
+pub(crate) use body::{ConstResolver, ConstResolverTask, definition_index, has_ambiguous_namespace};
 pub use body::DefinitionIndex;
 pub use body::PreparedConstResolver;
 pub mod async_color;
@@ -138,6 +138,9 @@ pub struct Analyzer {
     /// `app/helpers` modules, whose bodies run in a view and take
     /// ActionView's `t`.
     helper_modules: crate::det::HashSet<ClassId>,
+    /// Which `app/helpers` module answers each helper name in the view
+    /// (`App::helper_method_index`), for a helper body's bare calls.
+    helper_index: HashMap<Symbol, ClassId>,
     open_classes: open_classes::OpenClasses,
     /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
     /// carried across fixpoint rounds.
@@ -809,7 +812,7 @@ impl Analyzer {
                 // reads of newer columns relies on it.
                 ("has_attribute?", Ty::Bool),
                 ("attributes=", Ty::Untyped),
-                ("assign_attributes", Ty::Untyped),
+                ("assign_attributes", Ty::Nil),
                 ("update_column", Ty::Bool),
                 ("update_columns", Ty::Bool),
                 ("update_attribute", Ty::Bool),
@@ -1198,6 +1201,8 @@ impl Analyzer {
                 if expr_calls_super(&method.body) {
                     classes.entry(id.clone()).or_default().delegating_class_methods.insert(method.name.clone());
                 }
+            } else {
+                classes.entry(id.clone()).or_default().source_instance_methods.insert(method.name.clone());
             }
             if method.receiver == crate::dialect::MethodReceiver::Instance
                 && method.name.as_str() == "initialize"
@@ -1209,6 +1214,11 @@ impl Analyzer {
             {
                 classes.entry(id.clone()).or_default().declares_constructor = true;
                 classes.entry(id.clone()).or_default().constructor_calls_super = expr_calls_super(&method.body);
+            }
+        }
+        for controller in &app.controllers {
+            for action in controller.actions() {
+                classes.entry(controller.name.clone()).or_default().source_instance_methods.insert(action.name.clone());
             }
         }
 
@@ -1282,6 +1292,7 @@ impl Analyzer {
             inquirers: inquiry::inquirer_methods(app),
             i18n: app.i18n.clone(),
             helper_modules: app.helper_method_index.values().cloned().collect(),
+            helper_index: helper_instance_index(app),
             open_classes: open_classes::OpenClasses::of(app),
             const_resolver,
             source_indexed: !app.sources.is_empty(),
@@ -1304,6 +1315,7 @@ impl Analyzer {
             .with_materialized_associations(&self.materialized_associations)
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n, &self.helper_modules)
+            .with_helper_index(&self.helper_index)
             .with_open_classes(&self.open_classes)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
@@ -2679,11 +2691,16 @@ impl Analyzer {
                 };
 
                 // The class body has run before any class method does, so its writes are not nilable there.
+                // Nor do an instance method's writes reach the class object's ivars.
+                let mut class_method_ivars: HashMap<Symbol, Ty> = HashMap::default();
+                for method in model.methods().filter(|m| m.receiver == MethodReceiver::Class) {
+                    extract_ivar_assignments(&method.body, &mut class_method_ivars);
+                }
                 let mut class_side_ctx = reseeded_ctx.clone();
                 for (name, ty) in class_body_ivars {
-                    // Merged, not replaced: a class method's own write (`@state = "ready"`) is a value too.
-                    let merged = match class_side_ctx.ivar_bindings.get(&name) {
-                        Some(existing) => crate::analyze::body::union_of(existing.clone(), ty),
+                    // Merged: a class method's own write (`@state = "ready"`) is a value too.
+                    let merged = match class_method_ivars.get(&name) {
+                        Some(written) => crate::analyze::body::union_of(written.clone(), ty),
                         None => ty,
                     };
                     class_side_ctx.ivar_bindings.insert(name, merged);
@@ -5306,7 +5323,8 @@ impl Analyzer {
         let source_methods = SourceMethodIndex::new(app);
         for (class, method) in registry::stdlib::BUILTIN_BLOCK_VALUE_METHODS {
             let class_id = ClassId(Symbol::from(*class));
-            if !source_methods.instance_method(&class_id, method) {
+            // Either side: `RestClient.get` is a class method.
+            if !source_methods.instance_method(&class_id, method) && !source_methods.class_method(&class_id, method) {
                 found.push((class_id, Symbol::from(*method)));
             }
         }
@@ -5532,8 +5550,10 @@ impl Analyzer {
     /// the module's bodies call on implicit `self`, that the module
     /// does not define, and that EVERY includer resolves to the same
     /// type. Includers that disagree, or one that lacks the method,
-    /// leave the call as it was. Runs after the concern fold, so an
-    /// includer's surface already carries its other concerns' methods.
+    /// leave the call as it was, except that answers which are each a
+    /// class object lend their union, which a Module query reads. Runs
+    /// after the concern fold, so an includer's surface already carries
+    /// its other concerns' methods.
     fn fold_host_surfaces(&mut self, app: &App) {
         let modules: BTreeSet<&ClassId> =
             app.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
@@ -5587,14 +5607,21 @@ impl Analyzer {
                     {
                         continue; // the module's own answer
                     }
-                    let mut answers = hosts.iter().map(|h| {
+                    let answers: Vec<_> = hosts.iter().map(|h| {
                         self.classes.get(h).and_then(|c| c.instance_methods.get(&name))
-                    });
-                    let Some(Some(first)) = answers.next() else { continue };
-                    if first.is_unknown() || !answers.all(|a| a == Some(first)) {
+                    }).collect();
+                    let Some(Some(first)) = answers.first() else { continue };
+                    if first.is_unknown() {
                         continue;
                     }
-                    agreed.push((name, first.clone()));
+                    if answers.iter().all(|a| *a == Some(*first)) {
+                        agreed.push((name, (*first).clone()));
+                    } else if let Some(classes) = class_object_union(&answers) {
+                        // Each includer answers its own class (a hook such as
+                        // `def shape = Circle`): the call is one of those
+                        // class objects, which a Module query reads.
+                        agreed.push((name, classes));
+                    }
                 }
             }
             let cls = self.classes.entry(lc.name.clone()).or_default();
@@ -5879,6 +5906,18 @@ impl Analyzer {
                 if let Some(body) = block_callback_body(expr) {
                     let from = sites.len();
                     self.collect_send_sites(body, Some(&model.name), false, helpers, &mut sites);
+                    self.record_callers(&model.name, &sites[from..]);
+                    continue;
+                }
+                // A class-body call of the model's own class method
+                // (`custom_strategy :title, with: proc { … }`) is the call
+                // site that types it, as a controller's macro call is.
+                let ExprNode::Send { recv, method, .. } = &*expr.node else { continue };
+                if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                    && model.methods().any(|m| m.receiver == MethodReceiver::Class && m.name == *method)
+                {
+                    let from = sites.len();
+                    self.collect_send_sites(expr, Some(&model.name), true, helpers, &mut sites);
                     self.record_callers(&model.name, &sites[from..]);
                 }
             }
@@ -7932,6 +7971,29 @@ fn singleton_of(ty: Option<&Ty>) -> Option<&Ty> {
     }
 }
 
+/// The union of answers that are each a class object (`Class[C]` or a
+/// union of them), or None when any answer is missing or not one.
+fn class_object_union(answers: &[Option<&Ty>]) -> Option<Ty> {
+    let mut classes: Vec<Ty> = Vec::new();
+    for answer in answers {
+        let variants = match (*answer)? {
+            Ty::Union { variants } => variants.iter().cloned().collect(),
+            ty => vec![ty.clone()],
+        };
+        for ty in variants {
+            singleton_of(Some(&ty))?;
+            if !classes.contains(&ty) {
+                classes.push(ty);
+            }
+        }
+    }
+    Ty::canonicalize_variants(&mut classes);
+    Some(match classes.len() {
+        1 => classes.pop().unwrap(),
+        _ => Ty::Union { variants: classes.into() },
+    })
+}
+
 // Recorded flat, a class object argument would type its parameter as an instance of that class.
 fn class_object_arg_ty(arg: &Expr, ty: Ty) -> Ty {
     match ty {
@@ -8611,8 +8673,14 @@ pub(crate) fn controller_includes(controller: &Controller) -> Vec<ClassId> {
 /// accepted gap rather than a blocker: no controller in this
 /// codebase's fixtures collides that way.
 pub(crate) fn controller_include_groups(controller: &Controller) -> Vec<Vec<ClassId>> {
+    controller_include_statements(controller).into_iter().map(|(_, group)| group).collect()
+}
+
+/// [`controller_include_groups`], each statement with its index in
+/// `controller.body`: where its concerns' `included` blocks run.
+pub(crate) fn controller_include_statements(controller: &Controller) -> Vec<(usize, Vec<ClassId>)> {
     let mut out = Vec::new();
-    for item in &controller.body {
+    for (index, item) in controller.body.iter().enumerate() {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
         if !matches!(method.as_str(), "include" | "prepend") {
@@ -8625,7 +8693,7 @@ pub(crate) fn controller_include_groups(controller: &Controller) -> Vec<Vec<Clas
             }
         }
         if !group.is_empty() {
-            out.push(group);
+            out.push((index, group));
         }
     }
     out
@@ -8682,6 +8750,33 @@ fn is_abstract_body(body: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// `App::helper_method_index` without the names whose module defines them
+/// only as `def self.x`: ingest indexes every method of a helper module, and a
+/// helper body's bare call reaches the view's instance methods, never a
+/// module's singleton one. The index keeps one owner per name, so a module
+/// whose `def self.x` took the entry hands it back to the helper that
+/// defines `x` on the instance side — the last in `helper :all`'s sorted
+/// order, as the view's own lookup would find it.
+fn helper_instance_index(app: &App) -> HashMap<Symbol, ClassId> {
+    let defines = |owner: &ClassId, name: &Symbol| {
+        app.library_classes.iter().any(|lc| {
+            &lc.name == owner
+                && lc.methods.iter().any(|m| &m.name == name && m.receiver == crate::dialect::MethodReceiver::Instance)
+        })
+    };
+    // Every helper module, not only the index's owners: a module whose
+    // every name a later one took owns no entry at all.
+    let owners: std::collections::BTreeSet<&ClassId> =
+        app.helper_method_index.values().chain(app.helper_modules.iter()).collect();
+    app.helper_method_index
+        .iter()
+        .filter_map(|(name, owner)| {
+            let owner = if defines(owner, name) { owner } else { *owners.iter().rev().find(|o| defines(o, name))? };
+            Some((name.clone(), owner.clone()))
+        })
+        .collect()
 }
 
 fn effective_return_ty(body: &Expr) -> Option<Ty> {

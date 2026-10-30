@@ -416,6 +416,22 @@ module ActiveRecord
   end
 
   class Base
+    def assign_attributes(attributes)
+      unless attributes.is_a?(Hash)
+        raise ArgumentError, "assign_attributes requires an attribute Hash"
+      end
+      attributes.each { |name, value| _assign_mass_attribute(name.to_s, value) }
+      nil
+    end
+
+    def _assign_mass_attribute(name, value)
+      _unknown_mass_attribute(name)
+    end
+
+    def _unknown_mass_attribute(name)
+      raise ActiveModel::UnknownAttributeError.new(self, name, "unknown attribute '#{name}' for #{self.class.name}.")
+    end
+
     # Ruby-family only, beside the other reopens here: strict targets have
     # no `Type::Value`, no untyped `self[name]` and no relation `all`.
     def read_attribute(name)

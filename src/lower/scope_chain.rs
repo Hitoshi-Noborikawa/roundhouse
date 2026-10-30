@@ -465,6 +465,7 @@ pub type AssocClassMethods = HashMap<ClassId, HashMap<Symbol, AssocScopedMethod>
 
 /// One registered method: its own params (NOT the synthesized trailing
 /// `__rel`), plus which halves of the association scope its body reads.
+#[derive(Clone)]
 pub struct AssocScopedMethod {
     pub params: Vec<Param>,
     /// The body constructs at implicit self — [`merge_scope_attributes`].
@@ -860,7 +861,15 @@ pub fn survey_assoc_class_methods(
     // never took the relation and paged the whole table. The same holds
     // one call further for a class method that itself takes the
     // relation, so the demand closes over the registered bodies.
-    let explicit_demand = model_demand.clone();
+    // Keyed by the defining model, as the registry is: demand on
+    // `Article` for a method `ApplicationRecord` defines is demand on it.
+    let explicit_demand: HashSet<(ClassId, Symbol)> = model_demand
+        .iter()
+        .map(|(target, name)| match class_method_owner(&app.models, target, name) {
+            Some((owner, _)) => (owner.name.clone(), name.clone()),
+            None => (target.clone(), name.clone()),
+        })
+        .collect();
     for model in &app.models {
         for item in &model.body {
             if let ModelBodyItem::Scope { scope, .. } = item {
@@ -898,9 +907,49 @@ pub fn survey_assoc_class_methods(
             }
         }
         if model_demand.len() == before {
-            return (reg, declined);
+            return (inherit_down(&app.models, reg), declined);
         }
     }
+}
+
+/// Each entry also under every model that inherits it without defining the
+/// method itself: `Article.order(:id).base` reaches `ApplicationRecord`'s
+/// `def self.base`, so the call-site rewrite and the relation delegate,
+/// which look a call up by the relation's model, find it there and call
+/// `Article.base(rel)`, which Ruby resolves to the ancestor's def.
+fn inherit_down(models: &[Model], mut reg: AssocClassMethods) -> AssocClassMethods {
+    let mut added: Vec<(ClassId, Symbol, AssocScopedMethod)> = Vec::new();
+    let declares_scope = |id: &ClassId, name: &Symbol| {
+        models.iter().filter(|m| &m.name == id).flat_map(|m| &m.body).any(|item| {
+            matches!(item, ModelBodyItem::Scope { scope, .. } if scope.name == *name)
+        })
+    };
+    for model in models {
+        // The model and the ancestors passed so far: a scope on any of
+        // them is nearer than the ancestor's def.
+        let mut below = vec![model.name.clone()];
+        let mut current = model.parent.clone();
+        for _ in 0..32 {
+            let Some(id) = current else { break };
+            if let Some(per) = reg.get(&id) {
+                for (name, entry) in per {
+                    // The nearest def is this ancestor's: an override
+                    // in between (or on the model) is its own method.
+                    let reaches = class_method_owner(models, &model.name, name).is_some_and(|(m, _)| m.name == id)
+                        && !below.iter().any(|b| declares_scope(b, name));
+                    if reaches && !added.iter().any(|(m, n, _)| m == &model.name && n == name) {
+                        added.push((model.name.clone(), name.clone(), entry.clone()));
+                    }
+                }
+            }
+            current = models.iter().find(|m| m.name == id).and_then(|m| m.parent.clone());
+            below.push(id);
+        }
+    }
+    for (model, name, entry) in added {
+        reg.entry(model).or_default().insert(name, entry);
+    }
+    reg
 }
 
 /// `(model, method)` for every receiver-less call in a body that runs
@@ -943,6 +992,34 @@ pub struct DeclinedAssocScope {
     pub reason: String,
 }
 
+/// The model that defines `mname` as a class method for `target`: the
+/// target itself, or the nearest ancestor among the models (an abstract
+/// `ApplicationRecord`'s `def self.x`), which Ruby's method lookup
+/// reaches from the subclass.
+fn class_method_owner<'a>(
+    models: &'a [Model],
+    target: &ClassId,
+    mname: &Symbol,
+) -> Option<(&'a Model, &'a crate::dialect::MethodDef)> {
+    let mut current = Some(target.clone());
+    for _ in 0..32 {
+        let model = models.iter().find(|m| Some(&m.name) == current.as_ref())?;
+        let found = model.body.iter().find_map(|item| match item {
+            ModelBodyItem::Method { method, .. }
+                if method.receiver == crate::dialect::MethodReceiver::Class && method.name == *mname =>
+            {
+                Some(method)
+            }
+            _ => None,
+        });
+        if let Some(method) = found {
+            return Some((model, method));
+        }
+        current = model.parent.clone();
+    }
+    None
+}
+
 /// Resolve the demand set against the models: which class methods must
 /// take the association's relation, and which ones wanted to and could
 /// not.
@@ -975,21 +1052,11 @@ pub fn build_assoc_class_methods(
             if scopes.get(target).is_some_and(|s| s.contains_key(mname)) {
                 continue;
             }
+            let Some((owner_model, method)) = class_method_owner(models, target, mname) else { continue };
+            let target = &owner_model.name;
             if !seen.insert((target.clone(), mname.clone())) {
                 continue;
             }
-            let Some(target_model) = models.iter().find(|m| m.name == *target) else { continue };
-            let Some(method) = target_model.body.iter().find_map(|item| match item {
-                ModelBodyItem::Method { method, .. }
-                    if method.receiver == crate::dialect::MethodReceiver::Class
-                        && method.name == *mname =>
-                {
-                    Some(method)
-                }
-                _ => None,
-            }) else {
-                continue;
-            };
             match assoc_scope_shape(method, target, scopes) {
                 AssocScopeShape::None => {}
                 AssocScopeShape::Takes { creates, queries } => {
@@ -1018,9 +1085,6 @@ pub fn build_assoc_class_methods(
         if scopes.get(target).is_some_and(|s| s.contains_key(mname)) {
             continue;
         }
-        if !seen.insert((target.clone(), mname.clone())) {
-            continue;
-        }
         let Some(target_model) = models.iter().find(|m| m.name == *target) else { continue };
         // `generates_token_for`'s finders, which the model lowering
         // synthesizes after this survey (lower::generates_token_for): no
@@ -1033,6 +1097,9 @@ pub fn build_assoc_class_methods(
             && !target_model.body.iter().any(|item| matches!(item,
                 ModelBodyItem::Method { method, .. } if method.name == *mname))
         {
+            if !seen.insert((target.clone(), mname.clone())) {
+                continue;
+            }
             reg.entry(target.clone()).or_default().insert(
                 mname.clone(),
                 AssocScopedMethod {
@@ -1046,17 +1113,13 @@ pub fn build_assoc_class_methods(
             );
             continue;
         }
-        let Some(method) = target_model.body.iter().find_map(|item| match item {
-            ModelBodyItem::Method { method, .. }
-                if method.receiver == crate::dialect::MethodReceiver::Class
-                    && method.name == *mname =>
-            {
-                Some(method)
-            }
-            _ => None,
-        }) else {
+        // The defining model: `target` itself or an ancestor
+        // (`ApplicationRecord`), which then grows the parameter.
+        let Some((owner_model, method)) = class_method_owner(models, target, mname) else { continue };
+        let target = &owner_model.name;
+        if !seen.insert((target.clone(), mname.clone())) {
             continue;
-        };
+        }
         match assoc_scope_shape(method, target, scopes) {
             // A body that neither constructs nor queries at implicit
             // self is INDIFFERENT to the scope — but the call still has
@@ -3622,7 +3685,8 @@ fn range_condition_fragment(
     // The registry's table, not a second derivation of it — see
     // `AssocRegistry::tables`.
     let table = ctx.assocs.table_for(model);
-    let col = format!("{table}.{key}");
+    // Not bare: a column named like a keyword (`order`) is a syntax error unquoted, and the Hash form the runtime renders quotes it.
+    let col = format!("\"{table}\".\"{key}\"");
     let mut binds: Vec<Expr> = Vec::new();
     let sql = match &*v.node {
         ExprNode::Range { .. } => range_clause(&col, v, &mut binds)?,
@@ -3673,13 +3737,11 @@ fn range_clause(col: &str, e: &Expr, binds: &mut Vec<Expr>) -> Option<String> {
     let ExprNode::Range { begin, end, exclusive } = &*e.node else { return None };
     let mut clauses: Vec<String> = Vec::new();
     if let Some(b) = begin {
-        clauses.push(format!("{col} >= ?"));
-        binds.push(b.clone());
+        clauses.push(bound_clause(col, ">=", b, binds)?);
     }
     if let Some(x) = end {
         // `a...b` excludes its end; `a..b` includes it.
-        clauses.push(format!("{col} {} ?", if *exclusive { "<" } else { "<=" }));
-        binds.push(x.clone());
+        clauses.push(bound_clause(col, if *exclusive { "<" } else { "<=" }, x, binds)?);
     }
     if clauses.is_empty() {
         return None;
@@ -3691,6 +3753,27 @@ fn range_clause(col: &str, e: &Expr, binds: &mut Vec<Expr>) -> Option<String> {
     } else {
         format!("({})", clauses.join(" AND "))
     })
+}
+
+/// One end's comparison. An end that may be nil at run time is no bound
+/// there, as Rails reads `nil..b`: `(? IS NULL OR col >= ?)`, which binds
+/// it twice, so only a plain read takes it and any other declines.
+fn bound_clause(col: &str, op: &str, bound: &Expr, binds: &mut Vec<Expr>) -> Option<String> {
+    let nilable = match bound.ty.as_ref() {
+        Some(crate::ty::Ty::Nil) => true,
+        Some(crate::ty::Ty::Union { variants }) => variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil)),
+        _ => false,
+    };
+    if !nilable {
+        binds.push(bound.clone());
+        return Some(format!("{col} {op} ?"));
+    }
+    if !matches!(&*bound.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+        return None;
+    }
+    binds.push(bound.clone());
+    binds.push(bound.clone());
+    Some(format!("(? IS NULL OR {col} {op} ?)"))
 }
 
 /// One `joins` argument as SQL, or None when any hop is unresolvable.
@@ -3925,12 +4008,16 @@ fn lower_relation_args(
                     // IS NULL. One statically-known case keeps a typed
                     // narrowing — a collection-typed value maps to ids
                     // here so the emitted SQL shape is visible.
+                    // Not an Array of scalars: a list of plain ids (`find_by(article: ids)`) has no `.id` to read, and the runtime predicate takes it as is.
                     if matches!(&*v.node, ExprNode::Var { .. } | ExprNode::Ivar { .. })
-                        && matches!(
-                            v.ty.as_ref(),
-                            Some(crate::ty::Ty::Array { .. })
-                                | Some(crate::ty::Ty::Relation { .. })
-                        )
+                        && match v.ty.as_ref() {
+                            Some(crate::ty::Ty::Array { elem }) => !matches!(
+                                &**elem,
+                                crate::ty::Ty::Int | crate::ty::Ty::Str | crate::ty::Ty::Float | crate::ty::Ty::Sym | crate::ty::Ty::Bool
+                            ),
+                            Some(crate::ty::Ty::Relation { .. }) => true,
+                            _ => false,
+                        }
                     {
                         let val = std::mem::replace(
                             v,
@@ -5220,6 +5307,33 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return Some(mr);
                 }
+                // Not passed through as written, nor lowered in place: the condition keys off the target's associations (`comments.user` was read), and a lowered range or record list needs `where`'s binds, which a one-argument terminal does not take.
+                let after_where = match method.as_str() {
+                    "find_by" => Some("first"),
+                    "find_by!" => Some("first!"),
+                    "find_sole_by" => Some("sole"),
+                    "destroy_by" => Some("destroy_all"),
+                    "delete_by" => Some("delete_all"),
+                    "exists?" => Some("exists?"),
+                    _ => None,
+                };
+                if let Some(terminal) = after_where
+                    && block.is_none()
+                    && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. }))
+                {
+                    let where_name = Symbol::from("where");
+                    let aliases = lower_relation_args(&mr, &where_name, &mut args, ctx);
+                    let mut r = r;
+                    let unapplied = apply_join_aliases(&mut r, &mr, &aliases, ctx);
+                    key_unapplied_aliases_by_table(&mut args, &mr, &unapplied, ctx);
+                    if matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Hash { .. })) {
+                        *expr = put(span, Some(r), method, args, block, parenthesized);
+                        return None;
+                    }
+                    let filtered = put(span, Some(r), where_name, args, None, true);
+                    *expr = put(span, Some(filtered), Symbol::from(terminal), vec![], None, false);
+                    return None;
+                }
                 *expr = put(span, Some(r), method, args, block, parenthesized);
                 return None;
             }
@@ -6117,7 +6231,7 @@ mod tests {
         .expect("both ends");
         assert_eq!(
             fragment_sql(&sql),
-            "(memberships.connected_at >= ? AND memberships.connected_at <= ?)"
+            r#"("memberships"."connected_at" >= ? AND "memberships"."connected_at" <= ?)"#
         );
         assert_eq!(binds.len(), 2);
 
@@ -6137,7 +6251,7 @@ mod tests {
             &ctx,
         )
         .expect("endless");
-        assert_eq!(fragment_sql(&sql), "memberships.connected_at >= ?");
+        assert_eq!(fragment_sql(&sql), r#""memberships"."connected_at" >= ?"#);
         assert_eq!(binds.len(), 1);
 
         // Neither end has no comparison to make.
@@ -6145,6 +6259,24 @@ mod tests {
             range_condition_fragment(&m, &cond_hash("connected_at", range(None, None, false)), &ctx)
                 .is_none()
         );
+    }
+
+    /// An end that may be nil at run time is no bound there (`nil..b` is
+    /// beginless in Rails), not `col >= NULL`, which matches nothing.
+    #[test]
+    fn a_nilable_range_end_is_no_bound_when_nil() {
+        let m = ClassId(Symbol::from("Membership"));
+        let (sc, md, ac) = (ScopeRegistry::default(), HashSet::default(), AssocRegistry::default());
+        let ctx = fragment_ctx(&sc, &md, &ac);
+        let mut since = cutoff("since");
+        since.ty = Some(crate::ty::Ty::Union { variants: vec![crate::ty::Ty::Int, crate::ty::Ty::Nil].into() });
+        let (sql, binds) = range_condition_fragment(&m, &cond_hash("connected_at", range(Some(since), Some(cutoff("b")), false)), &ctx)
+            .expect("nilable begin");
+        assert_eq!(
+            fragment_sql(&sql),
+            r#"((? IS NULL OR "memberships"."connected_at" >= ?) AND "memberships"."connected_at" <= ?)"#
+        );
+        assert_eq!(binds.len(), 3);
     }
 
     /// `where(connected_at: [ nil, ...cutoff ])` — Rails ORs the
@@ -6171,7 +6303,7 @@ mod tests {
             .expect("nil + range");
         assert_eq!(
             fragment_sql(&sql),
-            "(memberships.connected_at IS NULL OR memberships.connected_at < ?)"
+            r#"("memberships"."connected_at" IS NULL OR "memberships"."connected_at" < ?)"#
         );
         assert_eq!(binds.len(), 1);
     }

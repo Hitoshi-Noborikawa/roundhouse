@@ -16,10 +16,13 @@
 //! cross-cutting Prism AST helpers live in [`util`].
 
 mod alba;
+mod conditional_permit;
 mod unreachable_views;
+mod view_paths;
 mod uncalled_helper_copies;
 mod written_names;
 mod pagy;
+pub(crate) mod gem_package_settings;
 mod graphql_ruby;
 mod guarded_include;
 mod lock_versions;
@@ -80,6 +83,10 @@ pub mod thread_mattr;
 pub mod model;
 mod delegated_type;
 mod app_extension_calls;
+mod body_statements;
+mod error_site;
+mod external_include;
+mod hook_class_attribute;
 mod class_macros;
 mod column_accessors;
 mod model_macros;

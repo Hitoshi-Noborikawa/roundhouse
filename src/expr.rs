@@ -118,6 +118,10 @@ pub const RESOLVED_MIXIN: u64 = 1 << 22;
 /// can ask; `project::report_unsupported_bundled_constants` reports it elsewhere.
 pub const MODULE_QUERY: u64 = 1 << 23;
 
+/// A runtime Class/Module factory or implicit singleton-class access.
+/// The Ruby and JRuby targets retain these runtime class objects.
+pub const RUNTIME_CLASS_OBJECT: u64 = 1 << 31;
+
 /// The call an `alias new builtin` delegates to (`ingest::library_class::
 /// OBJECT_BUILTINS`): a method every Ruby object answers, which only the
 /// ruby family has; `project::report_builtin_aliases` refuses it elsewhere.
@@ -133,6 +137,34 @@ pub const BUILD_OWNER: u64 = 1 << 24;
 /// the path: `const_get` also finds a top-level constant, which `::` does
 /// not (`Base::String` raises).
 pub const CONST_PATH: u64 = 1 << 25;
+
+/// A library class or module body statement only Ruby itself answers:
+/// a loop that `class_eval`s or `define_method`s, a call to a core
+/// `Module` method (`freeze`), a write through a class-side writer the
+/// class or an ancestor defines (`ingest::body_statements`). The Ruby
+/// and JRuby trees write it back where the source has it, among the
+/// class's methods; every other target drops it and reports it.
+pub const BODY_STATEMENT: u64 = 1 << 27;
+
+/// On a body statement or a constant's value: the source wrote it inside
+/// the class's own `class << self`, where Ruby runs it with the singleton
+/// class as `self` and puts a constant on the singleton class
+/// (`X.singleton_class.constants`, not `X.constants`). The Ruby and JRuby
+/// trees write it back inside a `class << self`; other targets keep the
+/// constant on the class.
+pub const SINGLETON_BODY: u64 = 1 << 28;
+
+/// On a `Const` the analyzer qualified to a constant of `X`'s
+/// `class << self` (Rubydex's `X::<X>::NAME`): the Ruby and JRuby trees
+/// read it as `X.singleton_class::NAME`, where it lives.
+pub const SINGLETON_CONSTANT_REF: u64 = 1 << 29;
+
+/// Analysis admitted this receiverless send as Kernel's `Rational(...)`,
+/// `Pathname(...)` or `URI(...)`: its own class, on its own side, defines
+/// no method of that name. Only the ruby family and spinel have the
+/// libraries, so `project::report_ruby_only_sends` refuses it elsewhere.
+/// The mark stays when lowering spells `Pathname(x)` as `Pathname.new(x)`.
+pub const KERNEL_CONVERSION: u64 = 1 << 30;
 
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {

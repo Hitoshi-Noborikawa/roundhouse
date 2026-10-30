@@ -17,10 +17,14 @@
 # Before the content diff it lists the steps whose status or redirect
 # Location differ (those are not counted in its exit code).
 #
+# The records a replay creates get random ids on each server; before
+# comparing, lobsters-http-align-ids rewrites the candidate's dump with the
+# reference's ids (NO_ALIGN=1 skips it).
+#
 # A local tool: start both servers yourself first.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-[[ $# -ge 2 ]] || { sed -n '2,20p' "$0"; exit 2; }
+[[ $# -ge 2 ]] || { sed -n '2,24p' "$0"; exit 2; }
 ref="$1"; cand="$2"; shift 2
 out="lobsters-http-compare"
 pass=()
@@ -37,6 +41,13 @@ echo "== reference: $ref" >&2
 "$here/lobsters-http-replay" --base "$ref" --dump "$out/ref" --host "$host" --quiet ${pass[@]+"${pass[@]}"} || true
 echo "== candidate: $cand" >&2
 "$here/lobsters-http-replay" --base "$cand" --dump "$out/cand" --host "$host" ${pass[@]+"${pass[@]}"} || true
+for side in ref cand; do
+  [[ -f "$out/$side/_status.json" ]] || { echo "lobsters-http-compare: the $side replay wrote nothing (see above)" >&2; exit 2; }
+done
+if [[ -z "${NO_ALIGN:-}" ]]; then
+  echo "== aligning created ids" >&2
+  "$here/lobsters-http-align-ids" "$out/ref" "$out/cand"
+fi
 echo "== status and redirects" >&2
 ruby -rjson -e '
   ref, cand = ARGV.map { |d| [JSON.parse(File.read("#{d}/_status.json")), JSON.parse(File.read("#{d}/_location.json"))] }

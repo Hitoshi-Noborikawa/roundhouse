@@ -1,0 +1,6 @@
+module ActionDispatch
+  class Flash
+    @others: Hash[String, String]
+    @discard: Array[String]
+  end
+end

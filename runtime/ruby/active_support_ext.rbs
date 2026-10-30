@@ -82,6 +82,8 @@ module ActiveSupport
   def self.squish: (String text) -> String
   def self.squish!: (String text) -> String
   def self.truncate: (String text, Integer truncate_to, String? omission, String? separator) -> String
+  def self.word_space_byte?: (Integer b) -> bool
+  def self.truncate_words: (String text, Integer words_count, String? omission) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver
   # is a channel's `streams`, a plain Array. It is — an

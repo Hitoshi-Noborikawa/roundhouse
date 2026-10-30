@@ -12,17 +12,9 @@
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
-use roundhouse::project::BuildTarget;
-
 #[test]
 fn a_bare_record_makes_no_string_per_column() {
-    let (emitted, _errors) = emit_and_run::real_blog().emit(BuildTarget::Ruby);
-    let article = std::fs::read_to_string(emitted.join("app/models/article.rb")).expect("article.rb emitted");
-    assert!(
-        article.contains("attrs[:created_at] || \"\".freeze"),
-        "a column's blank default must be the shared frozen literal:\n{article}"
-    );
-
+    // Measure the allocation contract independently of the constructor's shape.
     emit_and_run::real_blog()
         .run_ruby(
             r##"

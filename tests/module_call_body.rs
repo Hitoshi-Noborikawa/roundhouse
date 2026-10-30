@@ -40,7 +40,6 @@ puts Comp::Schema::Klass.label\n\
 puts Comp::Schema::Klass.frozen?\n";
 
 #[test]
-#[ignore = "fork spec: autoload"]
 fn a_module_whose_body_is_only_calls_is_declared_and_runs_them() {
     let run = emit_and_run::empty_app().write("app/models/comp/schema.rb", SCHEMA).run_ruby(MODELS_SCRIPT);
     assert!(

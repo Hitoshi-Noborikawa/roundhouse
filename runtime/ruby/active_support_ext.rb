@@ -557,22 +557,27 @@ module ActiveSupport
   # the transpiled runtimes cannot host, and a REGEX the targets do not
   # all lower, so the scan is spelled out the way `to_sentence` below
   # is. Match each character against Rails' POSIX whitespace class,
-  # including Unicode whitespace.
+  # including Unicode whitespace. The walk is over `chars`, not
+  # `text[i]`: on a multibyte String CRuby finds the i-th character from
+  # the start, so indexing the String made the scan quadratic. The
+  # result grows in place for the same reason.
   #
   # campfire's `content_filters_test` writes `<<~HTML.squish` to put a
   # multi-line fixture body on one line before handing it to a filter.
   def self.squish(text)
     out = +""
     pending_space = false
+    chars = text.chars
+    n = chars.length
     i = 0
-    while i < text.length
-      c = text[i]
+    while i < n
+      c = chars[i]
       if c.match?(/[[:space:]]/)
         pending_space = !out.empty?
       else
-        out = out + " " if pending_space
+        out << " " if pending_space
         pending_space = false
-        out = out + c
+        out << c
       end
       i = i + 1
     end
@@ -628,6 +633,39 @@ module ActiveSupport
       stop = found if found
     end
     text[0, stop] + mark
+  end
+
+  # The whitespace Rails' default `truncate_words` separator (`/\s+/`)
+  # splits on, as a byte: space, or \t \n \v \f \r.
+  def self.word_space_byte?(b)
+    b == 32 || (b >= 9 && b <= 13)
+  end
+
+  # AS `String#truncate_words(words_count, omission: "...")`
+  # (core_ext/string/filters.rb) for the default separator, with the
+  # omission positional. Rails matches `/\A((?>.+?\s+){n-1}.+?)\s+.*/m`:
+  # a word is at least one character, so leading whitespace belongs to
+  # the first word, and the cut happens only when whitespace follows the
+  # n-th word. Built without a Regexp, like `squish` above. A `separator:`
+  # call is not grounded here. Same home and same rule as `truncate`.
+  # The scan reads bytes: every separator is ASCII and no byte of a
+  # multibyte UTF-8 character is below 0x80, so the cuts are the same,
+  # and `text[i]` would walk the String from the start on each read.
+  def self.truncate_words(text, words_count, omission)
+    mark = omission || "..."
+    n = text.bytesize
+    i = 0
+    words = 0
+    while i < n
+      j = i + 1
+      j += 1 while j < n && !word_space_byte?(text.getbyte(j))
+      k = j
+      k += 1 while k < n && word_space_byte?(text.getbyte(k))
+      words += 1
+      return text.byteslice(0, j) + mark if words == words_count && k > j
+      i = k
+    end
+    text.dup
   end
 
   # AS `Enumerable#sole`: THE one element, and a raise for any other

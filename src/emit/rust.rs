@@ -538,9 +538,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         Vec<crate::dialect::LibraryClass>,
         crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
     ) = if !app.models.is_empty() {
-        let (mut lcs, registry) = crate::lower::lower_models_with_registry_and_params(
+        let (mut lcs, registry) = crate::lower::lower_models_with_registry_params_and_views(
             &app.models,
             &app.schema,
+            &app.views,
             vec![],
             &params_specs,
         );

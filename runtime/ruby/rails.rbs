@@ -24,6 +24,7 @@ module Rails
     def readlines: (?chomp: bool) -> Array[String]
     def read: () -> String
     def exist?: () -> bool
+    def expand_path: (?(String | AppPath)? dir) -> AppPath
   end
 
   class Env

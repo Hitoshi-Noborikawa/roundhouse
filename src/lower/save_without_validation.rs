@@ -42,8 +42,37 @@ fn rewrite(expr: &mut Expr) {
     rewrite_node(expr);
 }
 
+// Not every bare `save(validate: false)`: outside a model's own instance method, or on a model defining `save` itself, it is another method that may take the kwarg.
+pub fn apply_bare_model_saves(app: &mut App) {
+    for model in &mut app.models {
+        let own_save = model.methods().any(|m| matches!(m.name.as_str(), "save" | "save!"));
+        if own_save {
+            continue;
+        }
+        for method in model.methods_mut() {
+            if !matches!(method.receiver, crate::dialect::MethodReceiver::Instance) {
+                continue;
+            }
+            rewrite_bare(&mut method.body);
+        }
+    }
+}
+
+fn rewrite_bare(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_bare);
+    if matches!(&*expr.node, ExprNode::Send { recv: None, .. }) {
+        rewrite_kwarg(expr);
+    }
+}
+
 pub(crate) fn rewrite_node(expr: &mut Expr) {
-    let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &mut *expr.node else {
+    if matches!(&*expr.node, ExprNode::Send { recv: Some(_), .. }) {
+        rewrite_kwarg(expr);
+    }
+}
+
+fn rewrite_kwarg(expr: &mut Expr) {
+    let ExprNode::Send { method, args, block: None, .. } = &mut *expr.node else {
         return;
     };
     if !matches!(method.as_str(), "save" | "save!") {

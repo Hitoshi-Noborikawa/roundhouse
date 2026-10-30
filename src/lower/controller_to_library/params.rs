@@ -141,6 +141,11 @@ pub struct ParamsSpec {
     /// The candidates carried as fields (ruby family): each a
     /// `Roundhouse::ParamValue` member read with `Params.nested`.
     pub nested_fields: BTreeMap<Symbol, NestedKey>,
+    pub written: BTreeMap<Symbol, Vec<Ty>>,
+    /// Keys only a `.merge(k: v)` after the permit adds: the request
+    /// never carries them, so their type is what the merge writes.
+    pub merged_only: std::collections::BTreeSet<Symbol>,
+    pub wants_assign: bool,
 }
 
 impl ParamsSpec {
@@ -372,6 +377,45 @@ impl ParamsSpec {
 /// field, the uploaded file a multipart part became (nil when the
 /// request carried none).
 pub(crate) fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
+    if let Some(written) = merged_only_ty(spec, field) {
+        return written;
+    }
+    let base = request_field_ty(spec, field);
+    let written = match spec.written.get(field) {
+        Some(written) if spec.ruby_values => written,
+        _ => return base,
+    };
+    let mut variants: Vec<Ty> = match base {
+        Ty::Union { variants } => variants.iter().cloned().collect(),
+        other => vec![other],
+    };
+    for ty in written {
+        if !variants.contains(ty) {
+            variants.push(ty.clone());
+        }
+    }
+    if variants.len() == 1 {
+        variants.pop().unwrap()
+    } else {
+        Ty::Union { variants: variants.into() }
+    }
+}
+
+/// A merged-only key's type on the Ruby family: what the merges write, or
+/// nil before one runs.
+fn merged_only_ty(spec: &ParamsSpec, field: &Symbol) -> Option<Ty> {
+    if !spec.ruby_values || !spec.merged_only.contains(field) {
+        return None;
+    }
+    let written = spec.written.get(field).filter(|w| !w.is_empty())?;
+    let mut variants = written.clone();
+    if !variants.contains(&Ty::Nil) {
+        variants.push(Ty::Nil);
+    }
+    Some(Ty::Union { variants: variants.into() })
+}
+
+fn request_field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     if let Some(nested) = spec.nested_fields.get(field) {
         if nested.mode == "scalars" {
             Ty::Array { elem: Ty::Str.into() }
@@ -572,9 +616,101 @@ pub(crate) fn lower_value_reads(app: &mut crate::app::App) {
     }
 }
 
+fn params_write(expr: &Expr) -> Option<(&Expr, &Expr, &Expr)> {
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Index { recv, index }, value } => Some((recv, index, value)),
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if method.as_str() == "[]=" && args.len() == 2 => Some((recv, &args[0], &args[1])),
+        _ => None,
+    }
+}
+
+fn literal_key(key: &Expr) -> Option<Symbol> {
+    match &*key.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+        _ => None,
+    }
+}
+
+// An unknown type is not widened into the field: its RBS would no longer say what the record holds.
+fn written_ty(value: &Expr) -> Option<Ty> {
+    value.ty.clone().filter(|ty| !ty.mentions_unknown())
+}
+
+fn report_params_write(span: Span, controller: &ClassId, class: &ClassId, why: &str, strict: bool) {
+    let detail = format!("`[]=` on the permitted params of `{}` (a synthesized {}) {why}; Rails' Parameters accepts it", controller.0, class.0);
+    let mut d = crate::diagnostic::Diagnostic::unsupported(span, None, "params write", detail.clone());
+    if strict {
+        d.message = format!("params write not supported (strict-typed targets): {detail}");
+    }
+    crate::emit::diagnostics::push(d);
+}
+
+pub(super) fn rewrite_params_writes(
+    body: &Expr,
+    helpers: &[crate::dialect::Action],
+    specs: &ParamsSpecs,
+    controller: &ClassId,
+) -> Expr {
+    let helpers = helper_spec_map(helpers, specs).into_iter()
+        .map(|(name, spec)| (name, spec.class_id.clone())).collect();
+    let sources = super::params_sources::ParamsSources::new(body, helpers, specs);
+    rewrite_params_writes_with(body, &sources, specs, controller)
+}
+
+fn rewrite_params_writes_with(
+    body: &Expr,
+    sources: &super::params_sources::ParamsSources,
+    specs: &ParamsSpecs,
+    controller: &ClassId,
+) -> Expr {
+    map_expr(body, &|expr| {
+        let (recv, key, value) = params_write(expr)?;
+        let class = sources.class(recv, specs)?;
+        let spec = specs.by_class(&class)?;
+        let field = literal_key(key).filter(|k| spec.fields.contains(k));
+        let why = if !spec.ruby_values {
+            Some("is not lowered on this target, whose record fields keep the type the request delivers (the Ruby, JRuby and Spinel trees assign it)")
+        } else if field.is_none() {
+            Some("names no permitted key, and the record has a slot only per permitted key")
+        } else if written_ty(value).is_none() {
+            Some("stores a value whose type is not known, and the record's field must carry it")
+        } else if !matches!(&*recv.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+            Some("writes through a receiver that is not a local or an instance variable")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            report_params_write(expr.span, controller, &class, why, !spec.ruby_values);
+            return None;
+        }
+        let field = field?;
+        let value = rewrite_params_writes_with(value, sources, specs, controller);
+        let setter = |name: String, arg: Expr| Expr::new(expr.span, ExprNode::Send {
+            recv: Some(recv.clone()),
+            method: Symbol::from(name),
+            args: vec![arg],
+            block: None,
+            parenthesized: false,
+        });
+        let provided = with_ty(
+            Expr::new(expr.span, ExprNode::Lit { value: Literal::Bool { value: true } }),
+            Ty::Bool,
+        );
+        Some(Expr::new(expr.span, ExprNode::Seq { exprs: vec![
+            setter(format!("{}=", provided_field(&field).as_str()), provided),
+            setter(format!("{}=", field.as_str()), value),
+        ] }))
+    })
+}
+
 fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut calls = Vec::new();
     let mut blocked = Vec::new();
+    let mut written: Vec<(ClassId, Symbol, Ty)> = Vec::new();
+    let mut merged: Vec<(ClassId, Symbol)> = Vec::new();
+    let mut direct: Vec<(ClassId, Symbol)> = Vec::new();
     for controller in controllers {
         let actions: Vec<_> = controller.actions().cloned().collect();
         let helpers: BTreeMap<Symbol, ClassId> = helper_spec_map(&actions, specs).into_iter()
@@ -584,6 +720,38 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 &action.body, helpers.clone(), specs,
             );
             walk_all(&action.body, &mut |expr| {
+                if let Some((recv, key, value)) = params_write(expr) {
+                    let class = sources.class(recv, specs);
+                    if let (Some(class), Some(key), Some(ty)) = (class, literal_key(key), written_ty(value)) {
+                        written.push((class, key, ty));
+                    }
+                }
+                // A permit that names the key itself makes it a request key for the spec every call shares.
+                if let ExprNode::Send { method, .. } = &*expr.node
+                    && method.as_str() != "merge"
+                    && let Some((resource, fields, _)) = match_permit_call_full(expr)
+                    && let Some(spec) = specs.find(&resource, &fields, &nested_signature(expr))
+                {
+                    direct.extend(fields.into_iter().map(|f| (spec.class_id.clone(), f)));
+                }
+                if let ExprNode::Send { recv: Some(chain), method, args, block: None, .. } = &*expr.node
+                    && method.as_str() == "merge"
+                    && let [arg] = args.as_slice()
+                    && let ExprNode::Hash { entries, .. } = &*arg.node
+                    && let Some((_, permitted, _)) = match_permit_call_full(chain)
+                    && let Some(class) = match_permit_call_full(expr).and_then(|(resource, fields, _)| {
+                        specs.find(&resource, &fields, &nested_signature(expr)).map(|spec| spec.class_id.clone())
+                    })
+                {
+                    for (k, v) in entries {
+                        if let (Some(key), Some(ty)) = (literal_key(k), written_ty(v))
+                            && !permitted.contains(&key)
+                        {
+                            merged.push((class.clone(), key.clone()));
+                            written.push((class.clone(), key, ty));
+                        }
+                    }
+                }
                 if let ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } = &*expr.node {
                     let recv = match target {
                         LValue::Attr { recv, .. } | LValue::Index { recv, .. } => Some(recv),
@@ -632,6 +800,19 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
             spec.lookup_blocked = true;
         }
     }
+    for (class, key) in merged.into_iter().filter(|m| !direct.contains(m)) {
+        if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
+            spec.merged_only.insert(key);
+        }
+    }
+    for (class, key, ty) in written {
+        if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
+            let tys = spec.written.entry(key).or_default();
+            if !tys.contains(&ty) {
+                tys.push(ty);
+            }
+        }
+    }
 }
 
 /// Second phase: which specs a `<Model>.create(<helper>)` call site
@@ -647,6 +828,7 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut to_attrs: Vec<ClassId> = Vec::new();
     let mut as_json: Vec<ClassId> = Vec::new();
     let mut except: Vec<ClassId> = Vec::new();
+    let mut assign: Vec<ClassId> = Vec::new();
     // Read-only for the whole walk; the demand lists are applied
     // after it, which is what keeps this a shared borrow.
     let specs_ro: &ParamsSpecs = specs;
@@ -664,12 +846,24 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 &action.body, helper_classes.clone(), specs_ro,
             );
             walk_all(&action.body, &mut |e| {
+                if let ExprNode::Assign { .. } = &*e.node {
+                    if let Some((_, value)) = attributes_assignment(e) {
+                        if let Some(class) = assigned_params_class(value, &|v| sources.class(v, specs_ro)) {
+                            assign.push(class);
+                        }
+                    }
+                }
                 let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
                     return;
                 };
                 if method.as_str() == "except" {
                     if let Some(class) = sources.class(recv, specs_ro) {
                         except.push(class);
+                    }
+                }
+                if let Some((_, value)) = attributes_assignment(e) {
+                    if let Some(class) = assigned_params_class(value, &|v| sources.class(v, specs_ro)) {
+                        assign.push(class);
                     }
                 }
                 // `<params-source>.to_attrs` — the attribute-hash
@@ -738,6 +932,37 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
             spec.wants_except = true;
         }
     }
+    for class_id in assign {
+        if let Some(spec) = specs.specs.iter_mut().find(|s| s.class_id == class_id) {
+            spec.wants_assign = true;
+        }
+    }
+}
+
+pub(super) fn attributes_assignment(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Attr { recv, name }, value } if name.as_str() == "attributes" => {
+            Some((recv, value))
+        }
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if matches!(method.as_str(), "attributes=" | "assign_attributes") && args.len() == 1 =>
+        {
+            Some((recv, &args[0]))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn assigned_params_class(
+    value: &Expr,
+    class_of: &dyn Fn(&Expr) -> Option<ClassId>,
+) -> Option<ClassId> {
+    if let ExprNode::If { then_branch, else_branch, .. } = &*value.node {
+        let yes = assigned_params_class(then_branch, class_of)?;
+        let no = assigned_params_class(else_branch, class_of)?;
+        return (yes == no).then_some(yes);
+    }
+    class_of(value)
 }
 
 fn walk_all<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
@@ -772,6 +997,9 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 nested_signature: Vec::new(),
                 nested_candidates: Vec::new(),
                 nested_fields: BTreeMap::new(),
+                written: BTreeMap::new(),
+                merged_only: Default::default(),
+                wants_assign: false,
             })
             .collect(),
         model_resources: None,
@@ -830,6 +1058,9 @@ fn record(
                 nested_signature: signature_of(&candidates),
                 nested_candidates: candidates,
                 nested_fields: BTreeMap::new(),
+                written: BTreeMap::new(),
+                merged_only: Default::default(),
+                wants_assign: false,
             });
         }
     }
@@ -1025,6 +1256,10 @@ pub fn model_update_name(spec: &ParamsSpec, bang: bool) -> Symbol {
         "update_from_{}{bang}",
         crate::naming::snake_case(spec.class_id.0.as_str())
     ))
+}
+
+pub fn model_assign_name(spec: &ParamsSpec) -> Symbol {
+    Symbol::from(format!("assign_from_{}", crate::naming::snake_case(spec.class_id.0.as_str())))
 }
 
 /// First permit list in `expr`, in the same pre-order the collector
@@ -1845,7 +2080,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
                 ExprNode::Array { elements: Vec::new(), style: crate::expr::ArrayStyle::default() },
                 Some(Ty::Array { elem: Ty::Str.into() }),
             )
-        } else if spec.file_fields.contains(field) || spec.nested_fields.contains_key(field) {
+        } else if spec.file_fields.contains(field) || spec.nested_fields.contains_key(field) || merged_only_ty(spec, field).is_some() {
             expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::Nil))
         } else {
             expr(ExprNode::Lit { value: Literal::Str { value: String::new() } }, Some(Ty::Str))
@@ -2215,7 +2450,8 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
         }));
     }
 
-    for field in fields.iter().filter(|_| !spec.value_map()) {
+    // Not a merged-only key: Rails' permit drops it from the request, and only the merge after `from_raw` sets it.
+    for field in fields.iter().filter(|f| !spec.value_map() && merged_only_ty(spec, f).is_none()) {
         let setter = |name: Symbol, value: Expr| Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -2568,12 +2804,13 @@ pub(super) fn expr(node: ExprNode, ty: Option<Ty>) -> Expr {
 
 fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
     let owner = &spec.class_id;
-    // A carried nested key is no String: the String-valued hash leaves it
-    // out, and the model reads it through its own member.
+    // A carried nested key, or a merged-only one typed by its merge, is no
+    // String: the String-valued hash leaves it out, and the model reads it
+    // through its own member.
     let entries: Vec<(Expr, Expr)> = spec
         .fields
         .iter()
-        .filter(|field| !spec.nested_fields.contains_key(*field))
+        .filter(|field| !spec.nested_fields.contains_key(*field) && merged_only_ty(spec, field).is_none())
         .map(|field| {
             let key = expr(
                 ExprNode::Lit { value: Literal::Str { value: field.as_str().to_string() } },
@@ -2832,7 +3069,7 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
                     _ => recv,
                 };
                 let arg = factory_arg(chain, guard, e.span);
-                return Some(build_from_raw_merge(&spec.class_id, entries, e.span, arg));
+                return Some(build_from_raw_merge(&spec.class_id, entries, e.span, arg, &|k| merged_only_ty(spec, k).is_some()));
             }
         }
         // Reverse-merge form (Form 4). Under an explicit `return` at the
@@ -2877,7 +3114,7 @@ fn build_from_raw_defaults(
     span: Span,
     arg: Expr,
 ) -> Expr {
-    let ExprNode::Seq { exprs } = *build_from_raw_merge(class_id, entries, span, arg).node else {
+    let ExprNode::Seq { exprs } = *build_from_raw_merge(class_id, entries, span, arg, &|_| false).node else {
         unreachable!("build_from_raw_merge returns a Seq")
     };
     // `_p = from_raw(...)`, then a (value, flag) setter pair per Symbol
@@ -2919,7 +3156,7 @@ fn build_from_raw_defaults(
 /// never mentioned it. (The `<field>=` writer can't do this itself —
 /// emitters collapse an `AttributeWriter` into a plain field and drop
 /// its body, so every producer sets the flag explicitly.)
-fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span, arg: Expr) -> Expr {
+fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span, arg: Expr, typed: &dyn Fn(&Symbol) -> bool) -> Expr {
     let p = |()| Expr::new(span, ExprNode::Var { id: VarId(0), name: Symbol::from("_p") });
     let mut stmts = vec![Expr::new(
         span,
@@ -2936,7 +3173,7 @@ fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span
             span,
             ExprNode::Assign {
                 target: LValue::Attr { recv: p(()), name: name.clone() },
-                value: param_string_literal(v).unwrap_or_else(|| v.clone()),
+                value: if typed(name) { v.clone() } else { param_string_literal(v).unwrap_or_else(|| v.clone()) },
             },
         ));
         stmts.push(Expr::new(

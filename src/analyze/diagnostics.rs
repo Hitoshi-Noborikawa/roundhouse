@@ -269,11 +269,71 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
     diagnose_with_coverage(app).0
 }
 
+/// Separate controller declarations lower independently, including their
+/// dispatchers. They cannot share an output path: keeping the last file loses
+/// methods, and concatenating them still replaces the earlier dispatcher.
+/// Ingest has already dropped openings that only nest classes.
+fn diagnose_controller_output_collisions(app: &App, out: &mut Vec<Diagnostic>) {
+    use crate::dialect::ControllerBodyItem as Item;
+    let mut groups: crate::det::HashMap<String, Vec<&crate::dialect::Controller>> = Default::default();
+    let mut paths = Vec::new();
+    for controller in &app.controllers {
+        let path = format!(
+            "app/controllers/{}.rb",
+            crate::naming::underscore(controller.name.0.as_str())
+        );
+        let group = groups.entry(path.clone()).or_default();
+        if group.is_empty() {
+            paths.push(path);
+        }
+        group.push(controller);
+    }
+    for path in paths {
+        let declarations = &groups[&path];
+        if declarations.len() < 2 {
+            continue;
+        }
+        // The first source location in declaration order, which is file
+        // order: `cache_controller/*.rb` comes before `cache_controller.rb`.
+        let span = declarations
+            .iter()
+            .flat_map(|c| {
+                std::iter::once(c.parent_span).chain(c.body.iter().filter_map(|item| match item {
+                    Item::Action { action, .. } => Some(action.name_span),
+                    Item::Filter { filter, .. } => Some(filter.target_span),
+                    Item::ClassMethod { method, .. } => Some(method.body.span),
+                    Item::ClassIvarInit { expr, .. } | Item::Unknown { expr, .. } => Some(expr.span),
+                    Item::PrivateMarker { .. } => None,
+                }))
+            })
+            .find(|span| !span.is_synthetic())
+            .unwrap_or_default();
+        let mut names: Vec<&str> = Vec::new();
+        for name in declarations.iter().map(|c| c.name.0.as_str()) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        let detail = match names.as_slice() {
+            [name] => format!(
+                "`{name}` is declared in more than one file, and each declaration writes `{path}`; only the last would survive"
+            ),
+            _ => format!(
+                "`{}` {} write `{path}`; only the last would survive",
+                names.join("` and `"),
+                if names.len() == 2 { "both" } else { "all" }
+            ),
+        };
+        out.push(Diagnostic::unsupported(span, None, "controller output collision", detail));
+    }
+}
+
 /// [`diagnose`] plus the missing-preload coverage triple, for report
 /// skins that state the denominator (#64: "0 findings" must be
 /// distinguishable from "couldn't check").
 pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     let mut out = app.routes.diagnostics.clone();
+    diagnose_controller_output_collisions(app, &mut out);
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
@@ -284,6 +344,9 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     out.extend(super::enum_raw_input::diagnose(app));
     out.extend(super::data::diagnose(app));
     out.extend(super::database_identity::diagnose(app));
+    // A support file the class ingest left out, at what failed it.
+    out.extend(app.ingest_drops.iter().map(|drop| Diagnostic::ingest_unsupported(drop.span, drop.message.clone())));
+    out.extend(conditional_declarations_reopened(app));
     // Constructor refusals must also reach executable class constants and
     // parameter defaults, which the ordinary method diagnostic policy omits.
     fn collect_storage_constructors(expr: &Expr, out: &mut Vec<Diagnostic>) {
@@ -766,6 +829,8 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             DiagnosticKind::MissingPreload { association, .. } => {
                 format!("query does not preload :{}", association.as_str())
             }
+            // From `App::ingest_drops`, never an `Expr.diagnostic`.
+            DiagnosticKind::IngestUnsupported { .. } => Diagnostic::stub_text(kind),
             // Produced by `lower::apply_post_analyze_lowerings` as
             // returned lists, never as `Expr.diagnostic` annotations;
             // handled defensively so the match stays exhaustive.
@@ -1088,4 +1153,60 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
     }
+}
+
+/// A class or module declared in a load-time conditional that another
+/// support file also declares, unconditionally. The IR holds one class
+/// per name, so the two bodies merge and the emitted tree writes the
+/// merged class inside the conditional's branch: when the branch does
+/// not run, what the other file defines is missing too, where Ruby still
+/// defines it. Reported at the conditional declaration, naming the other
+/// file. A reopening in the same file is not detected here.
+fn conditional_declarations_reopened(app: &App) -> Vec<Diagnostic> {
+    fn declarations(conditional: &crate::dialect::ConditionalDefinitions, out: &mut Vec<(crate::ident::ClassId, u32)>) {
+        for arm in &conditional.arms {
+            out.extend(arm.declarations.iter().map(|d| (d.name.clone(), d.start)));
+            for nested in &arm.nested {
+                declarations(nested, out);
+            }
+        }
+    }
+    let source_of = |file: crate::span::FileId| -> Option<&str> {
+        app.sources.get((file.0 as usize).checked_sub(1)?).map(|s| s.path.as_str())
+    };
+    let relative = |path: &str| -> String {
+        path.strip_prefix(app.root.as_str()).map(|p| p.trim_start_matches('/')).unwrap_or(path).to_string()
+    };
+    let mut out = Vec::new();
+    for lc in &app.library_classes {
+        for conditional in &lc.conditional_definitions {
+            let Some(own) = source_of(conditional.span.file) else { continue };
+            let mut declared = Vec::new();
+            declarations(conditional, &mut declared);
+            for (name, start) in declared {
+                let others: Vec<String> = app
+                    .library_class_files
+                    .iter()
+                    .filter(|(source, names)| source != own && names.contains(&name))
+                    .map(|(source, _)| relative(source))
+                    .collect();
+                if others.is_empty() {
+                    continue;
+                }
+                let span = crate::span::Span { file: conditional.span.file, start, end: start + 1 };
+                out.push(Diagnostic::unsupported(
+                    span,
+                    None,
+                    "conditional declaration reopened elsewhere",
+                    format!(
+                        "`{}` is declared in a load-time conditional here and unconditionally in {}; the emitted tree writes the merged class inside the conditional's branch, so when the branch does not run what {} defines is missing as well, which is not modeled",
+                        name.0.as_str(),
+                        others.join(", "),
+                        if others.len() == 1 { "that file" } else { "those files" },
+                    ),
+                ));
+            }
+        }
+    }
+    out
 }

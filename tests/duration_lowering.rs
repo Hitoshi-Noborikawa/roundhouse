@@ -160,6 +160,33 @@ end
 }
 
 #[test]
+fn named_duration_receivers_keep_duration_arithmetic() {
+    let out = lower_and_emit(r#"
+class DurationMath
+  AGE = 1.day
+  def difference
+    AGE - AGE
+  end
+end
+"#);
+    assert!(!out.contains("AGE.to_f"), "{out}");
+    assert!(!out.contains("AGE.to_i"), "{out}");
+}
+
+#[test]
+fn numeric_constants_keep_numeric_time_arithmetic() {
+    let out = lower_and_emit(r#"
+class NumericShift
+  SHIFT = 2
+  def shifted
+    Time.now + SHIFT
+  end
+end
+"#);
+    assert!(!out.contains("SHIFT.to_i"), "{out}");
+}
+
+#[test]
 fn time_compared_against_a_bare_duration_takes_rails_coercion() {
     // Rails answers this comparison through `Time#<=>` →
     // `to_datetime <=> other` → `Duration#coerce`, i.e. astronomical

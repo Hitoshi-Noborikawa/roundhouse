@@ -142,6 +142,19 @@ class String
     +"#{self[0, stop]}#{omission}"
   end
 
+  # AS `truncate_words` (core_ext/string/filters.rb) for a receiver the
+  # lowering could not prove a String. A typed one with the default
+  # separator is grounded to `ActiveSupport.truncate_words`.
+  def truncate_words(words_count, options = {})
+    sep = options[:separator] || /\s+/
+    sep = Regexp.escape(sep.to_s) unless sep.is_a?(Regexp)
+    if self =~ /\A((?>.+?#{sep}){#{words_count - 1}}.+?)#{sep}.*/m
+      $1 + (options[:omission] || "...")
+    else
+      dup
+    end
+  end
+
   # `html_safe` promotes to the marked type; plain strings answer
   # `html_safe?` false so the escape-aware `html_escape` escapes them.
   # (Both were identity/true in the earlier positional-only world —

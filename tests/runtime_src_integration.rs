@@ -1245,13 +1245,26 @@ fn every_runtime_method_body_concretely_typed() {
     // since Base?/String? would reject valid Rails constructor arguments.
     // Its parent initializer call and enclosing sequence remain gradual
     // (+2 in active_record/errors.rb, 888 -> 890).
+    // MEASURED 893 on 2026-10-28 with the same counter on main fa0b92c6
+    // and this runtime (890 -> 893): assign_attributes passes its Hash's
+    // arbitrary value to the writer (+1 in connection.rb), and
+    // UnknownAttributeError preserves the arbitrary record (+2 in
+    // errors.rb). Existing methods' counts are unchanged.
     // MEASURED 903 on 2026-10-29 (on 890): `ActiveSupport.pluck` is AS
     // `Enumerable#pluck` for a receiver the analyzer could not type (lobsters'
     // `value.pluck(:term)` over a parslet node), so the list, its elements and
     // the Relation and model-class tests read it untyped (+13 in
     // active_support_ext.rb, 890 -> 903).
+    // MEASURED 906 on 2026-10-29 after merging main 00e6fc23: the same
+    // analyzer and counter measure 903 on main and 906 with assignment.
+    // Base#assign_attributes adds 1 site and UnknownAttributeError#initialize
+    // adds 2. Every other method's count is unchanged.
     // MEASURED 904 on 2026-10-29 (on 903): merge_seedable_scope reads a
     // record value's id, and a where value is untyped (relation.rb).
+    // MEASURED 904 after merging main f7ec7427 with the current analyzer:
+    // the same counter measures 901 on main and 904 with assignment.
+    // Only Base#assign_attributes (+1) and UnknownAttributeError#initialize
+    // (+2) differ; every other method's count is unchanged.
     const CEILING: usize = 904;
     assert!(
         total_gradual <= CEILING,

@@ -249,6 +249,7 @@ mod tests {
         let mut params =
             crate::lower::controller_to_library::params::collect_specs(&app.controllers);
         params.mark_file_fields(&app.models);
+        params.carry_nested(true, false);
         let unfolded = crate::lower::scope_chain::assoc_query_method_names(
             &crate::lower::scope_chain::survey_assoc_class_methods(
                 app,
@@ -257,13 +258,21 @@ mod tests {
             )
             .0,
         );
-        super::super::lower_models_to_library_classes_unfolding(
+        super::super::lower_models_inner_with_ruby_values(
             &app.models,
             &app.schema,
             Vec::new(),
             &params,
             &unfolded,
+            super::super::Materialization::Emit,
+            super::super::FinderInputs::Request,
+            true,
+            crate::build_target::BuildTarget::Ruby.param_binds_enabled(None),
+            super::super::ErrorsReaders::CreatedOnFirstRead,
+            super::super::RuntimeRelation::Present,
+            &crate::lower::view_to_library::PartialStems::of(&app.views),
         )
+        .0
     }
 
     #[test]

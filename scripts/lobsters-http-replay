@@ -30,10 +30,18 @@
 #                     page fetched (its form field or csrf-token meta),
 #                     that page as Referer, and the session cookie. A
 #                     path visited again dumps as NAME~2, NAME~3, ….
-#                     scripts/lobsters-http-steps/ has examples. {story}, {story_path},
+#                     scripts/lobsters-http-steps/ has examples. A line
+#                     `#! login EMAIL` or `#! no-login` in the file sets
+#                     who the replay runs as. {story}, {story_path},
 #                     {comment} and {username} expand to ids scraped
 #                     after login; a step whose id was not scraped (no
 #                     {username} under --no-login) is skipped.
+#                     {last_comment} and {last_story} are the record the
+#                     latest POST's redirect named (a new comment's
+#                     `#c_…`, a new story's `/s/…`); {last_location} is
+#                     the path that redirect named, whatever the record.
+#                     {input:NAME} is the value of the last page's form
+#                     field NAME.
 #   --email E         login email    (default $LOBSTERS_EMAIL)
 #   --password P      login password (default $LOBSTERS_PASSWORD)
 #   --username U      for {username} (default $LOBSTERS_USERNAME, else
@@ -53,6 +61,8 @@ require "net/http"
 require "uri"
 require "json"
 require "fileutils"
+require "cgi"
+require "erb"
 
 opts = {
   email: ENV["LOBSTERS_EMAIL"], password: ENV["LOBSTERS_PASSWORD"], username: ENV["LOBSTERS_USERNAME"],
@@ -74,6 +84,15 @@ until args.empty?
   end
 end
 abort "usage: lobsters-http-replay --base URL --dump DIR [options]" unless opts[:base] && opts[:dump]
+# A step file says who it runs as (`#! login EMAIL`, `#! no-login`), over the command line: a moderator's flow and a logged-out one sit beside a user's.
+if opts[:steps]
+  File.foreach(opts[:steps]) do |line|
+    case line
+    when /\A#!\s*no-login\s*\z/ then opts[:login] = false
+    when /\A#!\s*login\s+(\S+)\s*\z/ then opts[:login] = true; opts[:email] = $1
+    end
+  end
+end
 if opts[:login] && !(opts[:email] && opts[:password])
   abort "lobsters-http-replay: --email and --password (or LOBSTERS_EMAIL / LOBSTERS_PASSWORD), or --no-login"
 end
@@ -209,6 +228,10 @@ _, comments, = request("GET", "/comments")
 ids["comment"] = comments[%r{/comments/(\w+)/reply}, 1] || comments[%r{/c/(\w+)}, 1]
 _, settings, = request("GET", "/settings") if opts[:login]
 ids["username"] = opts[:username] || settings.to_s[%r{href="/(?:~|u/)(\w+)"}, 1]
+# Filled as the replay goes: the record a POST's redirect names.
+ids["last_comment"] = nil
+ids["last_story"] = nil
+ids["last_location"] = nil
 
 steps = parse_steps(opts[:steps] ? File.read(opts[:steps]) : DEFAULT_STEPS)
 steps.each do |step|
@@ -217,7 +240,19 @@ steps.each do |step|
   end
 end
 missing = ->(s) { s.scan(/\{(\w+)\}/).flatten.find { |k| ids[k].nil? } }
-expand = ->(s) { s.gsub(/\{(\w+)\}/) { ids[$1] } }
+# `{input:NAME}`: the value of the last page's form field NAME (a record's database id a form carries, which no URL names).
+input_value = lambda do |name|
+  body = $last_body.to_s
+  q = Regexp.escape(name)
+  v = body[/<input[^>]*name="#{q}"[^>]*value="([^"]*)"/, 1] || body[/<input[^>]*value="([^"]*)"[^>]*name="#{q}"/, 1]
+  abort "lobsters-http-replay: no form field #{name.inspect} on the last page" unless v
+  CGI.unescapeHTML(v)
+end
+# A path takes a path component's escape, a form a form value's: `a b` is `a%20b` in one and `a+b` in the other.
+expand = lambda do |s, form: false|
+  escape = form ? ->(v) { enc(v) } : ->(v) { ERB::Util.url_encode(v) }
+  s.gsub(/\{(\w+)\}/) { ids[$1] }.gsub(/\{input:([^}]+)\}/) { escape.(input_value.($1)) }
+end
 
 # ── the visits ───────────────────────────────────────────────────────
 FileUtils.mkdir_p(opts[:dump])
@@ -240,7 +275,7 @@ steps.each do |step|
     next
   end
   path = expand.(step.path)
-  form = step.form && expand.(step.form)
+  form = step.form && expand.(step.form, form: true)
   if step.method == "POST"
     token = token_of($last_body)
     form = [form, ("authenticity_token=#{enc(token)}" if token)].compact.join("&")
@@ -250,6 +285,11 @@ steps.each do |step|
   name = "#{name}~#{(2..).find { |i| !statuses.key?("#{name}~#{i}") }}" if statuses.key?(name)
   statuses[name] = st
   locations[name] = location if location
+  if step.method == "POST" && location
+    ids["last_comment"] = location[/#c_(\w+)/, 1] || location[%r{/c/(\w+)}, 1] || ids["last_comment"]
+    ids["last_story"] = location[%r{/s/(\w+)}, 1] || ids["last_story"]
+    ids["last_location"] = URI(location).path
+  end
   File.write(File.join(opts[:dump], name), body) unless st == :EXC
   ok = step.expect ? st == step.expect : st.is_a?(Integer) && (200..399).cover?(st)
   # Not for a POST that names its status: one answering `ok` is the whole response.

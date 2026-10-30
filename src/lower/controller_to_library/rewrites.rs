@@ -138,7 +138,7 @@ pub(super) fn partial_view_call_with_record(
         span,
         ExprNode::Send {
             recv: Some(const_path(&["Views", &module_dir], span)),
-            method: crate::lower::view::view_method_name(&stem),
+            method: contract.method.clone(),
             args: view_args,
             block: None,
             parenthesized: true,
@@ -2124,6 +2124,36 @@ pub(super) fn rewrite_update_to_typed_variant(
     })
 }
 
+pub(super) fn rewrite_assign_to_typed_variant(
+    expr: &Expr,
+    privs: &[Action],
+    params_specs: &ParamsSpecs,
+) -> Expr {
+    let helpers: BTreeMap<Symbol, crate::ident::ClassId> = super::params::helper_spec_map(privs, params_specs)
+        .into_iter()
+        .map(|(name, spec)| (name, spec.class_id.clone()))
+        .collect();
+    let sources = super::params_sources::ParamsSources::new(expr, helpers, params_specs);
+    map_expr(expr, &|e| {
+        let (recv, value) = super::params::attributes_assignment(e)?;
+        let class = super::params::assigned_params_class(value, &|v| sources.class(v, params_specs))?;
+        let spec = params_specs.by_class(&class)?;
+        if !spec.wants_assign || !super::typed_update::has_typed_update(params_specs, spec) {
+            return None;
+        }
+        Some(Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: Some(recv.clone()),
+                method: super::params::model_assign_name(spec),
+                args: vec![value.clone()],
+                block: None,
+                parenthesized: true,
+            },
+        ))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // `destroy!` → `destroy`. Spinel's runtime model exposes one destroy
 // method (raise-on-failure semantics); the bang form has no separate
@@ -2529,10 +2559,36 @@ pub(super) fn rewrite_redirect_to(
                         },
                     )
                 }
-                _ => return None,
+                _ => first.clone(),
             };
             let mut new_args = vec![new_first];
-            new_args.extend(args.iter().skip(1).cloned());
+            let mut dropped = false;
+            for a in args.iter().skip(1) {
+                if let ExprNode::Hash { entries, kwargs: true } = &*a.node {
+                    // Not passed on: a key that is no flash type the app registered (lobsters' `success:` with no `add_flash_types`) is one Rails' redirect_to ignores, and the runtime's takes no such keyword.
+                    let kept: Vec<_> = entries
+                        .iter()
+                        .filter(|(k, _)| match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => {
+                                matches!(value.as_str(), "notice" | "alert" | "status" | "flash" | "allow_other_host")
+                            }
+                            _ => true,
+                        })
+                        .cloned()
+                        .collect();
+                    if kept.len() != entries.len() {
+                        dropped = true;
+                        if !kept.is_empty() {
+                            new_args.push(Expr::new(a.span, ExprNode::Hash { entries: kept, kwargs: true }));
+                        }
+                        continue;
+                    }
+                }
+                new_args.push(a.clone());
+            }
+            if !dropped && new_args[0] == args[0] {
+                return None;
+            }
             Some(Expr::new(
                 e.span,
                 ExprNode::Send {

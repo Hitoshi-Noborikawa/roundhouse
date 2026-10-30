@@ -117,6 +117,7 @@ module SQL
   ffi_func :sqlite3_bind_int64,        [:ptr, :int, :long],                   :int
   ffi_func :sqlite3_bind_null,         [:ptr, :int],                          :int
   ffi_func :sqlite3_bind_text,         [:ptr, :int, :str, :int, :ptr],        :int
+  ffi_func :sqlite3_bind_blob,         [:ptr, :int, :str, :int, :ptr],        :int
   # `sqlite3_column_type` reports the storage class of a column in the
   # current row; 5 is SQLITE_NULL. The nullable-column reads below need
   # it because `sqlite3_column_int` cannot distinguish a stored 0 from
@@ -125,6 +126,16 @@ module SQL
   ffi_func :sqlite3_column_int,        [:ptr, :int],                          :int
   ffi_func :sqlite3_column_double,     [:ptr, :int],                          :double
   ffi_func :sqlite3_column_text,       [:ptr, :int],                          :str
+  # Not `:str` for a BLOB: it stops at the first NUL and answers a UTF-8 String, where the sqlite3 gem answers every byte as ASCII-8BIT.
+  ffi_source <<~C
+    #include <sqlite3.h>
+    const char *rh_sqlite3_column_blob(void *stmt, int i) {
+      const void *p = sqlite3_column_blob((sqlite3_stmt *)stmt, i);
+      sp_ffi_bin_len = sqlite3_column_bytes((sqlite3_stmt *)stmt, i);
+      return p ? (const char *)p : "";
+    }
+  C
+  ffi_func :rh_sqlite3_column_blob,    [:ptr, :int],                          :binstr
   ffi_func :sqlite3_column_count,      [:ptr],                                :int
   ffi_func :sqlite3_column_name,       [:ptr, :int],                          :str
   ffi_func :sqlite3_errmsg,            [:ptr],                                :str
@@ -315,8 +326,8 @@ class QcEntry
   end
 
   # Copy the current row of a real stmt, every column, by storage class:
-  # 0 NULL, 1 INTEGER, 2 REAL, 3 TEXT (BLOB reads as text, as
-  # Db.column_value does).
+  # 0 NULL, 1 INTEGER, 2 REAL, 3 TEXT (a BLOB is kept as its binary
+  # String, as Db.column_value answers it).
   def record_row(stmt)
     i = 0
     while i < @ncols
@@ -340,7 +351,7 @@ class QcEntry
         @kinds.push(3)
         @ints.push(0)
         @floats.push(0.0)
-        v = SQL.sqlite3_column_text(stmt, i)
+        v = Db.cell_text(stmt, i)
         @texts.push(v.nil? ? "" : v)
       end
       i += 1
@@ -2251,8 +2262,13 @@ module Db
       return current_conn.qc_text(stmt, i) if p.nil?
       stmt = p
     end
-    s = SQL.sqlite3_column_text(stmt, i)
+    s = Db.cell_text(stmt, i)
     s.nil? ? "" : s
+  end
+
+  def self.cell_text(stmt, i)
+    return SQL.rh_sqlite3_column_blob(stmt, i) if SQL.sqlite3_column_type(stmt, i) == SQL::BLOB_TYPE
+    SQL.sqlite3_column_text(stmt, i)
   end
 
   # Raw typed column read — the driver's native value, the same contract
@@ -2306,7 +2322,7 @@ module Db
       # "builds the result String by strlen"), so nothing here reaches
       # sqlite's buffer after the call. The `+ ""` this used to carry
       # was a second copy of every text cell of every row.
-      SQL.sqlite3_column_text(stmt, i)
+      Db.cell_text(stmt, i)
     end
   end
 
@@ -2358,7 +2374,7 @@ module Db
       end
       stmt = p
     end
-    SQL.sqlite3_column_text(stmt, i)
+    Db.cell_text(stmt, i)
   end
 
   def self.column_bool_opt(stmt, i)
@@ -2456,9 +2472,14 @@ module Db
 
   def self.bind_text(stmt, idx, value)
     raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
-    # This shim's inline writer uses TEXT regardless of Ruby encoding.
-    # Preserve all bytes at the FFI boundary, including embedded NULs.
-    current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_text(stmt, idx, value, value.bytesize, -1))
+    # Preserve all bytes at the FFI boundary, including embedded NULs. Bytes
+    # only a BLOB can hold bind as one, as the inline writer (escape_string)
+    # stores them, so a lookup meets the stored class.
+    if Db.blob_bytes?(value)
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_blob(stmt, idx, value, value.bytesize, -1))
+    else
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_text(stmt, idx, value, value.bytesize, -1))
+    end
   end
 
   # SQLite has no native bool — bind 0/1, matching escape_bool's inline
@@ -2483,8 +2504,21 @@ module Db
   # Same SQL-value escaping shape as the gem-backed sibling. Single-
   # quote doubling matches sqlite's literal-string syntax; non-string
   # input goes through `to_s` first (Ruby semantics).
+  #
+  # Bytes no quoted literal can carry are a BLOB literal: a NUL (the
+  # statement text ends at it) or bytes that are not UTF-8 (`gsub` refuses
+  # them). lobsters' comment `confidence_order` is three packed bytes.
   def self.escape_string(s)
-    "'" + s.to_s.gsub("'", "''") + "'"
+    str = s.to_s
+    return "X'" + str.unpack1("H*") + "'" if Db.blob_bytes?(str)
+    "'" + str.gsub("'", "''") + "'"
+  end
+
+  # Not the ASCII-8BIT tag alone: this runtime reads headers and cookies as binary, and a session token so tagged must stay the TEXT its row holds.
+  def self.blob_bytes?(str)
+    return true if str.include?("\0")
+    return !str.valid_encoding? unless str.encoding == Encoding::ASCII_8BIT
+    !str.dup.force_encoding("UTF-8").valid_encoding?
   end
 
   def self.escape_int(n)

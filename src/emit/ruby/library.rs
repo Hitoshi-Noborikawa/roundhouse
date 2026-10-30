@@ -1105,7 +1105,7 @@ fn rewrite_library_partial_render(
             recv: Some(sp_expr(ExprNode::Const {
                 path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
             })),
-            method: crate::lower::view::view_method_name(&stem),
+            method: contract.method.clone(),
             args: view_args,
             block: None,
             parenthesized: true,
@@ -1153,7 +1153,7 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         "left_outer_joins", "left_joins", "select", "distinct", "includes", "preload",
         "find", "find_by", "first", "last", "all", "each", "map", "to_a", "count",
         "exists?", "empty?", "any?", "none?", "sum", "maximum", "minimum", "pluck",
-        "pick", "destroy_all", "delete_all", "update_all", "klass", "where_clauses",
+        "pick", "destroy_all", "delete_all", "update_all", "klass", "model", "where_clauses",
         "spawn", "find_each", "find_in_batches",
     ];
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
@@ -1164,7 +1164,25 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         Vec<(&crate::ident::ClassId, &[crate::dialect::Param])>,
     > = Default::default();
     for model in &app.models {
-        let Some(per) = scopes.get(&model.name) else { continue };
+        // The model's own scopes, then each ancestor's it does not declare
+        // itself: an `ApplicationRecord` scope reached on `Article`'s
+        // relation calls `Article.__scope_…`, which Ruby resolves to the
+        // ancestor's entry.
+        let mut chain: Vec<&crate::ident::ClassId> = Vec::new();
+        let mut current = Some(&model.name);
+        while let Some(id) = current.filter(|id| chain.len() < 32 && !chain.contains(id)) {
+            chain.push(id);
+            current = app.models.iter().find(|m| &m.name == id).and_then(|m| m.parent.as_ref());
+        }
+        let mut per: std::collections::HashMap<&Symbol, &Vec<crate::dialect::Param>> = Default::default();
+        for owner in chain {
+            for (n, params) in scopes.get(owner).into_iter().flatten() {
+                per.entry(n).or_insert(params);
+            }
+        }
+        if per.is_empty() {
+            continue;
+        }
         // The registry carries the SYNTHESIZED preload scopes too (it
         // must — the scope-body rewriter reads it to thread `__rel`
         // through a bare `with_attached_attachment`). They are handled
@@ -1184,7 +1202,7 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
                 .chain(crate::lower::attached::preload_scope_names(model))
                 .map(|n| n.as_str().to_string())
                 .collect();
-        let mut names: Vec<&Symbol> = per.keys().collect();
+        let mut names: Vec<&Symbol> = per.keys().copied().collect();
         names.sort_by_key(|n| n.as_str());
         for n in names {
             if RELATION_BUILTINS.contains(&n.as_str()) || synthesized.contains(n.as_str()) {
@@ -2285,7 +2303,7 @@ fn invalidate_on_fk_write(lc: &mut LibraryClass, name: &Symbol, fk: &Symbol) {
         ExprNode::Seq { exprs } => exprs.clone(),
         _ => vec![m.body.clone()],
     };
-    stmts.push(reset);
+    stmts.insert(0, reset);
     m.body = Expr::new(span, ExprNode::Seq { exprs: stmts });
 }
 
@@ -2982,12 +3000,21 @@ fn resolve_through_chain(
     // Owner edge is the sibling's foreign key. `through_writer_join`
     // copies that same key; asking it again cannot change the edge.
     let (back_joins, edge_table, edge_fk) = match thr_through {
-        None => (Vec::new(), pluralize_snake(thr_target.0.as_str()), thr_fk.clone()),
+        // Not the class name's plural: the owner edge is the join model's own table, as the join below reads it.
+        None => (
+            Vec::new(),
+            models.iter().find(|m| &m.name == thr_target).map_or_else(|| pluralize_snake(thr_target.0.as_str()), |m| m.table.0.as_str().to_string()),
+            thr_fk.clone(),
+        ),
         Some(_) => resolve_through_chain(models, model, thr, depth + 1)?,
     };
     let thr_model = models.iter().find(|m| &m.name == thr_target)?;
-    let thr_table = pluralize_snake(thr_target.0.as_str());
-    let target_table = pluralize_snake(target.0.as_str());
+    // Not the class name's plural: a model's `self.table_name =` names another table.
+    let thr_table = thr_model.table.0.as_str().to_string();
+    let target_table = models
+        .iter()
+        .find(|m| &m.name == target)
+        .map_or_else(|| pluralize_snake(target.0.as_str()), |m| m.table.0.as_str().to_string());
     let owner_type = through_owner_type_predicate(&thr_table, as_interface, &model.name);
     let mut joins = match thr_model.through_source(assoc)? {
         // The source belongs_to on the join model (`Vote.belongs_to
@@ -3004,6 +3031,21 @@ fn resolve_through_chain(
             };
             vec![format!(
                 "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
+            )]
+        }
+        // A polymorphic source named by `source_type:` (lobsters'
+        // `ModMail#comment_references`): the same join, restricted to the
+        // rows of that type. Without the type the reader fell back to a
+        // direct has_many and read a `comments.mod_mail_id` column.
+        Association::BelongsTo { foreign_key: src_fk, polymorphic: true, .. } if thr_through.is_none() => {
+            let crate::lower::model_to_library::ThroughWriterJoin::ResolvedPolymorphic(_, _, _, _, type_col, pk) =
+                crate::lower::model_to_library::through_writer_join(model, models, name)
+            else {
+                return None;
+            };
+            let type_name = target.0.as_str().trim_start_matches("::").replace('\'', "''");
+            vec![format!(
+                "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.{pk} AND {thr_table}.{type_col} = '{type_name}'{owner_type}"
             )]
         }
         // The source is a plain `has_many` on the join model, so the
@@ -3280,9 +3322,16 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         // Declared names per side (a helper module's methods are all about to
         // become module functions, so for it they are one set): an instance
         // body is not shadowed by a `def self.x`, nor a class body by `def x`.
+        // A template's own method is not one of them: a template is no
+        // method a bare call in it could reach (its renders are already
+        // `Views::…` calls), so a bare call naming it is the helper of
+        // that name — a renamed pair partial (`show_partial`) included.
+        let is_template =
+            lc.name.0.as_str() == "Views" || lc.name.0.as_str().starts_with("Views::");
         let declared_on = |class_side: bool| -> crate::det::HashSet<Symbol> {
             lc.methods
                 .iter()
+                .filter(|_| !is_template)
                 .filter(|m| {
                     is_helper_module
                         || (m.receiver == MethodReceiver::Class) == class_side
@@ -5506,6 +5555,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let slug_models = models_overriding_to_param(app);
     let assoc_targets = singular_association_targets(app);
+    let owned_assocs = owned_singular_associations(app);
     let collection_targets = collection_association_targets(app);
     // `direct :name do |record, options| … end` helpers take their
     // arguments VERBATIM — Rails hands them to the block, and the block
@@ -5538,6 +5588,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         all_models: &all_models,
         slug_models: &slug_models,
         assoc_targets: &assoc_targets,
+        owned_assocs: &owned_assocs,
         collection_targets: &collection_targets,
         class_method_targets: &class_method_targets,
         direct_helpers: &direct_helpers,
@@ -5860,6 +5911,30 @@ fn singular_association_targets(app: &App) -> crate::det::HashMap<String, String
     out
 }
 
+fn owned_singular_associations(app: &App) -> crate::det::HashSet<(String, String)> {
+    use crate::dialect::Association;
+    let mut out = crate::det::HashSet::default();
+    for m in &app.models {
+        // Not the model's own declarations alone: an STI subclass (campfire's `Rooms::Open < Room`) answers its parent's associations.
+        let mut current = Some(m);
+        let mut seen = 0;
+        while let Some(owner) = current {
+            for a in owner.associations() {
+                if let Association::BelongsTo { name, .. } | Association::HasOne { name, .. } = a {
+                    out.insert((m.name.0.as_str().to_string(), name.as_str().to_string()));
+                }
+            }
+            seen += 1;
+            current = owner
+                .parent
+                .as_ref()
+                .filter(|_| seen < 16)
+                .and_then(|p| app.models.iter().find(|x| &x.name == p));
+        }
+    }
+    out
+}
+
 /// Everything `arg_record_model` reads, in one place — the signal set
 /// grew past what a positional argument list explains.
 ///
@@ -5902,6 +5977,8 @@ pub(crate) struct RecordSignals<'a> {
     all_models: &'a crate::det::HashSet<String>,
     slug_models: &'a crate::det::HashSet<String>,
     assoc_targets: &'a crate::det::HashMap<String, String>,
+    /// `(model, name)` for each singular association a model declares.
+    owned_assocs: &'a crate::det::HashSet<(String, String)>,
     collection_targets: &'a crate::det::HashMap<String, String>,
     /// A model CLASS METHOD whose body answers one record of that model
     /// — `Room.original` is `order(:created_at).first`. Unambiguous
@@ -6188,6 +6265,13 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
     let all_models = sig.all_models;
     let assoc_targets = sig.assoc_targets;
     let collection_targets = sig.collection_targets;
+    // Not by name alone once a read's type says otherwise: lobsters' `tag.tag` is Tag's String column, named like a `belongs_to :tag`. A bare local keeps its name: its inferred type is the weaker signal there.
+    if matches!(&*arg.node, ExprNode::Send { recv: Some(_), .. }) && matches!(
+        arg.ty.as_ref().map(crate::ty::Ty::peel_nilable),
+        Some(crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym | crate::ty::Ty::Bool)
+    ) {
+        return None;
+    }
     // (1) A stamped model type.
     if let Some(crate::ty::Ty::Class { id, .. }) =
         arg.ty.as_ref().map(crate::ty::Ty::peel_nilable)
@@ -6217,9 +6301,21 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
         // separate `first`/`last` arm placed after this one would be
         // unreachable, since this pattern matches those method names too.
         ExprNode::Send { recv: Some(r), method, args, block: None, .. } if args.is_empty() => {
+            // Not by name alone when the receiver's model is known: lobsters' `category.category` and `tag.tag` are columns, named like another model's `belongs_to`.
+            let recv_model = match (r.ty.as_ref().map(crate::ty::Ty::peel_nilable), &*r.node) {
+                (Some(crate::ty::Ty::Class { id, .. }), _) if all_models.contains(id.0.as_str()) => Some(id.0.as_str().to_string()),
+                (_, ExprNode::Var { name, .. }) if all_models.contains(&crate::naming::camelize(name.as_str())) => {
+                    Some(crate::naming::camelize(name.as_str()))
+                }
+                (_, ExprNode::Var { name, .. }) => sig.local_records.get(name.as_str()).cloned(),
+                _ => None,
+            };
+            let owned = recv_model
+                .as_ref()
+                .is_none_or(|m| sig.owned_assocs.contains(&(m.clone(), method.as_str().to_string())));
             if let Some(target) = assoc_targets
                 .get(method.as_str())
-                .filter(|target| all_models.contains(*target))
+                .filter(|target| owned && all_models.contains(*target))
             {
                 return Some(target.clone());
             }
@@ -7962,7 +8058,11 @@ fn emit_library_class_decl_inner(
     let replayed_in_place: Vec<&Expr> = lc
         .unknown_calls
         .iter()
-        .filter(|call| call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && !call.span.is_synthetic())
+        .filter(|call| {
+            (call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0
+                || (call.decisions & crate::expr::BODY_STATEMENT != 0 && super::expr::carries_body_statements()))
+                && !call.span.is_synthetic()
+        })
         .collect();
     // Kept out of `replayed_in_place`: that list is what turns on
     // source-ordered bodies, and a constant write must not move includes
@@ -8124,6 +8224,19 @@ fn emit_library_class_decl_inner(
         Include(&'a ClassId),
         Method(&'a MethodDef),
     }
+    // A model's body is its own file's. What a Concern's `included` block
+    // runs there (a seed, a replayed call) carries the Concern's file, so
+    // its offset says nothing about where it runs: at the `include`, ahead
+    // of the model's own statements, in the order the splice gave it.
+    let model_file = app
+        .models
+        .iter()
+        .find(|m| m.name == lc.name && !m.span.is_synthetic())
+        .map(|m| m.span.file);
+    let key = |span: &crate::span::Span| match model_file {
+        Some(file) if span.file != file => 0,
+        _ => span.start,
+    };
     let mut body: Vec<_> = eager.iter().map(|&i| {
         (lc.constants[i].1.span.start, BodyItem::Constant(i, &lc.constants[i].1))
     }).collect();
@@ -8136,18 +8249,18 @@ fn emit_library_class_decl_inner(
                 | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
         ))
     }).map(|init| {
-        (init.span.start, BodyItem::Initializer(init))
+        (key(&init.span), BodyItem::Initializer(init))
     }));
     // Where the source has them: a method defined before the call is the macro's to override, one after it overrides the macro's.
     if ordered_body {
-        body.extend(replayed_in_place.iter().map(|call| (call.span.start, BodyItem::Initializer(call))));
+        body.extend(replayed_in_place.iter().map(|call| (key(&call.span), BodyItem::Initializer(call))));
     }
     body.extend(constant_calls.iter().filter(|call| {
         !(ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, **call)))
     }).map(|call| (call.span.start, BodyItem::Call(call))));
     // Concern-spliced and other foreign-file methods keep foreign
     // `name_span` offsets; interleave only same-file declarations.
-    let body_file = lc.class_ivar_initializers.iter().find_map(|init| {
+    let body_file = model_file.or_else(|| lc.class_ivar_initializers.iter().find_map(|init| {
         (!init.span.is_synthetic()
             && matches!(
                 &*init.node,
@@ -8155,7 +8268,7 @@ fn emit_library_class_decl_inner(
                     | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
             ))
         .then_some(init.span.file)
-    }).or_else(|| replayed_in_place.first().map(|call| call.span.file))
+    })).or_else(|| replayed_in_place.first().map(|call| call.span.file))
         .or_else(|| constant_calls.first().map(|call| call.span.file));
     let same_file_method = |m: &MethodDef| {
         !ordered_body
@@ -8164,11 +8277,22 @@ fn emit_library_class_decl_inner(
             && constant_calls.first().is_some_and(|call| m.name_span.file == call.span.file)
     };
     let mut positioned: Vec<(usize, &ClassId)> = Vec::new();
+    // An ordered body writes such an include where the source has it,
+    // after the methods above it its hook calls on `base`.
+    let mut ordered_includes: Vec<(u32, &ClassId)> = Vec::new();
     if !ordered_body {
         for inc in &lc.includes {
             let floor = positioned.last().map(|(at, _)| *at);
             if let Some(at) = hooked_include_position(lc, inc, app, classes).max(floor) {
                 positioned.push((at, inc));
+            }
+        }
+    } else {
+        for (inc, span) in lc.includes.iter().zip(&lc.include_spans) {
+            let in_body = !span.is_synthetic() && body_file.is_some_and(|file| span.file == file);
+            let after_first = ordered_includes.last().is_some_and(|(start, _)| *start <= span.start);
+            if in_body && (after_first || hooked_include_position(lc, inc, app, classes).is_some()) {
+                ordered_includes.push((span.start, inc));
             }
         }
     }
@@ -8190,6 +8314,7 @@ fn emit_library_class_decl_inner(
     for (slot, start) in &moved_includes {
         body.push((*start, BodyItem::Include(positioned[*slot].1)));
     }
+    body.extend(ordered_includes.iter().map(|(start, inc)| (*start, BodyItem::Include(inc))));
     for index in &moved_methods {
         let method = &lc.methods[*index];
         body.push((method.name_span.start, BodyItem::Method(method)));
@@ -8446,15 +8571,15 @@ fn emit_library_class_decl_inner(
     // An include the source has after a positioned one is written no
     // earlier than it, so the includes keep their source order, and with
     // it the class's ancestors. An ordered body interleaves its methods
-    // with ivar writes and keeps every include first.
+    // with ivar writes and keeps the other includes first.
     for inc in &lc.includes {
-        if positioned.iter().any(|(_, p)| *p == inc) {
+        if positioned.iter().any(|(_, p)| *p == inc) || ordered_includes.iter().any(|(_, p)| *p == inc) {
             continue;
         }
         nested.borrow_mut().write_include(&mut s, depth, lc, inc);
         writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
     }
-    if lc.includes.len() > positioned.len() && !lc.methods.is_empty() {
+    if lc.includes.len() > positioned.len() + ordered_includes.len() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
     }
 
@@ -8478,6 +8603,15 @@ fn emit_library_class_decl_inner(
                 for method in &factory.methods {
                     render_library_method(s, method, &format!("{body_pad}  "));
                 }
+                writeln!(s, "{body_pad}end").unwrap();
+                continue;
+            }
+            // One of the class's `class << self` is its singleton
+            // class's, written back there. Unindented: a heredoc's lines
+            // are whitespace-significant.
+            if value.decisions & crate::expr::SINGLETON_BODY != 0 && super::expr::carries_body_statements() {
+                writeln!(s, "{body_pad}class << self").unwrap();
+                writeln!(s, "{body_pad}  {} = {}", cname.as_str(), rendered.trim_end()).unwrap();
                 writeln!(s, "{body_pad}end").unwrap();
                 continue;
             }
@@ -8586,7 +8720,7 @@ fn emit_library_class_decl_inner(
                 }
                 BodyItem::Initializer(expr) if ordered_body => {
                     nested.borrow_mut().write_expr(s, depth, lc, expr);
-                    for line in super::emit_expr(&top_level(expr)).lines() {
+                    for line in in_singleton_scope(expr, super::emit_expr(&top_level(expr))).lines() {
                         writeln!(s, "{body_pad}{line}").unwrap();
                     }
                 }
@@ -8661,7 +8795,12 @@ fn emit_library_class_decl_inner(
             .filter(|call| !is_preserved_external_include(call) && !in_body(call))
             .collect()
     } else {
-        let own = app_extension_calls(lc, app, classes);
+        let mut picked = app_extension_calls(lc, app, classes);
+        picked.extend(gem_include_macro_calls(lc));
+        // Source order, each call once: `span_method` prepends its wrapper,
+        // and an app macro written after it may read the ancestors.
+        let own: Vec<&Expr> =
+            lc.unknown_calls.iter().filter(|call| picked.iter().any(|p| std::ptr::eq(*p, *call))).collect();
         let mut replayed = own.clone();
         replayed.retain(|call| !in_body(call));
         for call in &lc.unknown_calls {
@@ -8778,6 +8917,19 @@ fn emit_library_class_decl_inner(
     }
 
     EmittedFile { path: out_path, content: s }
+}
+
+/// `text`, the emitted `expr`, inside a `class << self` when the source
+/// wrote it in the class's own (`expr::SINGLETON_BODY`) and the tree
+/// carries it there: Ruby runs it with the singleton class as `self`,
+/// definee and lexical scope.
+fn in_singleton_scope(expr: &Expr, text: String) -> String {
+    if expr.decisions & crate::expr::SINGLETON_BODY == 0 || !super::expr::carries_body_statements() {
+        return text;
+    }
+    let text = text.trim_end();
+    let body = if text.contains("<<") { text.to_string() } else { super::shared::indent_lines(text, 1) };
+    format!("class << self\n{body}\nend")
 }
 
 /// Same-file methods a constant-defining call must see, and the hooked
@@ -9529,6 +9681,25 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
         }
     }
     out
+}
+
+/// Class-body macros a module of a gem the Ruby family ships gives its
+/// includer (`include ElasticAPM::SpanHelpers`, then `span_method :call`).
+/// The gem is loaded on this tree, so the call is what Ruby runs. A target
+/// that refuses the gem drops the include first, so nothing replays there.
+const GEM_INCLUDE_MACROS: &[(&str, &[&str])] =
+    &[("ElasticAPM::SpanHelpers", &["span_method", "span_class_method"])];
+
+fn gem_include_macro_calls(lc: &LibraryClass) -> Vec<&Expr> {
+    let macros: Vec<&str> = GEM_INCLUDE_MACROS
+        .iter()
+        .filter(|(module, _)| lc.includes.iter().any(|id| id.0.as_str() == *module))
+        .flat_map(|(_, macros)| macros.iter().copied())
+        .collect();
+    lc.unknown_calls
+        .iter()
+        .filter(|call| matches!(&*call.node, ExprNode::Send { recv: None, method, .. } if macros.contains(&method.as_str())))
+        .collect()
 }
 
 /// A receiverless class-body call that assigns a constant inside its block,

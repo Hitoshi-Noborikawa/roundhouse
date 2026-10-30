@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 # Pushing ActiveJob payloads to Redis the way Sidekiq 8.1's ActiveJob
 # adapter does, for an app on `config.active_job.queue_adapter =
-# :sidekiq`. A Ruby Sidekiq process, in a Rails app with the same job
-# classes and database, then runs the jobs.
+# :sidekiq`. The same build's worker role (`./app sidekiq`, or
+# `ruby sidekiq.rb`; runtime/spinel/sidekiq/sidekiq_worker.rb) runs the
+# jobs, or a Ruby Sidekiq process in a Rails app with the same job
+# classes and database does.
 #
 # THE BYTES ARE SIDEKIQ'S. The ActiveJob payload (`Payload.build_at`)
 # goes inside Sidekiq's job envelope, with the keys in the order
@@ -247,7 +249,7 @@ module SidekiqPush
   # The boot line a server on `:sidekiq` logs. It doesn't connect:
   # Sidekiq's client connects at the first push too.
   def self.announce
-    warn "[job] queue_adapter :sidekiq: jobs are pushed to " + redacted_url(url) + "; run them with a Sidekiq process"
+    warn "[job] queue_adapter :sidekiq: jobs are pushed to " + redacted_url(url) + "; run them with this build's sidekiq role or a Sidekiq process"
     nil
   end
 

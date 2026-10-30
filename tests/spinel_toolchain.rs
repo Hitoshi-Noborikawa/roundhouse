@@ -360,7 +360,7 @@ fn the_rails_health_check_answers_up_natively() {
         .run_spinel(r#"
 routed = false
 RouteTable.table.each do |route|
-  routed = true if route.verb == "GET" && route.pattern == "/up" && route.controller == :rails_health && route.action == :show
+  routed = true if route.verb == "GET" && route.pattern == "/up" && route.controller == :rails__health && route.action == :show
 end
 raise "no GET /up route to rails_health#show" unless routed
 c = Rails::HealthController.new
@@ -372,7 +372,7 @@ puts "rails health contract passed"
     run.assert_passes();
     assert!(run.stdout.contains("rails health contract passed"));
     let main = std::fs::read_to_string(run.emitted.join("main.rb")).expect("main.rb");
-    assert!(main.contains("when :rails_health then Rails::HealthController.new"), "{main}");
+    assert!(main.contains("when :rails__health then Rails::HealthController.new"), "{main}");
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {
@@ -719,3 +719,6 @@ puts "named captures passed"
     run.assert_passes();
     assert!(run.stdout.contains("named captures passed"));
 }
+
+#[path = "spinel_toolchain/db_binary_literal.rs"]
+mod db_binary_literal;

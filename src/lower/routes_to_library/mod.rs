@@ -218,13 +218,14 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
 
 /// `ArticlesController` → `articles` (the controller-symbol form
 /// the spinel router uses). Mirrors the existing per-target convention.
-/// Namespaced controllers flatten with underscores
-/// (`Mod::ActivitiesController` → `mod_activities`) — a plain-ident
+/// Namespaced controllers flatten with a double underscore
+/// (`Mod::ActivitiesController` → `mod__activities`) — a plain-ident
 /// symbol every target's symbol literal can carry (`:mod::activities`
 /// parses as scope resolution, not a symbol, under Ruby).
+// Not a single underscore: lobsters' `Mod::MailsController` and top-level `ModMailsController` both flattened to `mod_mails`, and /mod/mails/* dispatched to the wrong one.
 pub(crate) fn controller_symbol(class_name: &str) -> String {
     let base = class_name.strip_suffix("Controller").unwrap_or(class_name);
-    crate::naming::underscore(base).replace('/', "_")
+    crate::naming::underscore(base).replace('/', "__")
 }
 
 /// Build the `RouteHelpers` module from `app.routes` as a list of
@@ -853,7 +854,8 @@ fn build_url_options_function(
 /// `/domains/:id => home#for_domain, as: "domain"`), so the helper's
 /// own name is the fallback resource lookup (`domain_path` → Domain).
 fn model_overrides_to_param(controller: &str, helper_name: &str, app: &App) -> bool {
-    let from_controller = crate::naming::singularize(&controller_symbol(controller));
+    let base = controller.strip_suffix("Controller").unwrap_or(controller);
+    let from_controller = crate::naming::singularize(&crate::naming::underscore(base).replace('/', "_"));
     if named_model_overrides_to_param(&from_controller, app) {
         return true;
     }
