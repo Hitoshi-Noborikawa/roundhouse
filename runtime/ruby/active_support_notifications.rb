@@ -29,6 +29,17 @@ module ActiveSupport
       def matches?(name)
         @pattern === name
       end
+
+      def notify(name, start, finish, wall, payload)
+        if @monotonic
+          @listener.call(name, start, finish, nil, payload)
+        elsif @listener.arity == 1
+          @listener.call(Event.new(name, Time.at(wall + start), Time.at(wall + finish), nil, payload, finish - start))
+        else
+          @listener.call(name, Time.at(wall + start), Time.at(wall + finish), nil, payload)
+        end
+        nil
+      end
     end
 
     def self.subscribe(pattern, callback = nil, monotonic: false, &block)
@@ -106,16 +117,7 @@ module ActiveSupport
       i = 0
       while i < list.length
         entry = list[i]
-        if entry.matches?(name)
-          callback = entry.listener
-          if entry.monotonic
-            callback.call(name, start, finish, nil, payload)
-          elsif callback.arity == 1
-            callback.call(Event.new(name, Time.at(wall + start), Time.at(wall + finish), nil, payload, finish - start))
-          else
-            callback.call(name, Time.at(wall + start), Time.at(wall + finish), nil, payload)
-          end
-        end
+        entry.notify(name, start, finish, wall, payload) if entry.matches?(name)
         i += 1
       end
       nil
