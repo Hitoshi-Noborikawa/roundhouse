@@ -59,9 +59,9 @@ const STORY_IMAGE: &str = r#"class StoryImage
 end
 "#;
 
-fn spinel_files() -> Vec<(String, String)> {
+fn spinel_files(test: &str) -> Vec<(String, String)> {
     let fixture = roundhouse::fixtures::real_blog().to_path_buf();
-    let dir = std::env::temp_dir().join(format!("roundhouse-extras-verbatim-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("roundhouse-extras-verbatim-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for sub in ["app", "config", "db"] {
         copy_dir(&fixture.join(sub), &dir.join(sub));
@@ -81,7 +81,7 @@ fn file<'a>(files: &'a [(String, String)], path: &str) -> &'a str {
 
 #[test]
 fn an_http_client_over_the_bundled_packages_is_emitted_as_written() {
-    let files = spinel_files();
+    let files = spinel_files("http");
     let sponge = file(&files, "app/models/sponge.rb");
     assert!(sponge.contains("Resolv.getaddresses"), "{sponge}");
     assert!(sponge.contains("Net::HTTP.new"), "{sponge}");
@@ -90,7 +90,7 @@ fn an_http_client_over_the_bundled_packages_is_emitted_as_written() {
 
 #[test]
 fn a_vips_compositor_is_emitted_as_written_against_the_pinned_package() {
-    let files = spinel_files();
+    let files = spinel_files("vips");
     let story_image = file(&files, "app/models/story_image.rb");
     assert!(story_image.contains(".insert("), "{story_image}");
     assert!(!story_image.contains("GemFacade.fail!"), "{story_image}");
