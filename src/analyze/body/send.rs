@@ -1148,6 +1148,20 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    /// Whether source defines `method` on `of`'s instances (own, included or inherited), harvested or not.
+    fn declares_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
+        let mut stack = vec![of];
+        let mut seen = crate::det::HashSet::default();
+        while let Some(id) = stack.pop() {
+            let Some(cls) = self.classes().get(id).filter(|_| seen.insert(id)) else { continue };
+            if cls.source_instance_methods.contains(method) {
+                return true;
+            }
+            stack.extend(cls.includes.iter().chain(cls.parent.iter()));
+        }
+        false
+    }
+
     fn defines_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {
@@ -1474,8 +1488,9 @@ impl<'a> BodyTyper<'a> {
                     }
                     _ => None,
                 };
+                // Same receiver, so the same side: an instance's send(:m) is its own m, not a class method m.
                 if let Some(name) = literal_name {
-                    return self.dispatch(recv_ty, &name, block_ret, &args[1..]);
+                    return self.dispatch_on(recv_ty, &name, block_ret, &args[1..], instance_receiver);
                 }
             }
             return match recv_ty {
@@ -2001,6 +2016,9 @@ impl<'a> BodyTyper<'a> {
                 // to wrap String→&str at `instance.clone().set_body
                 // (row.body())` sites).
                 match method.as_str() {
+                    // Not Module#name when the instance's class defines its own `name`: before the
+                    // first harvest registers that method, the send waits for it like any other.
+                    "name" if instance_receiver && self.declares_instance_method(id, method) => return unknown(),
                     "name" => return Ty::Str,
                     "clone" | "dup" => return Ty::Class { id: id.clone(), args: args.clone() },
                     "superclass" => return Ty::Class {
@@ -2427,9 +2445,12 @@ impl<'a> BodyTyper<'a> {
                         // `@room.messages.last_page` a relation — then
                         // `Message | nil` one hop later. Its Array is the
                         // answer, same as the terminal arm below.
+                        // A model element only: a class method answering
+                        // `Array[HashWithIndifferentAccess[…]]` (a `pluck`
+                        // mapped to hashes) is that Array, not a relation.
                         Some(Ty::Array { elem }) if !cls.materializing_scopes.contains(method) => {
                             return match &**elem {
-                                Ty::Class { id, .. } => Ty::Relation { of: id.clone() },
+                                Ty::Class { id, .. } if self.is_model_class(Some(elem)) => Ty::Relation { of: id.clone() },
                                 _ => Ty::Array { elem: elem.clone() },
                             };
                         }
@@ -2611,15 +2632,16 @@ impl<'a> BodyTyper<'a> {
     /// found on the receiver's class, its mixins, or a parent. The
     /// runtime's `Rails::Cache#fetch` is one by construction: its body
     /// is `yield`, and a hit answers what an earlier miss's block
-    /// stored. Only an INFORMATIVE block type is adopted, as for
-    /// `transaction`; otherwise the registered answer stands.
+    /// stored. A block typed `Untyped` answers `Untyped`: the registered
+    /// answer is what the call returns without a block. A `Var` block is
+    /// not known yet, so the registered answer stands.
     pub(crate) fn block_value_return(
         &self,
         recv_ty: Option<&Ty>,
         method: &Symbol,
         block_ret: Option<&Ty>,
     ) -> Option<Ty> {
-        let ret = block_ret.filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))?;
+        let ret = block_ret.filter(|t| !matches!(t, Ty::Var { .. }))?;
         let Some(Ty::Class { id, .. }) = recv_ty else { return None };
         if id.0.as_str() == "Rails::Cache" && method.as_str() == "fetch" {
             return Some(ret.clone());
@@ -3514,9 +3536,17 @@ pub(super) fn hash_method(
             (_, Some(default), _) if !default.is_open() => union_of(value.clone(), default),
             _ => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         },
-        "merge" => Ty::Hash {
-            key: std::sync::Arc::new(key.clone()),
-            value: std::sync::Arc::new(value.clone()),
+        // The other Hash's entries join the receiver's: `{}.merge(k => v)`
+        // has `v`s, which the empty literal alone does not say.
+        "merge" => match (args, block_ret) {
+            ([other], None) => match other.ty.as_ref() {
+                Some(Ty::Hash { key: other_key, value: other_value }) => Ty::Hash {
+                    key: std::sync::Arc::new(union_of(key.clone(), (**other_key).clone())),
+                    value: std::sync::Arc::new(union_of(value.clone(), (**other_value).clone())),
+                },
+                _ => Ty::Hash { key: std::sync::Arc::new(key.clone()), value: std::sync::Arc::new(value.clone()) },
+            },
+            _ => Ty::Hash { key: std::sync::Arc::new(key.clone()), value: std::sync::Arc::new(value.clone()) },
         },
         // The supported Rails subset is the non-mutating, one-argument,
         // no-block form. Keep block conflicts and `deep_merge!` unresolved

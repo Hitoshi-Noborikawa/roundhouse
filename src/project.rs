@@ -29,7 +29,7 @@ use zip::write::SimpleFileOptions;
 
 use crate::App;
 use crate::emit::{self, EmittedFile};
-use crate::gems::{GEM_REQUIRES, Marker, VARIATION_MARKER, compiler_runtime_gems};
+use crate::gems::{DEMAND_REQUIRES, GEM_REQUIRES, Marker, VARIATION_MARKER, compiler_runtime_gems};
 use crate::ingest::ingest_app;
 
 pub use crate::build_target::{BuildTarget, ParamBindCapability};
@@ -706,136 +706,11 @@ pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<()
 /// A conflict the rule cannot decide fails the emit, rather than leaving
 /// it to readdir.
 fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), String> {
-    use ruby_rbs::node::{MethodDefinitionKind, Node, parse};
     use crate::det::HashMap;
     struct Decl {
         file: usize,
         span: std::ops::Range<usize>,
         sig: String,
-    }
-    // Compare the complete signature, ignoring layout and comments but keeping
-    // token boundaries and the contents of quoted literal types intact.
-    fn signature_key(source: &str) -> String {
-        let mut chars = source.chars().peekable();
-        let mut tokens = Vec::new();
-        while let Some(c) = chars.next() {
-            if c.is_whitespace() {
-                continue;
-            }
-            if c == '#' {
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            let mut token = c.to_string();
-            if c == '\'' || c == '"' {
-                while let Some(next) = chars.next() {
-                    token.push(next);
-                    if next == '\\' {
-                        if let Some(escaped) = chars.next() {
-                            token.push(escaped);
-                        }
-                    } else if next == c {
-                        break;
-                    }
-                }
-            } else if c.is_alphanumeric() || c == '_' {
-                while chars
-                    .peek()
-                    .is_some_and(|c| c.is_alphanumeric() || *c == '_')
-                {
-                    token.push(chars.next().unwrap());
-                }
-            }
-            tokens.push(token);
-        }
-        tokens.join(" ")
-    }
-    fn collect<'a>(
-        nodes: impl Iterator<Item = Node<'a>>,
-        parent: &str,
-        fi: usize,
-        text: &str,
-        decls: &mut HashMap<(String, &'static str, String), Vec<Decl>>,
-    ) -> Result<(), String> {
-        for node in nodes {
-            let (name, members) = match node {
-                Node::Class(c) => (c.name(), c.members()),
-                Node::Module(m) => (m.name(), m.members()),
-                Node::Interface(i) => (i.name(), i.members()),
-                Node::MethodDefinition(method) => {
-                    let prefix = match method.kind() {
-                        MethodDefinitionKind::Instance => "",
-                        MethodDefinitionKind::Singleton => "self.",
-                        MethodDefinitionKind::SingletonInstance => "self?.",
-                    };
-                    let loc = method.location();
-                    let mut start = loc.start() as usize;
-                    let mut end = loc.end() as usize;
-                    // ruby-rbs 0.3 leaves name_location unset for a backtick
-                    // identifier. The name symbol's own location is populated
-                    // for every spelling, including quoted names and operators.
-                    let sig_start = method.name().location().end() as usize;
-                    let invalid_location = || {
-                        format!(
-                            "invalid source location for {parent}#{prefix}{}",
-                            method.name()
-                        )
-                    };
-                    let source = text
-                        .get(sig_start..end)
-                        .filter(|_| text.get(start..sig_start).is_some())
-                        .ok_or_else(invalid_location)?;
-                    let sig = signature_key(source);
-                    for annotation in method.annotations().iter() {
-                        start = start.min(annotation.location().start() as usize);
-                    }
-                    // Remove indentation/newline only when the declaration owns
-                    // that part of the line; same-line neighbors must survive.
-                    let before = text.get(..start).ok_or_else(invalid_location)?;
-                    let line_start = before.rfind('\n').map_or(0, |n| n + 1);
-                    if text[line_start..start].trim().is_empty() {
-                        start = line_start;
-                    }
-                    let line_end = text[end..].find('\n').map_or(text.len(), |n| end + n + 1);
-                    let suffix = text[end..line_end].trim();
-                    if suffix.is_empty() || suffix.starts_with('#') {
-                        end = line_end;
-                    }
-                    // A quoted instance name can itself start with `self.`.
-                    // Keep the receiver separate from the decoded name.
-                    decls
-                        .entry((
-                            parent.to_string(),
-                            prefix,
-                            method.name().as_str().to_string(),
-                        ))
-                        .or_default()
-                        .push(Decl {
-                            file: fi,
-                            span: start..end,
-                            sig,
-                        });
-                    continue;
-                }
-                _ => continue,
-            };
-            let namespace = name.namespace();
-            let mut parts = Vec::new();
-            if !namespace.absolute() && !parent.is_empty() {
-                parts.push(parent.to_string());
-            }
-            parts.extend(namespace.path().iter().filter_map(|part| match part {
-                Node::Symbol(s) => Some(s.as_str().to_string()),
-                _ => None,
-            }));
-            parts.push(name.name().as_str().to_string());
-            collect(members.iter(), &parts.join("::"), fi, text, decls)?;
-        }
-        Ok(())
     }
     // (qualified class, receiver, method) -> declarations from every runtime .rbs.
     let mut decls: HashMap<(String, &'static str, String), Vec<Decl>> = HashMap::default();
@@ -845,10 +720,14 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         {
             continue;
         }
-        let signature =
-            parse(text).map_err(|e| format!("resolve_runtime_sig_conflicts: {path}: {e}"))?;
-        collect(signature.declarations().iter(), "", fi, text, &mut decls)
+        let found = rbs_method_declarations(text)
             .map_err(|e| format!("resolve_runtime_sig_conflicts: {path}: {e}"))?;
+        for d in found {
+            decls
+                .entry((d.owner, d.receiver, d.name))
+                .or_default()
+                .push(Decl { file: fi, span: d.span, sig: d.sig });
+        }
     }
     // Rank of the file a declaration sits in: higher wins.
     let rank = |fi: usize, class: &str| -> u8 {
@@ -893,21 +772,170 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
             undecided.join("\n  ")
         ));
     }
-    for (fi, mut spans) in drop {
-        let text = &mut files[fi].1;
-        let mut kept = String::with_capacity(text.len());
-        spans.sort_by_key(|span| span.start);
-        let mut cursor = 0;
-        for span in spans {
-            if cursor < span.start {
-                kept.push_str(&text[cursor..span.start]);
-            }
-            cursor = cursor.max(span.end);
-        }
-        kept.push_str(&text[cursor..]);
-        *text = kept;
+    for (fi, spans) in drop {
+        files[fi].1 = remove_rbs_spans(&files[fi].1, spans);
     }
     Ok(())
+}
+
+/// One method declaration in an RBS file, as the passes that drop one
+/// see it: `resolve_runtime_sig_conflicts`, and `emit::ruby::reopen` for
+/// a method an app's reopen redefines.
+pub(crate) struct RbsMethodDecl {
+    /// The qualified class, module or interface that declares it.
+    pub(crate) owner: String,
+    /// `""`, `"self."` or `"self?."`.
+    pub(crate) receiver: &'static str,
+    pub(crate) name: String,
+    /// What removing it takes: every overload and annotation, plus the
+    /// indentation and line end when no neighbor shares that line.
+    pub(crate) span: std::ops::Range<usize>,
+    /// The signature, compared without layout or comments.
+    pub(crate) sig: String,
+}
+
+/// Every method declaration in `text`, nested owners included.
+pub(crate) fn rbs_method_declarations(text: &str) -> Result<Vec<RbsMethodDecl>, String> {
+    let signature = ruby_rbs::node::parse(text).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    collect_rbs_methods(signature.declarations().iter(), "", text, &mut out)?;
+    Ok(out)
+}
+
+// Compare the complete signature, ignoring layout and comments but keeping
+// token boundaries and the contents of quoted literal types intact.
+fn signature_key(source: &str) -> String {
+    let mut chars = source.chars().peekable();
+    let mut tokens = Vec::new();
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            continue;
+        }
+        if c == '#' {
+            for c in chars.by_ref() {
+                if c == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+        let mut token = c.to_string();
+        if c == '\'' || c == '"' {
+            while let Some(next) = chars.next() {
+                token.push(next);
+                if next == '\\' {
+                    if let Some(escaped) = chars.next() {
+                        token.push(escaped);
+                    }
+                } else if next == c {
+                    break;
+                }
+            }
+        } else if c.is_alphanumeric() || c == '_' {
+            while chars
+                .peek()
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+            {
+                token.push(chars.next().unwrap());
+            }
+        }
+        tokens.push(token);
+    }
+    tokens.join(" ")
+}
+
+fn collect_rbs_methods<'a>(
+    nodes: impl Iterator<Item = ruby_rbs::node::Node<'a>>,
+    parent: &str,
+    text: &str,
+    out: &mut Vec<RbsMethodDecl>,
+) -> Result<(), String> {
+    use ruby_rbs::node::{MethodDefinitionKind, Node};
+    for node in nodes {
+        let (name, members) = match node {
+            Node::Class(c) => (c.name(), c.members()),
+            Node::Module(m) => (m.name(), m.members()),
+            Node::Interface(i) => (i.name(), i.members()),
+            Node::MethodDefinition(method) => {
+                let prefix = match method.kind() {
+                    MethodDefinitionKind::Instance => "",
+                    MethodDefinitionKind::Singleton => "self.",
+                    MethodDefinitionKind::SingletonInstance => "self?.",
+                };
+                let loc = method.location();
+                let mut start = loc.start() as usize;
+                let mut end = loc.end() as usize;
+                // ruby-rbs 0.3 leaves name_location unset for a backtick
+                // identifier. The name symbol's own location is populated
+                // for every spelling, including quoted names and operators.
+                let sig_start = method.name().location().end() as usize;
+                let invalid_location = || {
+                    format!(
+                        "invalid source location for {parent}#{prefix}{}",
+                        method.name()
+                    )
+                };
+                let source = text
+                    .get(sig_start..end)
+                    .filter(|_| text.get(start..sig_start).is_some())
+                    .ok_or_else(invalid_location)?;
+                let sig = signature_key(source);
+                for annotation in method.annotations().iter() {
+                    start = start.min(annotation.location().start() as usize);
+                }
+                // Remove indentation/newline only when the declaration owns
+                // that part of the line; same-line neighbors must survive.
+                let before = text.get(..start).ok_or_else(invalid_location)?;
+                let line_start = before.rfind('\n').map_or(0, |n| n + 1);
+                if text[line_start..start].trim().is_empty() {
+                    start = line_start;
+                }
+                let line_end = text[end..].find('\n').map_or(text.len(), |n| end + n + 1);
+                let suffix = text[end..line_end].trim();
+                if suffix.is_empty() || suffix.starts_with('#') {
+                    end = line_end;
+                }
+                // A quoted instance name can itself start with `self.`.
+                // Keep the receiver separate from the decoded name.
+                out.push(RbsMethodDecl {
+                    owner: parent.to_string(),
+                    receiver: prefix,
+                    name: method.name().as_str().to_string(),
+                    span: start..end,
+                    sig,
+                });
+                continue;
+            }
+            _ => continue,
+        };
+        let namespace = name.namespace();
+        let mut parts = Vec::new();
+        if !namespace.absolute() && !parent.is_empty() {
+            parts.push(parent.to_string());
+        }
+        parts.extend(namespace.path().iter().filter_map(|part| match part {
+            Node::Symbol(s) => Some(s.as_str().to_string()),
+            _ => None,
+        }));
+        parts.push(name.name().as_str().to_string());
+        collect_rbs_methods(members.iter(), &parts.join("::"), text, out)?;
+    }
+    Ok(())
+}
+
+/// `text` without `spans`, overlapping ones included.
+pub(crate) fn remove_rbs_spans(text: &str, mut spans: Vec<std::ops::Range<usize>>) -> String {
+    let mut kept = String::with_capacity(text.len());
+    spans.sort_by_key(|span| span.start);
+    let mut cursor = 0;
+    for span in spans {
+        if cursor < span.start {
+            kept.push_str(&text[cursor..span.start]);
+        }
+        cursor = cursor.max(span.end);
+    }
+    kept.push_str(&text[cursor..]);
+    kept
 }
 
 /// A plain class the app declares outside the Rails base classes
@@ -2945,6 +2973,11 @@ fn target_files_inner(
             }
         }
         let mut files = files;
+        // The app's reopens of runtime classes first, on the same
+        // finished set: an override retires the runtime's def, and the
+        // shake then reads the tree that ships (see emit::ruby::reopen).
+        let models = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+        emit::ruby::reopen::apply_runtime_reopens(&mut files, &models);
         if target == BuildTarget::Spinel {
             emit::ruby::shake::drop_shadowed_base_defs(&mut files);
         }
@@ -4423,6 +4456,13 @@ fn ruby_family_runtime_files(
     // conditional on the app naming the constant, not on the require
     // graph's shape (which is what kept the blog's JRuby tree booting
     // with no jars).
+    // A demand-gated require (`gems::DEMAND_REQUIRES`) whose constant no
+    // app body names stays out of the list.
+    let undemanded: Vec<&str> = DEMAND_REQUIRES
+        .iter()
+        .filter(|(_, konst)| !files.iter().any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, konst)))
+        .map(|(require, _)| *require)
+        .collect();
     let gem_facades = match flavor {
         RubyFlavor::CRuby => format!(
             "# Gem façades are spinel-only (no native gems there). On the CRuby\n\
@@ -4439,7 +4479,7 @@ fn ruby_family_runtime_files(
              require_relative \"module_delegate\"\n\
              require_relative \"open_telemetry_facade\"\n\
              {}{}",
-            gem_require_block(&[], &lock_gated_requires(app)),
+            gem_require_block(&undemanded, &lock_gated_requires(app)),
             WEB_PUSH_STUB_REOPEN
         ),
         RubyFlavor::JRuby => {
@@ -4464,7 +4504,7 @@ fn ruby_family_runtime_files(
                  require_relative \"open_telemetry_facade\"\n\
                  {}{}",
                 markly_require,
-                gem_require_block(&["markly"], &lock_gated_requires(app)),
+                gem_require_block(&[&["markly"][..], &undemanded].concat(), &lock_gated_requires(app)),
                 WEB_PUSH_STUB_REOPEN
             )
         }
@@ -5529,6 +5569,11 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     const BUILT_TAIL: &str = "    # <<< generated: attachable-by-content-type\n";
 
     let has_layout = files.iter().any(|(path, _)| path.ends_with(VIEW));
+    // The partials named here are called by the method they lowered to,
+    // which a template of the same name in their directory moves
+    // (`PartialStems`); the files keep their names.
+    let stems = crate::lower::view_to_library::PartialStems::of(&app.views);
+    let content = stems.method("layouts/action_text/contents", "content");
     // What the layout YIELDS is Action Text's own partial,
     // `action_text/contents/_content.html.erb`, rendered: `<%=
     // render_action_text_content(content) %>` and the newline that
@@ -5538,7 +5583,7 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     // emit wrote `…boxes.</div>` without it.
     let layout = format!(
         "{HEAD}    def rendered_html\n      \
-         Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")\n    end\n{TAIL}"
+         Views::Layouts::ActionText::Contents.{content}(render_action_text_content + \"\\n\")\n    end\n{TAIL}"
     );
 
     // Two kinds of arm, in the order campfire's own `from_node` reopen
@@ -5570,13 +5615,14 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
             continue;
         }
         let module = crate::lower::view_to_library::view_module_id(dir);
+        let method = stems.method(dir, stem);
         let name = binding.class.0.as_str();
         let local = &binding.local;
         if binding.content_type.is_some() {
             by_content_type.push_str(&format!(
                 "      {local} = ::{name}.from_node(attachment)\n      \
                  unless {local}.nil?\n        {local}.attachment = attachment\n        \
-                 return {module}.{stem}({local})\n      end\n",
+                 return {module}.{method}({local})\n      end\n",
                 module = module.0.as_str(),
             ));
             built_by_content_type.push_str(&format!(
@@ -5593,7 +5639,7 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
         } else {
             by_model.push_str(&format!(
                 "      when \"{name}\"\n        {local} = {name}.find_by({{ id: attachment.resolved_id }})\n        \
-                 {local}.nil? ? \"\" : {module}.{stem}({local})\n",
+                 {local}.nil? ? \"\" : {module}.{method}({local})\n",
                 module = module.0.as_str(),
             ));
             if binding.plain_text {
@@ -5610,10 +5656,11 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     // the app's copy of that partial. campfire overrides it to show an
     // embedded file by name rather than making a preview on view.
     if files.iter().any(|(path, _)| path.ends_with("app/views/active_storage/blobs/_blob.rb")) {
-        by_model.push_str(
+        let blob = stems.method("active_storage/blobs", "blob");
+        by_model.push_str(&format!(
             "      when \"ActiveStorage::Blob\"\n        \
-             attachment.blob.nil? ? \"\" : Views::ActiveStorage::Blobs.blob(attachment)\n",
-        );
+             attachment.blob.nil? ? \"\" : Views::ActiveStorage::Blobs.{blob}(attachment)\n",
+        ));
     }
     let built = if built_by_content_type.is_empty() {
         None
@@ -9476,7 +9523,7 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
     // every understood `stub_request` chain to the slot by the time this
     // scan runs, so on the ruby family the slot's delegate is what reaches
     // the gem — and that is the demand.
-    const TEST_GEMS: [(Marker, &str, &str); 3] = [
+    const TEST_GEMS: [(Marker, &str, &str); 6] = [
         (Marker::AnyText(&["WebMock.", "WebMock::", "HttpStub."]), "webmock", "webmock/minitest"),
         // `MochaBridge.` is the lowering's own spelling of a chain it hands
         // back to the gem (`lower::mocha`), and the paren-less forms are
@@ -9491,6 +9538,12 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
         // dimensions, which is the only honest way to check that an
         // image endpoint served an image of the right size.
         (Marker::Constant("Vips"), "ruby-vips", "vips"),
+        // The `lower::ruby_family_gems` gems in a test body alone:
+        // `gems::RUNTIME_GEMS` reads app/ only, so without these rows the
+        // suite would reach a gem its Gemfile never named.
+        (Marker::Constant("Retryable"), "retryable", "retryable"),
+        (Marker::Constant("JWT"), "jwt", "jwt"),
+        (Marker::Constant("RestClient"), "rest-client", "rest-client"),
     ];
 
     let mut needed: Vec<(&str, &str)> = Vec::new();
@@ -9581,6 +9634,9 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
                 gemfile.push('\n');
             }
             gemfile.push_str(&block);
+            // The scaffold lock no longer matches; `bundle install`
+            // resolves the edited Gemfile fresh.
+            files.retain(|(p, _)| p != "Gemfile.lock");
         }
     }
 }
@@ -10779,6 +10835,40 @@ fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
 /// character or colon rules out `HashSet` and `Foo::Set`. Whole-line
 /// comments are skipped: the cookie jar explains a `Set.new` rewrite in
 /// one, and that is not a use.
+/// Whether the end of `head` lies inside a single- or double-quoted
+/// literal on its line (a backslash escapes the next byte). Code inside a
+/// double-quoted `#{…}` is code again.
+fn inside_quotes(head: &[u8]) -> bool {
+    // Open literals, innermost last, each with the `{` depth of the
+    // interpolation inside it (0 while in the literal's text).
+    let mut open: Vec<(u8, usize)> = Vec::new();
+    let mut escaped = false;
+    let mut i = 0;
+    while i < head.len() {
+        let c = head[i];
+        match open.last_mut() {
+            Some((q, 0)) => {
+                if escaped {
+                    escaped = false;
+                } else if c == b'\\' {
+                    escaped = true;
+                } else if c == *q {
+                    open.pop();
+                } else if *q == b'"' && c == b'#' && head.get(i + 1) == Some(&b'{') {
+                    open.last_mut().unwrap().1 = 1;
+                    i += 1;
+                }
+            }
+            Some((_, depth)) if c == b'{' => *depth += 1,
+            Some((_, depth)) if c == b'}' => *depth -= 1,
+            _ if c == b'"' || c == b'\'' => open.push((c, 0)),
+            _ => {}
+        }
+        i += 1;
+    }
+    matches!(open.last(), Some((_, 0)))
+}
+
 fn names_constant(src: &str, konst: &str) -> bool {
     // Most files never mention this name. Reject those with the optimized
     // substring search before walking/decoding every line of the runtime.
@@ -10806,11 +10896,29 @@ fn names_constant(src: &str, konst: &str) -> bool {
         let mut i = 0;
         while let Some(off) = line[i..].find(konst) {
             let at = i + off;
-            let head_ok = at == 0
-                || !matches!(b[at - 1],
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b':');
+            let ident = |c: u8| matches!(c, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+            // `::RestClient` is the top-level name too; `Foo::RestClient`
+            // is another one.
+            let rooted = at >= 2 && &b[at - 2..at] == b"::" && (at == 2 || !ident(b[at - 3]));
+            let head_ok = (at == 0 || rooted || !(ident(b[at - 1]) || b[at - 1] == b':'))
+                && !inside_quotes(&b[..at]);
             let tail = at + konst.len();
-            let tail_ok = matches!(b.get(tail), Some(b'.' | b'[' | b'('))
+            // A value: `client = RestClient`, `use(::RestClient)`, an
+            // argument or array element, `"#{RestClient}"`. A `%w[...]`
+            // word is a string.
+            let value = {
+                let start = if rooted { at - 2 } else { at };
+                let before = line[..start].trim_end();
+                let words = ["%w[", "%W[", "%i[", "%I["].iter().any(|w| before.ends_with(w));
+                // `[ RestClient ]` — the BracketsSpaced array style.
+                let after = line[tail..].trim_start().as_bytes().first();
+                ((before.ends_with('=') || before.ends_with('(') || before.ends_with(',') || before.ends_with('['))
+                    && !words
+                    && matches!(after, None | Some(b')' | b',' | b']')))
+                    || (before.ends_with("#{") && after == Some(&b'}'))
+            };
+            let tail_ok = value
+                || matches!(b.get(tail), Some(b'.' | b'[' | b'('))
                 || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'))
                 // Only right after the keyword or a rescue-list comma: `raise "Timeout waiting"` names no constant.
                 || (matches!(b.get(tail), None | Some(b',' | b' ')) && {
@@ -12678,6 +12786,96 @@ mod tests {
         assert!(gemfile.contains("webmock"), "a test body's demand stands:\n{gemfile}");
     }
 
+    /// A test gem added to the Gemfile drops the scaffold lock, which
+    /// does not pin it; a Gemfile left alone keeps its lock.
+    #[test]
+    fn a_declared_test_gem_drops_the_stale_lock() {
+        let test = |body: &str| {
+            let mut files = vec![
+                ("test/test_helper.rb".to_string(), String::new()),
+                ("test/models/article_test.rb".to_string(), body.to_string()),
+                ("Gemfile".to_string(), "source \"https://rubygems.org\"\n".to_string()),
+                ("Gemfile.lock".to_string(), "GEM\n".to_string()),
+            ];
+            apply_test_gem_wiring(&mut files);
+            files.iter().any(|(p, _)| p == "Gemfile.lock")
+        };
+        assert!(!test("WebMock.stub_request(:get, \"/\")\n"));
+        assert!(test("assert true\n"));
+    }
+
+    /// A rooted `::Name` names the top-level constant, and so does a value
+    /// use; `Outer::Name` does not.
+    #[test]
+    fn names_constant_reads_a_rooted_name_and_a_value() {
+        assert!(names_constant("x = ::RestClient.get(u)\n", "RestClient"));
+        assert!(names_constant("::RestClient::Request.execute(a)\n", "RestClient"));
+        assert!(names_constant("rescue ::RestClient::NotFound\n", "RestClient"));
+        assert!(!names_constant("x = Foo::RestClient.get(u)\n", "RestClient"));
+        assert!(!names_constant("x = MyRestClient.get(u)\n", "RestClient"));
+        // As a value, bare or rooted.
+        assert!(names_constant("CLIENT = RestClient\n", "RestClient"));
+        assert!(names_constant("client = ::RestClient\n", "RestClient"));
+        assert!(names_constant("register(RestClient)\n", "RestClient"));
+        assert!(names_constant("pick(RestClient, 1)\n", "RestClient"));
+        assert!(!names_constant("CLIENT = Outer::RestClient\n", "RestClient"));
+        // Not prose in a literal.
+        assert!(!names_constant("msg = \"Saved, RestClient down\"\n", "RestClient"));
+        assert!(!names_constant("msg = \"Saved, RestClient\"\n", "RestClient"));
+        assert!(!names_constant("msg = 'a \\' (RestClient)'\n", "RestClient"));
+        assert!(!names_constant("doc = \"::RestClient::Request.execute\"\n", "RestClient"));
+        assert!(!names_constant("doc = 'see RestClient.get(u)'\n", "RestClient"));
+        // Interpolated code is code.
+        assert!(names_constant("msg = \"#{::RestClient::Request.new(a).url}\"\n", "RestClient"));
+        assert!(names_constant("msg = \"a #{h.fetch(:x) { RestClient.get(u) }} b\"\n", "RestClient"));
+        assert!(!names_constant("msg = \"#{x} RestClient.get\"\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [RestClient]\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [ RestClient ]\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [ RestClient , Net::HTTP ]\n", "RestClient"));
+        assert!(names_constant("CLIENTS = [Net::HTTP, ::RestClient]\n", "RestClient"));
+        assert!(names_constant("msg = \"via #{RestClient}\"\n", "RestClient"));
+        assert!(!names_constant("NAMES = %w[RestClient]\n", "RestClient"));
+        assert!(!names_constant("NAMES = %i[RestClient]\n", "RestClient"));
+        assert!(!names_constant("msg = \"[RestClient]\"\n", "RestClient"));
+    }
+
+    /// An app body that names ElasticAPM only as a value still declares
+    /// elastic-apm: its marker is a constant, read by `names_constant`.
+    #[test]
+    fn elastic_apm_as_a_value_declares_the_gem() {
+        assert!(compiler_runtime_gems().iter().any(|(m, gem)| {
+            *gem == "elastic-apm" && matches!(m, Marker::Constant("ElasticAPM"))
+        }));
+        assert!(names_constant("APM = ElasticAPM\n", "ElasticAPM"));
+        assert!(names_constant("instrument(ElasticAPM)\n", "ElasticAPM"));
+    }
+
+    /// A test body that alone names a `lower::ruby_family_gems` gem declares
+    /// and requires it.
+    #[test]
+    fn a_test_body_naming_a_ruby_family_gem_declares_it() {
+        for (body, gem) in [
+            ("Retryable.retryable(tries: 2) { 1 }", "retryable"),
+            ("JWT.encode({ a: 1 }, \"k\", \"HS256\")", "jwt"),
+            ("RestClient.get(\"http://example.test\")", "rest-client"),
+            ("client = ::RestClient", "rest-client"),
+        ] {
+            let mut files = vec![
+                ("test/test_helper.rb".to_string(), "require_relative \"../boot\"\n".to_string()),
+                (
+                    "test/models/article_test.rb".to_string(),
+                    format!("class ArticleTest < TestBase\n  def test_x\n    {body}\n  end\nend\n"),
+                ),
+                ("Gemfile".to_string(), "source \"https://rubygems.org\"\n".to_string()),
+            ];
+            apply_test_gem_wiring(&mut files);
+            let gemfile = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
+            assert!(gemfile.contains(&format!("{gem:?}")), "{gem}: {gemfile}");
+            let helper = &files.iter().find(|(p, _)| p == "test/test_helper.rb").unwrap().1;
+            assert!(helper.contains(&format!("require {gem:?}")), "{gem}: {helper}");
+        }
+    }
+
     /// `require "vips"` after boot. ruby-vips pulls in the system
     /// libxml; Nokogiri has to load its packaged one first or `*:a`
     /// and `css-class()` raise `Invalid expression`.
@@ -12945,6 +13143,7 @@ mod tests {
             as_name: None,
             constraints: Default::default(),
             scope: Default::default(),
+            action_symbol: false,
         });
 
         // An app file whose name merely ends in `main.rb` is the app's.
@@ -12984,6 +13183,7 @@ mod tests {
             as_name: None,
             constraints: Default::default(),
             scope: Default::default(),
+            action_symbol: false,
         });
         let module = "module RouteTable\nend\n".to_string();
         let mut files = vec![

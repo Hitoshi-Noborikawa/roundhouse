@@ -192,6 +192,23 @@ pub fn lower_models_with_registry_and_params(
     lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit, FinderInputs::Scalar)
 }
 
+/// As above, for an app's emit: a model's broadcasts render its partial
+/// by the method `views` give it, which a template of the partial's name
+/// moves (`PartialStems`). Without the views a partial keeps its stem.
+pub fn lower_models_with_registry_params_and_views(
+    models: &[Model],
+    schema: &Schema,
+    views: &[crate::dialect::View],
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
+) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    lower_models_inner_with_ruby_values(
+        models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit,
+        FinderInputs::Scalar, false, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent,
+        &crate::lower::view_to_library::PartialStems::of(views),
+    )
+}
+
 /// Lower models with scalar finder inputs when the caller needs classes only;
 /// Ruby-family request consumers select their separate normalization entry.
 pub fn lower_models_to_library_classes(
@@ -266,9 +283,14 @@ pub(crate) fn lower_models_inner(
     materialization: Materialization<'_>,
     finder_inputs: FinderInputs,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    // No view inventory reaches these entries, so a model's own partial
+    // keeps its stem (`PartialStems`); an app's emit passes its views
+    // through `lower_models_with_registry_params_and_views` or
+    // `lower_models_inner_with_ruby_values`.
     lower_models_inner_with_ruby_values(
         models, schema, extra_class_infos, params_specs, unfolded, materialization,
         finder_inputs, false, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent,
+        &Default::default(),
     )
 }
 
@@ -284,12 +306,13 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     param_binds: bool,
     errors_readers: ErrorsReaders,
     runtime_relation: RuntimeRelation,
+    partial_stems: &crate::lower::view_to_library::PartialStems,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::default();
     let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {
-        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation);
+        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation, partial_stems);
         let table = schema.tables.get(&model.table.0);
         // Register actual production definitions, even for unselected
         // models and when source overrides hide framework ownership.
@@ -308,7 +331,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                             if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")),
                     _ => true,
                 });
-                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation);
+                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation, partial_stems);
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
@@ -420,6 +443,25 @@ pub(crate) fn lower_models_inner_with_ruby_values(
         classes.insert(id, info);
     }
 
+    // A model class method chained on `all` / `where(...)` runs on that
+    // relation (Rails' scoping; the relation delegates it, see
+    // `emit_relation_scope_delegates`), so the chain under it is not
+    // folded into an Array. Only where a runtime Relation exists to
+    // carry it; elsewhere the fold stands.
+    let relation_class_methods: HashSet<Symbol> = if runtime_relation == RuntimeRelation::Present {
+        models
+            .iter()
+            .flat_map(|m| m.body.iter())
+            .filter_map(|item| match item {
+                crate::ModelBodyItem::Method { method, .. } if method.receiver == crate::dialect::MethodReceiver::Class => {
+                    Some(method.name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        HashSet::default()
+    };
     let mut out = Vec::new();
     for (mut methods, _, table, model) in all_methods {
         for method in &mut methods {
@@ -443,7 +485,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             if !unfold {
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
-                    &HashSet::default(),
+                    &relation_class_methods,
                     crate::lower::arel::SqliteVisitor { param_binds },
                 );
             }
@@ -1332,7 +1374,7 @@ pub(crate) fn build_methods(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<MethodDef> {
-    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent)
+    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent, &Default::default())
 }
 
 /// Return the instance method surface synthesized for a model, for ingest
@@ -1360,6 +1402,7 @@ fn build_methods_with_finder_inputs(
     param_binds: bool,
     errors_readers: ErrorsReaders,
     runtime_relation: RuntimeRelation,
+    partial_stems: &crate::lower::view_to_library::PartialStems,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
@@ -1579,7 +1622,7 @@ fn build_methods_with_finder_inputs(
     // After push_user_methods too: a model that writes its own
     // `cache_key` keeps it.
     self::markers::push_cache_key_methods(&mut methods, model, schema);
-    push_broadcasts_methods(&mut methods, model);
+    push_broadcasts_methods(&mut methods, model, partial_stems);
     // `has_secure_token` — the token default folds into the
     // `before_create` hook, so it runs BEFORE `push_callback_methods`:
     // the fold appends, and the macro's assignment belongs ahead of a
@@ -1589,7 +1632,7 @@ fn build_methods_with_finder_inputs(
     // runtime. After the user methods, so a model's own
     // `generate_token_for` wins.
     crate::lower::generates_token_for::push_token_for_methods(&mut methods, model);
-    push_callback_methods(&mut methods, model);
+    push_callback_methods(&mut methods, model, partial_stems);
 
     // File-grain catch-all (mirrors view_to_library's
     // build_library_class): whatever the synthesizers left span-less —

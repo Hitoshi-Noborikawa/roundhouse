@@ -225,6 +225,9 @@ pub struct ClassInfo {
     /// Catalog entries and source methods can have the same gradual
     /// return type, so a call-site refinement needs their provenance.
     pub source_class_methods: crate::det::HashSet<Symbol>,
+    /// Instance methods a model, library class or controller defines in
+    /// source, known before the first harvest registers their returns.
+    pub source_instance_methods: crate::det::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
     /// A source `new` that calls `super` still needs the inherited constructor.
@@ -419,6 +422,8 @@ pub struct BodyTyper<'a> {
     /// The app's translations; Rails' English when absent.
     i18n: Option<&'a crate::i18n::Catalog>,
     helper_modules: Option<&'a crate::det::HashSet<ClassId>>,
+    /// The `app/helpers` module that answers each helper name in the view.
+    helper_index: Option<&'a HashMap<Symbol, ClassId>>,
     open_classes: Option<&'a crate::analyze::open_classes::OpenClasses>,
     /// Parameter types for the lambda assignment currently being retyped
     /// from its `.call` sites. Empty during an ordinary walk.
@@ -563,6 +568,7 @@ impl<'a> BodyTyper<'a> {
             inquirers: None,
             i18n: None,
             helper_modules: None,
+            helper_index: None,
             open_classes: None,
             lambda_seeds: std::cell::RefCell::new(None),
             block_class_param: std::cell::RefCell::new(None),
@@ -691,6 +697,11 @@ impl<'a> BodyTyper<'a> {
     pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog, helper_modules: &'a crate::det::HashSet<ClassId>) -> Self {
         self.i18n = Some(catalog);
         self.helper_modules = Some(helper_modules);
+        self
+    }
+
+    pub(crate) fn with_helper_index(mut self, index: &'a HashMap<Symbol, ClassId>) -> Self {
+        self.helper_index = Some(index);
         self
     }
 
@@ -1797,8 +1808,9 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
                 // Not an unknown Kernel call: `lambda { |x| … }` is the stabby `->(x) { … }`, whose value is the block (svg-graph's `DataPoint::DEFAULT_SHAPE`).
+                // So is `proc { |x| … }`, whose value calls the same way.
                 if recv.is_none()
-                    && method.as_str() == "lambda"
+                    && matches!(method.as_str(), "lambda" | "proc")
                     && args.is_empty()
                     && !self.owns_operator(ctx.self_ty.as_ref(), method, ctx.class_side)
                     && let Some(b) = block.as_mut().filter(|b| matches!(&*b.node, ExprNode::Lambda { .. }))
@@ -2375,6 +2387,22 @@ impl<'a> BodyTyper<'a> {
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // An `app/helpers` method runs in the view, so a bare call that finds nothing on the module is the
+                // view's: the helper module that answers the name (`helpers :all`; the module itself while its own
+                // definition is untyped), else ActionView's `link_to`/`tag`/`image_tag`.
+                if recv.is_none()
+                    && !ctx.class_side
+                    && matches!(dispatched, Ty::Var { .. })
+                    && let Some(Ty::Class { id: helper, .. }) = ctx.self_ty.as_ref()
+                    && self.helper_modules.is_some_and(|h| h.contains(helper))
+                {
+                    let owner = self.helper_index.and_then(|index| index.get(method)).cloned();
+                    let view = owner.unwrap_or_else(|| ClassId(Symbol::from("ActionView::Base")));
+                    let alt = self.dispatch_on(Some(&Ty::Class { id: view, args: vec![].into() }), method, block_ret.as_ref(), args, true);
+                    if !matches!(alt, Ty::Var { .. }) {
+                        dispatched = alt;
+                    }
+                }
                 // Not a dispatch miss: a class that defines methods under computed names answers what its own code defines when it runs.
                 if matches!(dispatched, Ty::Var { .. })
                     && let Some(Ty::Class { id, .. }) = recv_ty.as_ref()
