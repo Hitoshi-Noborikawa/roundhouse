@@ -360,6 +360,36 @@ fn worker_child() {
             let values = emitted_labels(&app);
             serde_json::to_vec(&(answers, values)).unwrap()
         }
+        "i18n_constant_catalog" => {
+            let mut results = Vec::new();
+            for with_constant in [true, false] {
+                let make_app = || {
+                    let constant = if with_constant { "BOOT = I18n.t(\"probe.label\", name: 7);" } else { "" };
+                    app(&[
+                        ("lib/probe.rb", &format!("class Probe; {constant} def label; I18n.t(\"probe.label\", name: 7); end; end")),
+                        ("lib/other.rb", "class Other; def label; \"other\"; end; end"),
+                        ("config/locales/en.yml", "en:\n  probe:\n    label: \"%<name>02d\"\n"),
+                    ])
+                };
+                let mut source = make_app();
+                Analyzer::new(&source).analyze(&mut source);
+                let call = macro_call(&macro_label(&source, "Probe").body);
+                let diagnostic = crate::expr::ExprCold::diagnostic(&call.cold);
+                assert!(matches!(diagnostic,
+                    Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail, .. })
+                        if construct.as_str() == "I18n" && detail.contains("formatted placeholder")),
+                    "constant/body catalog mismatch, BOOT={with_constant}: {diagnostic:?}");
+                let source_diags = diagnose(&source);
+                assert!(source_diags.iter().any(|d| d.message.contains("formatted placeholder")));
+                let mut lowered = make_app();
+                let mut emit_diags = crate::session::analyze_and_lower(&mut lowered);
+                emit_diags.extend(diagnose(&lowered));
+                assert!(emit_diags.iter().any(|d| d.message.contains("formatted placeholder")),
+                    "emit must refuse the formatted translation, BOOT={with_constant}");
+                results.push((with_constant, source_diags, emit_diags));
+            }
+            serde_json::to_vec(&results).unwrap()
+        }
         "i18n_macro_v4" => {
             let mut app = macro_app(500);
             let mut analyzer = Analyzer::new(&app);
@@ -432,4 +462,9 @@ fn copied_macro_spans_do_not_share_distinct_translation_plans() {
 #[test]
 fn macro_v4_keeps_the_formatted_translation_refused() {
     compare_case_workers("i18n_macro_v4", &[1, 2, 8]);
+}
+
+#[test]
+fn constants_and_methods_share_the_app_translation_catalog() {
+    compare_case_workers("i18n_constant_catalog", &[1, 2, 8]);
 }

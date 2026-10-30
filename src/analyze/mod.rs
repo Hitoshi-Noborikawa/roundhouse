@@ -2322,6 +2322,7 @@ impl Analyzer {
             let shared = body::ConstScope::global(map.clone());
             let typer = BodyTyper::new(&self.classes)
                 .with_inquirers(&self.inquirers)
+                .with_i18n(&self.i18n, &self.helper_modules)
                 .with_typed_constants(&resolved)
                 .with_data_factories(&self.data_factories);
             let typer = typer.with_class_factories(&self.class_factories);
