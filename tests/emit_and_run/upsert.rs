@@ -147,3 +147,53 @@ fn upsert_is_unsupported_on_strict_targets() {
     let (_emitted, errors) = keystore_app().emit(roundhouse::project::BuildTarget::Rust);
     assert!(errors.iter().any(|e| e.contains("`upsert` is the Ruby-family runtime's")), "{errors:#?}");
 }
+
+/// The bulk writes answer Rails' `ActiveRecord::Result`: `insert` and an
+/// `insert_all` with `unique_by:` (an index name, here) are one INSERT in
+/// the runtime, skipping a duplicate; `insert!` raises on one; `upsert`
+/// assigns only what `update_only:` names.
+#[test]
+fn bulk_writes_answer_results_and_take_their_options() {
+    keystore_app()
+        .edit(
+            "db/schema.rb",
+            "    t.bigint \"value\"\n",
+            "    t.bigint \"value\"\n    t.string \"note\"\n",
+        )
+        .write(
+            "test/models/keystore_bulk_test.rb",
+            r#"require "test_helper"
+
+class KeystoreBulkTest < ActiveSupport::TestCase
+  test "insert, insert_all with an index name, insert! and update_only" do
+    first = Keystore.insert({ key: "a", value: 1, note: "x" })
+    assert_equal 1, first.affected_rows
+    assert_equal 1, first.rows.length
+    skipped = Keystore.insert_all([{ key: "a", value: 2, note: "y" }, { key: "b", value: 3, note: "y" }], unique_by: :index_keystores_on_key)
+    assert_equal 1, skipped.affected_rows
+    assert_equal 1, Keystore.where(key: "a").pick(:value)
+    assert_raises(ActiveRecord::RecordNotUnique) { Keystore.insert!({ key: "b", value: 4, note: "z" }) }
+    upserted = Keystore.upsert({ key: "b", value: 5, note: "z" }, unique_by: :key, update_only: [:value])
+    assert_equal 1, upserted.affected_rows
+    assert_equal [5, "y"], Keystore.where(key: "b").pick(:value, :note)
+    assert_equal 2, Keystore.count
+  end
+end
+"#,
+        )
+        .run_test("test/models/keystore_bulk_test.rb")
+        .assert_passes();
+}
+
+/// The runtime's `insert` is the Ruby family's too.
+#[test]
+fn insert_is_unsupported_on_strict_targets() {
+    let (_emitted, errors) = keystore_app()
+        .edit(
+            "app/models/keystore.rb",
+            "  def self.put(key, value)\n",
+            "  def self.add(key, value)\n    Keystore.insert({key: key, value: value})\n  end\n\n  def self.put(key, value)\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.iter().any(|e| e.contains("`insert` is the Ruby-family runtime's")), "{errors:#?}");
+}

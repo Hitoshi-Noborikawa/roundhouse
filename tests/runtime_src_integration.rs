@@ -1265,7 +1265,15 @@ fn every_runtime_method_body_concretely_typed() {
     // the same counter measures 901 on main and 904 with assignment.
     // Only Base#assign_attributes (+1) and UnknownAttributeError#initialize
     // (+2) differ; every other method's count is unchanged.
-    const CEILING: usize = 904;
+    // MEASURED 916 on 2026-10-30 (on 904): the bulk writes' rows are
+    // attribute Hashes whose values are whatever the app passes, so the
+    // String-keyed copy `upsert_all` and the new `insert_all` family make
+    // of them, and the values they escape, read untyped, as does a
+    // RETURNING row's value off `Db.column_value` (+10 in
+    // active_record/connection.rb); a `where` bind that may be a Relation
+    // is read untyped before its `to_sql` or its escape (+2 in
+    // active_record/relation.rb).
+    const CEILING: usize = 916;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
