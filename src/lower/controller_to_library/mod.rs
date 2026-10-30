@@ -1267,10 +1267,28 @@ fn build_methods(
         .filter(|f| !filter_is_spliceable(f, &privs))
         .map(|f| &f.target)
         .collect();
+    // A target that some method body also calls by name (a strong-params
+    // helper validated up front with `before_action :widget_params` and
+    // read again as `widget_params[:name]`) is still live after
+    // inlining: dropping it leaves those calls dangling (NameError).
+    // Every own method counts, routed or not, and so do its parameter
+    // defaults. A dynamic send whose name is not a literal
+    // (`send(params[:step])`) may reach any of them, so it keeps every
+    // target.
+    let mut called_by_bodies: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
+    let mut sends_dynamically = false;
+    for a in publics.iter().chain(helper_publics.iter()).chain(privs.iter()) {
+        collect_self_send_names(&a.body, &mut called_by_bodies, &mut sends_dynamically);
+        for default in a.formal_params().iter().filter_map(|p| p.default.as_ref()) {
+            collect_self_send_names(default, &mut called_by_bodies, &mut sends_dynamically);
+        }
+    }
     let filter_target_names: crate::det::HashSet<&Symbol> = before_filters
         .iter()
         .map(|f| &f.target)
-        .filter(|t| !called_target_names.contains(*t))
+        .filter(|t| {
+            !sends_dynamically && !called_target_names.contains(*t) && !called_by_bodies.contains(*t)
+        })
         .collect();
     // A subclassed controller keeps its filter targets: descendants
     // inherit the before_action and their preambles call the target
@@ -1872,6 +1890,46 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
         }
     }
     true
+}
+
+/// The names `body` calls on the controller itself: receiverless sends
+/// and sends on `self`, the dynamic sends of a literal name
+/// (`send(:name)`, `public_send`, `__send__`), and the bound methods it
+/// takes the same way (`method(:name)`, `&method(:name)`). One of those
+/// whose name is not a literal sets `dynamic`.
+fn collect_self_send_names(
+    body: &Expr,
+    out: &mut crate::det::HashSet<Symbol>,
+    dynamic: &mut bool,
+) {
+    let on_self = |recv: &Option<Expr>| {
+        recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+    };
+    match &*body.node {
+        ExprNode::Send { recv, method, args, .. } if on_self(recv) => {
+            out.insert(method.clone());
+            let named = match (method.as_str(), args.as_slice()) {
+                ("method", [arg]) => Some(arg),
+                ("send" | "public_send" | "__send__", [arg, ..]) => Some(arg),
+                _ => None,
+            };
+            match named.map(|arg| &*arg.node) {
+                Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => {
+                    out.insert(value.clone());
+                }
+                Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => {
+                    out.insert(Symbol::from(value.as_str()));
+                }
+                Some(_) => *dynamic = true,
+                None => {}
+            }
+        }
+        ExprNode::MethodRef { recv, name } if on_self(recv) => {
+            out.insert(name.clone());
+        }
+        _ => {}
+    }
+    body.node.for_each_child(&mut |c| collect_self_send_names(c, out, dynamic));
 }
 
 /// Return a copy of `action` with every applicable before_action

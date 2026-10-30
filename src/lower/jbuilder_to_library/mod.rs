@@ -696,8 +696,8 @@ struct Ctx {
 
 /// Classification of a single top-level statement in a jbuilder
 /// template. The walker normalizes recognized DSL Sends into this
-/// closed enum; unknown shapes are tagged `Unknown` and emit a TODO
-/// marker so the file still parses.
+/// closed enum; unknown shapes are tagged `Unknown`: refused when they
+/// are calls on `json`, an empty append otherwise.
 enum JbStmt<'a> {
     /// `json.extract! obj, :a, :b` — N pairs, one per attribute.
     Extract { obj: &'a Expr, attrs: Vec<Symbol> },
@@ -796,7 +796,8 @@ enum JbStmt<'a> {
     /// attribute name and raises (`TypeError: {fields: :b} is not a
     /// symbol nor a string`). Reported, never dropped.
     ArrayHashArgument,
-    /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
+    /// Unrecognized DSL or non-Send statement. A call on `json` is
+    /// refused where it stands; anything else surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
 }
@@ -1026,14 +1027,15 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
     mark_sound_merges(&classified, raw_stmts, ctx);
     let end = emit_pairs(&classified, raw_stmts, ctx, &mut out, Sep::First);
     out.push(io_append_lit(&ctx.accumulator, "}"));
-    // A statement the walker could not lower is written as nothing, so
-    // an empty object there says nothing about what Jbuilder sets:
-    // such an object is left as it was, not taken for BLANK.
+    // A statement the walker could not lower is refused or written as
+    // nothing, so an empty object there says nothing about what
+    // Jbuilder sets: such an object is left as it was, not taken for
+    // BLANK.
     (out, end == Sep::After || has_unlowered(raw_stmts, ctx))
 }
 
 /// Whether an object's statements, or a branch of them, include one
-/// the walker writes as an empty append (`JbStmt::Unknown`).
+/// the walker refuses or writes as an empty append (`JbStmt::Unknown`).
 fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
     stmts.iter().any(|s| match classify(s) {
         JbStmt::Unknown
@@ -1288,8 +1290,46 @@ fn emit_pairs(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
                 ));
+                let arg_ty = ctx.span_types.get(&arg.span);
                 let arg = rewrite_h_escape(&rewrite_route_helpers(arg, ctx));
-                out.extend(emit_partial_call(partial_path, vec![(as_name.clone(), arg)], ctx));
+                // Jbuilder's `_set_inline_partial` answers `[]` for a
+                // nil value without rendering the partial, whatever
+                // the value's static type.
+                if matches!(&*arg.node, ExprNode::Lit { value: Literal::Nil }) {
+                    out.push(io_append_lit(&ctx.accumulator, "[]"));
+                } else {
+                    // The value is bound once to a `__val<n>` local unless it
+                    // is a plain variable, so the nil check does not
+                    // evaluate it twice.
+                    let value = match &*arg.node {
+                        ExprNode::Var { .. } | ExprNode::Ivar { .. } => arg,
+                        _ => {
+                            let n = ctx.temps.get();
+                            ctx.temps.set(n + 1);
+                            let val = Symbol::from(format!("__val{n}"));
+                            out.push(Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Assign { target: LValue::Var { id: VarId(0), name: val.clone() }, value: arg },
+                            ));
+                            var_ref(val)
+                        }
+                    };
+                    let render = if arg_ty.is_some_and(is_collection_ty) {
+                        // A collection: Jbuilder renders the partial once
+                        // per element, into an array.
+                        emit_array_partial(&value, partial_path, as_name, ctx)
+                    } else {
+                        emit_partial_call(partial_path, vec![(as_name.clone(), value.clone())], ctx)
+                    };
+                    out.push(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::If {
+                            cond: send(Some(value), "nil?", Vec::new(), None, false),
+                            then_branch: io_append_lit(&ctx.accumulator, "[]"),
+                            else_branch: seq(render),
+                        },
+                    ));
+                }
                 sep = Sep::After;
             }
             JbStmt::Nested { key, body } => {
@@ -1472,6 +1512,24 @@ fn emit_pairs(
                     "only a Hash literal whose keys the object sets nowhere else, or a value typed Hash, is lowered",
                 ));
             }
+            // A `json.<key>(…)` the classifier does not recognise. Writing
+            // it as nothing dropped the key and never evaluated its
+            // arguments, with no report: Jbuilder renders it or raises.
+            // It is refused where it stands instead, as `ExtractDynamic`
+            // is. A statement on any other receiver keeps the empty
+            // append.
+            JbStmt::Unknown if is_json_send(src) => {
+                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                    file: String::new(),
+                    message: "jbuilder: a `json.<key>(…)` or `json.set!` call whose arguments or block the lowering does not recognise"
+                        .to_string(),
+                });
+                out.push(unsupported_stmt(
+                    src.span,
+                    "jbuilder call with unrecognised arguments",
+                    "the key, its arguments or its block do not match a lowered shape (options that are not literals or that are only known at run time, a non-literal `set!` key, a block that names its own builder)",
+                ));
+            }
             JbStmt::Unknown => {
                 out.push(io_append_lit(&ctx.accumulator, ""));
             }
@@ -1640,7 +1698,9 @@ fn object_keys(stmt: &JbStmt<'_>, ctx: &Ctx) -> Option<Vec<String>> {
             Some(pairs) => Some(pairs.into_iter().map(|(k, _)| k).collect()),
             None => attributes_merge(value, ctx).map(|(_, attrs)| attrs.iter().map(|a| a.as_str().to_string()).collect()),
         },
-        JbStmt::Local => Some(Vec::new()),
+        // Refused: the statement lowers to a raise, so a run that
+        // reaches it renders nothing and sets no key in this object.
+        JbStmt::Local | JbStmt::ExtractDynamic => Some(Vec::new()),
         JbStmt::Cond { then_branch, else_branch, .. } => {
             let mut keys = branch(then_branch)?;
             keys.extend(branch(else_branch)?);
@@ -2030,6 +2090,38 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             };
             JbStmt::Partial { partial_path, locals }
         }
+        // `json.set!(K, *rest, &blk)` with a literal key is
+        // `json.K(*rest, &blk)`: jbuilder 2.15.1 sends any method the
+        // builder does not define to `set!`, key first, so the two
+        // spellings take the same path with the same arguments. Only
+        // the generic key shapes below apply: `set!(:array!, x)` writes
+        // a key named `array!`, it is not `json.array!`.
+        //
+        // With no value, a block that names a parameter is given the
+        // builder itself (`_merge_block` yields `self`), and its calls
+        // go through that parameter rather than `json`, which the
+        // lowering cannot follow: Unknown, and so refused. A key that
+        // is not a literal is only known at run time: Unknown too.
+        "set!" => {
+            let Some((key, rest)) = args.split_first() else {
+                return JbStmt::Unknown;
+            };
+            let Some(key) = set_bang_key(key) else {
+                return JbStmt::Unknown;
+            };
+            if rest.is_empty() && block_names_a_parameter(block) {
+                return JbStmt::Unknown;
+            }
+            classify_key(&key, rest, block)
+        }
+        key => classify_key(key, args, block),
+    }
+}
+
+/// The generic `json.<key>(…)` shapes, where the method name (or the
+/// literal key of a `set!`) is the JSON key.
+fn classify_key<'a>(key: &str, args: &'a [Expr], block: &'a Option<Expr>) -> JbStmt<'a> {
+    match key {
         // `json.<key> do … end` — the value is a nested object. No
         // positional args; the block body is another object template.
         key if args.is_empty() && block.is_some() => {
@@ -2062,14 +2154,8 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // them, so the arm only takes them when they are literals: a
         // call there (`cache: raise("bad")`, `cache: key_for(x)`) has
         // effects the lowered array would lose.
-        //
-        // An explicit `json.set!(:key, col) { … }` is not this shape:
-        // its method name is not the key and its first argument is not
-        // the collection, so only its one-argument form reaches this
-        // arm, as before.
         key if !args.is_empty()
             && block.is_some()
-            && (key != "set!" || args.len() == 1)
             && args[1..].iter().all(is_literal_value)
             && !args
                 .get(1)
@@ -2095,13 +2181,29 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         // `json.<key> obj, partial: P, as: V` — one pair rendered
         // through a partial. Shares its options with `array!` and takes
         // the same two out; what differs is that the positional is ONE
-        // record, not a collection, so it emits an object where
-        // `array!` emits an array.
+        // record, so it emits an object where `array!` emits an array.
+        // A positional that is a collection renders one partial per
+        // element (jbuilder 2.15.1 `_set_inline_partial`); the walker
+        // picks that by the positional's type.
+        //
+        // The call passes the partial only its record. Any other key is
+        // a local Jbuilder hands the partial, which the call has no way
+        // to pass, and `cached:` is evaluated before Jbuilder renders:
+        // the shape is taken only with `partial:`, `as:` and `cached:`,
+        // all literals, and is refused otherwise.
         key if args.len() == 2 => {
             let arg = &args[0];
             let Some(opts) = extract_hash(&args[1]) else {
                 return JbStmt::Unknown;
             };
+            let options_ok = opts.iter().all(|(k, v)| {
+                matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                    if matches!(value.as_str(), "partial" | "as" | "cached"))
+                    && is_literal_value(v)
+            });
+            if !options_ok {
+                return JbStmt::Unknown;
+            }
             let (Some(partial_path), Some(as_name)) = (
                 hash_get_string(opts, "partial"),
                 hash_get_symbol(opts, "as"),
@@ -2112,6 +2214,26 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
         }
         _ => JbStmt::Unknown,
     }
+}
+
+/// The key of `json.set!(key, …)` as Jbuilder writes it, when it is a
+/// Symbol or String literal whose text needs no escaping in JSON (the
+/// walker writes a key as it stands). `None` for anything else, which
+/// the caller refuses.
+fn set_bang_key(e: &Expr) -> Option<String> {
+    let key = match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+        _ => string_literal(e)?,
+    };
+    let plain = !key.is_empty()
+        && key.chars().all(|c| !c.is_control() && !matches!(c, '"' | '\\' | '<' | '>' | '&' | '\u{2028}' | '\u{2029}'));
+    plain.then_some(key)
+}
+
+/// Whether a block names any parameter (`{ |g| … }`, `{ |*a| … }`).
+fn block_names_a_parameter(block: &Option<Expr>) -> bool {
+    matches!(block.as_ref().map(|b| &*b.node), Some(ExprNode::Lambda { params, rest_param, extra_params, block_param, .. })
+        if !params.is_empty() || rest_param.is_some() || !extra_params.is_empty() || block_param.is_some())
 }
 
 /// The element variable and body of a one-parameter block,
@@ -2339,6 +2461,22 @@ fn is_json_receiver(recv: &Expr) -> bool {
             ..
         } if method.as_str() == "json" && args.is_empty()
     )
+}
+
+/// Whether a value of type `ty` is always a collection: an Array, a
+/// Relation or an association collection, never nil.
+fn is_collection_ty(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Array { .. } | Ty::Relation { .. } => true,
+        Ty::Class { id, .. } => id.0.as_str().ends_with("Relation") || id.0.as_str().ends_with("CollectionProxy"),
+        _ => false,
+    }
+}
+
+/// Whether `stmt` is a call on the template's builder, `json.<m>(…)`.
+fn is_json_send(stmt: &Expr) -> bool {
+    matches!(&*stmt.node, ExprNode::Send { recv: Some(recv), .. } if is_json_receiver(recv))
 }
 
 fn extract_hash<'a>(e: &'a Expr) -> Option<&'a [(Expr, Expr)]> {
@@ -3410,7 +3548,11 @@ fn rewrite_route_helpers(e: &Expr, ctx: &Ctx) -> Expr {
         },
         other => other.clone(),
     };
-    Expr::new(e.span, new_node)
+    let mut out = Expr::new(e.span, new_node);
+    // The same send, rebuilt: keep a grounded `iso8601`'s flag, as
+    // `rewrite_ivars_to_locals` does.
+    out.decisions |= e.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    out
 }
 
 /// Route-helper positional args want `record.id` instead of bare
@@ -3859,7 +4001,13 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
         }
         other => other.clone(),
     };
-    Expr::new(expr.span, new_node)
+    let mut out = Expr::new(expr.span, new_node);
+    // A rebuilt send keeps the lowering's decisions about it: a grounded
+    // `iso8601` (`expr::GROUNDED_TIME_FORMAT`) whose receiver was an
+    // ivar is now a parameter the emitter cannot type as a time, and
+    // the flag is all that tells it to print `iso8601` again.
+    out.decisions |= expr.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    out
 }
 
 fn rewrite_lvalue(lv: &LValue) -> LValue {

@@ -87,6 +87,10 @@ fn record_return_overridden(
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let _indexes = install_lookup_indexes(app);
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
+    // An alias of an ancestor's method is the native `alias_method` here.
+    if super::expr::carries_body_statements() {
+        crate::ingest::inherited_alias::drop_replayed_copies(&mut lcs);
+    }
     // A block-taking tag helper gains a `<name>_into(io, …)` variant
     // that writes around a yield into the caller's buffer; the view
     // emit points its appends at it (`lower::tag_block_passing`).
@@ -5511,7 +5515,7 @@ pub(crate) fn apply_duration_lowering(lcs: &mut [LibraryClass], app: &App) {
     let temporal_predicates = !crate::lower::duration::app_defines_temporal_predicates(app);
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
-            crate::lower::duration::apply_duration_rewrites(&mut m.body, temporal_predicates);
+            crate::lower::duration::apply_duration_rewrites(&mut m.body, temporal_predicates, true);
         }
     }
 }
@@ -8813,7 +8817,8 @@ fn emit_library_class_decl_inner(
             let listed = own.iter().any(|c| std::ptr::eq(*c, call))
                 || is_preserved_external_include(call)
                 || crate::lower::job_payload::modelled_class_body_call(app, lc, call)
-                || crate::lower::sti_scope::models_class_body_setting(app, lc, call);
+                || crate::lower::sti_scope::models_class_body_setting(app, lc, call)
+                || crate::ingest::inherited_alias::carried_by_copy(lc, call);
             if listed {
                 continue;
             }

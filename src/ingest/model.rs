@@ -3638,6 +3638,20 @@ fn parse_scope(
                 ));
             }
         }
+        // A required parameter after the optional ones (`->(col = "price",
+        // op = ">=", amount)`, Prism's `posts`) binds the LAST argument.
+        // The class method this scope becomes has no slot for it (the
+        // relation parameter follows the optionals), and dropping it left
+        // the body reading an unbound name while the caller's last
+        // argument landed in an optional. Refuse rather than mis-bind.
+        if pn.posts().iter().next().is_some() {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!(
+                    "scope :{name}: a required parameter after optional ones is not supported"
+                ),
+            });
+        }
         for kw in pn.keywords().iter() {
             if let Some(okw) = kw.as_optional_keyword_parameter_node() {
                 let default = ingest_expr(&okw.value(), file)?;
