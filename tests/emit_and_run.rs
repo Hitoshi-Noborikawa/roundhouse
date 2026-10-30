@@ -20162,3 +20162,6 @@ mod params_write_assign;
 
 #[path = "emit_and_run/find_each_mailer.rs"]
 mod find_each_mailer;
+
+#[path = "emit_and_run/model_class_attribute.rs"]
+mod model_class_attribute;

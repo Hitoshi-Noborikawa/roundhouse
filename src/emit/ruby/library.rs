@@ -8199,6 +8199,19 @@ fn emit_library_class_decl_inner(
         Include(&'a ClassId),
         Method(&'a MethodDef),
     }
+    // A model's body is its own file's. What a Concern's `included` block
+    // runs there (a seed, a replayed call) carries the Concern's file, so
+    // its offset says nothing about where it runs: at the `include`, ahead
+    // of the model's own statements, in the order the splice gave it.
+    let model_file = app
+        .models
+        .iter()
+        .find(|m| m.name == lc.name && !m.span.is_synthetic())
+        .map(|m| m.span.file);
+    let key = |span: &crate::span::Span| match model_file {
+        Some(file) if span.file != file => 0,
+        _ => span.start,
+    };
     let mut body: Vec<_> = eager.iter().map(|&i| {
         (lc.constants[i].1.span.start, BodyItem::Constant(i, &lc.constants[i].1))
     }).collect();
@@ -8211,18 +8224,18 @@ fn emit_library_class_decl_inner(
                 | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
         ))
     }).map(|init| {
-        (init.span.start, BodyItem::Initializer(init))
+        (key(&init.span), BodyItem::Initializer(init))
     }));
     // Where the source has them: a method defined before the call is the macro's to override, one after it overrides the macro's.
     if ordered_body {
-        body.extend(replayed_in_place.iter().map(|call| (call.span.start, BodyItem::Initializer(call))));
+        body.extend(replayed_in_place.iter().map(|call| (key(&call.span), BodyItem::Initializer(call))));
     }
     body.extend(constant_calls.iter().filter(|call| {
         !(ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, **call)))
     }).map(|call| (call.span.start, BodyItem::Call(call))));
     // Concern-spliced and other foreign-file methods keep foreign
     // `name_span` offsets; interleave only same-file declarations.
-    let body_file = lc.class_ivar_initializers.iter().find_map(|init| {
+    let body_file = model_file.or_else(|| lc.class_ivar_initializers.iter().find_map(|init| {
         (!init.span.is_synthetic()
             && matches!(
                 &*init.node,
@@ -8230,7 +8243,7 @@ fn emit_library_class_decl_inner(
                     | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
             ))
         .then_some(init.span.file)
-    }).or_else(|| replayed_in_place.first().map(|call| call.span.file))
+    })).or_else(|| replayed_in_place.first().map(|call| call.span.file))
         .or_else(|| constant_calls.first().map(|call| call.span.file));
     let same_file_method = |m: &MethodDef| {
         !ordered_body

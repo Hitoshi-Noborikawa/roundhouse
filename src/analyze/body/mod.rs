@@ -1797,8 +1797,9 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
                 // Not an unknown Kernel call: `lambda { |x| … }` is the stabby `->(x) { … }`, whose value is the block (svg-graph's `DataPoint::DEFAULT_SHAPE`).
+                // So is `proc { |x| … }`, whose value calls the same way.
                 if recv.is_none()
-                    && method.as_str() == "lambda"
+                    && matches!(method.as_str(), "lambda" | "proc")
                     && args.is_empty()
                     && !self.owns_operator(ctx.self_ty.as_ref(), method, ctx.class_side)
                     && let Some(b) = block.as_mut().filter(|b| matches!(&*b.node, ExprNode::Lambda { .. }))
