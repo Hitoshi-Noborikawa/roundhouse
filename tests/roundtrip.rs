@@ -75,6 +75,7 @@ fn tiny_blog_round_trips() {
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        select_aliases: Vec::new(),
         i18n: Default::default(),
         span: Span::synthetic(),
     };

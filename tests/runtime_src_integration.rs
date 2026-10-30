@@ -1265,7 +1265,13 @@ fn every_runtime_method_body_concretely_typed() {
     // the same counter measures 901 on main and 904 with assignment.
     // Only Base#assign_attributes (+1) and UnknownAttributeError#initialize
     // (+2) differ; every other method's count is unchanged.
-    const CEILING: usize = 904;
+    // MEASURED 893 on 2026-10-30: ActiveSupport::Notifications keeps typed
+    // Subscriber records, not `[pattern, listener]` Arrays, so publish and
+    // listening? read them typed; only the listener itself stays gradual.
+    // MEASURED 899 on 2026-10-30 (CI run 41007832906): 893 was taken while
+    // the rbs named Subscriber unqualified, which resolved to a missing
+    // ActiveSupport::Subscriber; Subscriber#notify's listener calls count.
+    const CEILING: usize = 899;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
