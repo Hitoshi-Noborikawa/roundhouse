@@ -451,6 +451,30 @@ class RouterTest < Minitest::Test
     assert_equal :other, missed.action
   end
 
+  # `constraints: { id: /([^\/]+?)(?=\.json|\.rss|$|\/)/ }` ahead of a
+  # plain `/sites/:name`: an unlisted extension stays in `id` on the
+  # FIRST route, as Rails' declaration order has it, rather than the
+  # later route taking the stripped path with `format = "xml"`.
+  def test_lookahead_route_keeps_an_unlisted_extension_before_a_later_route
+    body = "C+101./"
+    suffix = "A10.L1004.json9.L1003.rss"
+    seg = "2.id" + body.length.to_s + "." + body + "13.format_suffix" + suffix.length.to_s + "." + suffix
+    table = [
+      ActionDispatch::Router::Route.new("GET", "/sites/:id", :sites_controller, :show, nil, "", seg),
+      ActionDispatch::Router::Route.new("GET", "/sites/:name", :sites_controller, :other),
+    ]
+    m = ActionDispatch::Router.match("GET", "/sites/example.com.xml", table)
+    raise "expected match" if m.nil?
+    assert_equal :show, m.action
+    assert_equal "example.com.xml", m.path_params["id"]
+    assert_equal "", m.path_params.fetch("format", "")
+    m = ActionDispatch::Router.match("GET", "/sites/example.com.rss", table)
+    raise "expected match" if m.nil?
+    assert_equal :show, m.action
+    assert_equal "example.com", m.path_params["id"]
+    assert_equal "rss", m.path_params["format"]
+  end
+
   def test_escape_path_reverses_a_decoded_capture
     assert_equal "a%23top%3Fx%20y/b:c@d!e%5Bf%5D", ActionDispatch::Router.escape_path("a#top?x y/b:c@d!e[f]")
     assert_equal "100%25", ActionDispatch::Router.escape_path("100%")
