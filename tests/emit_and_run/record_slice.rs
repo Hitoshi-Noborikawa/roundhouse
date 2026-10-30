@@ -43,3 +43,14 @@ fn a_records_slice_answers_its_named_columns_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("slice passed"));
 }
+
+/// The cross-target probe the strict toolchain suites run, answered here by CRuby.
+#[test]
+fn the_cross_target_slice_probe_answers_as_rails() {
+    let want = super::record_slice_app::EXPECTED.map(|s| format!("{s:?}")).join(", ");
+    let run = super::record_slice_app::probe_app().run_ruby(&format!(
+        "got = Article.sliced\nraise \"sliced: #{{got.inspect}}\" unless got == [{want}]\nputs \"probe passed\"\n"
+    ));
+    run.assert_passes();
+    assert!(run.stdout.contains("probe passed"));
+}

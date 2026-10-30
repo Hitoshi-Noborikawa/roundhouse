@@ -3172,6 +3172,34 @@ does — the one caller is an app test helper, and those run on the ruby
 family. A target that needs it wants the module split, not this file
 copied.
 
+### `ActiveRecord::Base#slice`: lowered where typed, runtime otherwise
+
+Rails' `record.slice(:id, :name)` answers the named attributes in a
+HashWithIndifferentAccess. Roundhouse answers a String-keyed Hash two
+ways.
+
+**Typed sites, every target.** `src/lower/record_slice.rs` rewrites a
+`slice` whose receiver types as a model (or is the model's implicit
+`self`) and whose names are literals into a Hash literal of reader
+calls: `a.slice(:id, :title)` becomes `{"id" => a.id, "title" =>
+a.title}`, typed `Hash[String, <union of the readers>]`. The receiver
+is evaluated once. A name the model has no reader for leaves the call
+as written with a `record-slice` lower-residue warning, and a model
+that defines its own `slice` keeps it.
+
+**Untyped sites, ruby family only.** A receiver the analyzer cannot
+type keeps the call, which `runtime/ruby/active_record/connection.rb`
+answers beside `read_attribute`, reading each name through the `[]`
+column indexer. Rails reads through `public_send`, so a model method
+that is not a column (`slice(:id, :avatar_url)`) is a
+`NotImplementedError` there, not a nil. It is not in `base.rb` for the
+reason `read_attribute` is not: the strict targets have no untyped
+`self[name]` to build the Hash from. A strict target given an untyped
+receiver emits the call as written and fails to build.
+
+Pinned by `tests/emit_and_run/record_slice.rs` (CRuby and Spinel) and
+the `real_blog_record_slice_runs` probe in each strict toolchain suite.
+
 ### `assert_select`'s block does not scope its nested assertions
 
 Rails runs an `assert_select` block against the MATCHED ELEMENTS: a
