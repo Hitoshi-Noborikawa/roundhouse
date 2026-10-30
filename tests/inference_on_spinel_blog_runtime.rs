@@ -520,7 +520,16 @@ fn untyped_subexpressions_baseline() {
     // the same collector measures 1109 total on main and 1114 here.
     // Only Base#assign_attributes adds sites (+5). Both totals include
     // the same 3 sanitize_sql_like sites, excluded here (1126 -> 1111).
-    const CEILING: usize = 1111;
+    // MEASURED 1173 on 2026-10-30 against main dfd6a874 (1111): the bulk
+    // writes' rows are attribute Hashes whose values are whatever the app
+    // passes, and their parameters are vars on this RBS-less probe. Every
+    // added site is in a method the bulk writes add or change: upsert_all
+    // (+10), upsert (+1), _returned_rows (15), _insert_rows (11), insert,
+    // insert_all, insert!, insert_all! (14), _string_keyed_rows (4),
+    // _bulk_stamps (2), _database_now_sql and _same_value_sql (1 each),
+    // Arel::Nodes.quote_scalar's boolean escape (2) and
+    // Relation#bound_text (1). The RBS-paired gate types them.
+    const CEILING: usize = 1173;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
