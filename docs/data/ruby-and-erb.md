@@ -130,6 +130,11 @@ following statements back where the source has them, among the class's methods (
   `define_method`s per element;
 - a call to one of Ruby's own `Module` methods (`freeze`,
   `self.define_method`);
+- an `alias_method` of a method an app superclass defines, or one
+  [an alias of an inherited method](#an-alias-of-an-inherited-method)
+  resolves (the walk already copies an alias of one the body defines;
+  an alias of a method only a dropped macro defines would raise
+  NameError as the class loads, so it stays dropped);
 - a write through a class-side writer the class or an app ancestor
   defines (`self.require_name = true`, `self.strict ||= :on`);
 - such a write in a class that, itself or through an app ancestor,
