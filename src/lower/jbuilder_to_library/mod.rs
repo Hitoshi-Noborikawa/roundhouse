@@ -1640,7 +1640,9 @@ fn object_keys(stmt: &JbStmt<'_>, ctx: &Ctx) -> Option<Vec<String>> {
             Some(pairs) => Some(pairs.into_iter().map(|(k, _)| k).collect()),
             None => attributes_merge(value, ctx).map(|(_, attrs)| attrs.iter().map(|a| a.as_str().to_string()).collect()),
         },
-        JbStmt::Local => Some(Vec::new()),
+        // Refused: the statement lowers to a raise, so a run that
+        // reaches it renders nothing and sets no key in this object.
+        JbStmt::Local | JbStmt::ExtractDynamic => Some(Vec::new()),
         JbStmt::Cond { then_branch, else_branch, .. } => {
             let mut keys = branch(then_branch)?;
             keys.extend(branch(else_branch)?);
