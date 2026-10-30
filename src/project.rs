@@ -2792,7 +2792,7 @@ fn target_files_inner(
     // declaration must be gated even when its body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         for (span, policy) in crate::analyze::forwarding::keyword_calls(app) {
-            if policy != crate::analyze::forwarding::KeywordPolicy::Legacy {
+            if !matches!(policy, crate::analyze::forwarding::KeywordPolicy::Legacy | crate::analyze::forwarding::KeywordPolicy::NativeLibrary) {
                 let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
                     ("keyword splat in ordinary super",
                      "super destination's native or lowered argument ABI cannot be verified")
