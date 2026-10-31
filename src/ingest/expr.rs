@@ -4125,12 +4125,79 @@ fn ingest_block_body<'pr>(
     file: &str,
 ) -> IngestResult<Expr> {
     let body = match body_node {
-        Some(body) => ingest_expr(&body, file)?,
+        Some(body) => with_enclosing_block_locals(block_local_names(params()), || ingest_expr(&body, file))?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
     let body = destructure_block_params(params(), body, file)?;
-    let body = desugar_post_params(rest_param, block_post_params(params()), body);
+    let mut body = desugar_post_params(rest_param, block_post_params(params()), body);
+    // An unpacked parameter is bound by an assignment at the top of the
+    // body, which the enclosing block's rename can't tell from a write to
+    // its block-local of the same name. So this block renames its own
+    // parameter first, and the enclosing rename leaves it alone.
+    let shadowing: Vec<Symbol> = ENCLOSING_BLOCK_LOCALS.with(|locals| {
+        let locals = locals.borrow();
+        unpacked_param_names(params()).into_iter().filter(|name| locals.contains(name)).collect()
+    });
+    if let Some(node) = params() {
+        let loc = node.location();
+        for name in shadowing {
+            let fresh = fresh_reserved_local(&loc, &format!("__{name}_{}", loc.start_offset()));
+            rename_block_local(&mut body, &name, &fresh);
+        }
+    }
     Ok(scope_block_locals(params(), body))
+}
+
+thread_local! {
+    /// The block-locals of every block whose body is being ingested.
+    static ENCLOSING_BLOCK_LOCALS: std::cell::RefCell<Vec<Symbol>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with `names` added to the enclosing block-locals.
+fn with_enclosing_block_locals<T>(names: Vec<Symbol>, f: impl FnOnce() -> T) -> T {
+    let pushed = names.len();
+    ENCLOSING_BLOCK_LOCALS.with(|locals| locals.borrow_mut().extend(names));
+    let out = f();
+    ENCLOSING_BLOCK_LOCALS.with(|locals| {
+        let mut locals = locals.borrow_mut();
+        let keep = locals.len() - pushed;
+        locals.truncate(keep);
+    });
+    out
+}
+
+/// A block's `; name` declarations.
+fn block_local_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
+    let Some(bpn) = params_node.as_ref().and_then(|n| n.as_block_parameters_node()) else { return vec![] };
+    bpn.locals()
+        .iter()
+        .filter_map(|local| local.as_block_local_variable_node())
+        .map(|local| Symbol::from(constant_id_str(&local.name())))
+        .collect()
+}
+
+/// The parameters a block binds by assignments in its body rather than
+/// in its signature: destructured leaves (`|(a, tag)|`) and the ones
+/// after a rest (`|*rest, tag|`).
+fn unpacked_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
+    let Some(pn) = params_node
+        .as_ref()
+        .and_then(|n| n.as_block_parameters_node())
+        .and_then(|b| b.parameters())
+    else {
+        return vec![];
+    };
+    let mut names = Vec::new();
+    let destructured = pn.requireds().iter().filter(|req| req.as_multi_target_node().is_some());
+    for slot in destructured.chain(pn.posts().iter()) {
+        any_write_leaf(&slot, &mut |leaf| {
+            if let Some(param) = leaf.as_required_parameter_node() {
+                names.push(Symbol::from(constant_id_str(&param.name())));
+            }
+            false
+        });
+    }
+    names
 }
 
 /// The statements that unpack a block's destructured parameters
@@ -4300,7 +4367,7 @@ fn scope_block_locals(params_node: Option<Node<'_>>, mut body: Expr) -> Expr {
             let mut exprs = vec![init];
             match *body.node {
                 ExprNode::Seq { exprs: inner } => exprs.extend(inner),
-                other => exprs.push(Expr::new(body.span, other)),
+                other => exprs.push(Expr { node: Box::new(other), ..body }),
             }
             body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs });
         }

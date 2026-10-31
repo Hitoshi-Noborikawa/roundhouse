@@ -65,10 +65,30 @@ fn a_block_local_shadows_the_enclosing_local() {
     set.call(9)
     tag
   end
+  def self.shadowed_by_a_post_param
+    tag = "outer"
+    inner = nil
+    [1].each do |n; tag|
+      tag = "mid"
+      [[1, 2]].each { |*rest, tag| tag }
+      inner = tag
+    end
+    [tag, inner]
+  end
+  def self.shadowed_by_a_destructured_param
+    tag = "outer"
+    inner = nil
+    [1].each do |n; tag|
+      tag = "mid"
+      [[1, 2]].each { |(a, tag)| tag }
+      inner = tag
+    end
+    [tag, inner]
+  end
 end
 "##;
     const ASSERTIONS: &str = r##"
-expected = {write: "outer", read_first: ["outer", ["nil", "nil"]], nested: ["outer", "mid+2"], shadowed_by_a_param: "outer", rescue_binding: "outer", pattern_binding: ["outer", "y"], lambda_literal: "outer"}
+expected = {write: "outer", read_first: ["outer", ["nil", "nil"]], nested: ["outer", "mid+2"], shadowed_by_a_param: "outer", rescue_binding: "outer", pattern_binding: ["outer", "y"], lambda_literal: "outer", shadowed_by_a_destructured_param: ["outer", "mid"], shadowed_by_a_post_param: ["outer", "mid"]}
 expected.each do |method, want|
   got = BlockLocalProbe.public_send(method)
   raise "#{method}: #{got.inspect}, expected #{want.inspect}" unless got == want
