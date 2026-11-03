@@ -1127,7 +1127,8 @@ pub(super) fn str_or_sym_literal(e: &Expr) -> Option<String> {
 /// prefix the elements ahead of it contribute.
 struct PrefixedRecordForm {
     record: Expr,
-    /// The record's singular route key (`comment`, `admin_note`).
+    /// The record's singular route key (`comment`, `admin_note`), which is
+    /// also its `slug_models` key.
     record_key: String,
     /// The record's `param_key`, which names the fields (`comment[body]`).
     model_name: String,
@@ -1158,19 +1159,19 @@ fn prefixed_record_form(model: &Expr, ctx: &ViewCtx) -> Option<PrefixedRecordFor
             prefix_parts.push(value.as_str().to_string());
             continue;
         }
-        let (route_key, slug_key) = polymorphic_record_keys(el, ctx)?;
-        prefix_args.push(record_segment(el, &slug_key, ctx));
-        prefix_parts.push(route_key);
+        let key = polymorphic_record_key(el, ctx)?;
+        prefix_args.push(record_segment(el, &key, ctx));
+        prefix_parts.push(key);
     }
     let (record_key, new_record) = match &*record.node {
         ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "new" => {
             let ExprNode::Const { path } = &*recv.node else {
                 return None;
             };
-            let class = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            (crate::naming::underscore_words(&class), true)
+            let class = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+            (class_model_key(&class, ctx), true)
         }
-        _ => (polymorphic_record_keys(record, ctx)?.0, false),
+        _ => (polymorphic_record_key(record, ctx)?, false),
     };
     Some(PrefixedRecordForm {
         model_name: record_model_name(record, ctx, &record_key),
@@ -1182,28 +1183,29 @@ fn prefixed_record_form(model: &Expr, ctx: &ViewCtx) -> Option<PrefixedRecordFor
     })
 }
 
-/// A record local's `(singular route key, slug-model key)`. The analyzer's
-/// class wins over the binding's name, which only matches the model by
-/// convention (`comment` holding a Comment); a namespaced class keeps its
-/// namespace in the route key, as Rails' `singular_route_key` does
-/// (`Admin::Note` → `admin_note`).
-fn polymorphic_record_keys(el: &Expr, ctx: &ViewCtx) -> Option<(String, String)> {
+/// A record local's model key: its singular route key, which Rails keeps
+/// equal to its `param_key` (`Admin::Note` → `admin_note`, an isolated
+/// engine's `Blog::Post` → `post`), and also the key `slug_models` is
+/// read by. The analyzer's class wins over the binding's name, which only
+/// matches the model by convention (`comment` holding a Comment).
+fn polymorphic_record_key(el: &Expr, ctx: &ViewCtx) -> Option<String> {
     let name = record_local_name(el)?;
     if let Some(crate::ty::Ty::Class { id, .. }) = el.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
-        let class = id.0.as_str();
-        let slug_key = ctx
-            .model_param_keys
-            .get(class)
-            .cloned()
-            .unwrap_or_else(|| crate::naming::model_param_key(class));
-        return Some((crate::naming::underscore_words(class), slug_key));
+        return Some(class_model_key(id.0.as_str(), ctx));
     }
-    let key = ctx
-        .ivar_models
-        .get(&name)
+    Some(
+        ctx.ivar_models
+            .get(&name)
+            .cloned()
+            .unwrap_or_else(|| singularize(&snake_case(&name))),
+    )
+}
+
+fn class_model_key(class: &str, ctx: &ViewCtx) -> String {
+    ctx.model_param_keys
+        .get(class)
         .cloned()
-        .unwrap_or_else(|| singularize(&snake_case(&name)));
-    Some((key.replace("::", "_"), key))
+        .unwrap_or_else(|| crate::naming::model_param_key(class))
 }
 
 /// The value Rails fills a record's `:id` segment with: `to_param` for a
@@ -1242,10 +1244,7 @@ fn prefixed_record_action(
         .get(&member_name)
         .is_none_or(|n| *n > form.prefix_args.len());
     if takes_record {
-        let slug_key = polymorphic_record_keys(&form.record, ctx)
-            .map(|(_, slug)| slug)
-            .unwrap_or_else(|| form.record_key.clone());
-        member_args.push(record_segment(&form.record, &slug_key, ctx));
+        member_args.push(record_segment(&form.record, &form.record_key, ctx));
     }
     let member_path = super::route_helpers_call(&member_name, member_args);
     let persisted = send(Some(form.record.clone()), "persisted?", Vec::new(), None, false);
@@ -1705,24 +1704,62 @@ mod tests {
         assert_persisted_ternary(&out, "message_path", "to_param", "messages_path");
     }
 
+    fn typed_local(name: &str, class: &str) -> Expr {
+        let mut local = bare_local(name);
+        local.ty = Some(crate::ty::Ty::Class {
+            id: crate::ident::ClassId(Symbol::from(class)),
+            args: vec![].into(),
+        });
+        local
+    }
+
+    fn member_helper_and_arg(model: Expr, ctx: &ViewCtx) -> (String, String) {
+        let form = prefixed_record_form(&model, ctx).expect("a prefixed record form");
+        let (action, _) = prefixed_record_action(&form, ctx, None);
+        let ExprNode::If { then_branch, .. } = &*action.node else {
+            panic!("expected a persisted? If, got {:?}", action.node);
+        };
+        let ExprNode::Send { method, args, .. } = &*then_branch.node else {
+            panic!("expected the member helper call");
+        };
+        let ExprNode::Send { method: arg, .. } = &*args.last().expect("the record segment").node else {
+            panic!("expected a reader off the record");
+        };
+        (method.as_str().to_string(), arg.as_str().to_string())
+    }
+
+    fn array(elements: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Array { elements, style: crate::expr::ArrayStyle::Brackets },
+        )
+    }
+
     #[test]
     fn a_typed_namespaced_record_finds_its_to_param_override() {
         // `slug_models` holds each model's param key (`admin_note`), so a
         // `snake_case` key (`admin::note`) would miss Admin::Note's override
         // and fill the nested member's `:id` with `id`.
         let ctx = ctx_with_slugs(&[], &[], &["admin_note"]);
-        let mut note = bare_local("note");
-        note.ty = Some(crate::ty::Ty::Class {
-            id: crate::ident::ClassId(Symbol::from("Admin::Note")),
-            args: vec![].into(),
-        });
-        let (route_key, slug_key) = polymorphic_record_keys(&note, &ctx).expect("a record local");
-        assert_eq!(route_key, "admin_note");
-        assert_eq!(slug_key, "admin_note");
-        let ExprNode::Send { method, .. } = &*record_segment(&note, &slug_key, &ctx).node else {
-            panic!("expected a reader off the record");
-        };
-        assert_eq!(method.as_str(), "to_param");
+        let model = array(vec![bare_local("article"), typed_local("note", "Admin::Note")]);
+        assert_eq!(
+            member_helper_and_arg(model, &ctx),
+            ("article_admin_note_path".to_string(), "to_param".to_string())
+        );
+    }
+
+    #[test]
+    fn an_isolated_engine_record_routes_by_its_param_key() {
+        // Rails keeps `singular_route_key` equal to `param_key`, so an
+        // isolated engine's Blog::Post routes as `post`, not `blog_post`.
+        let mut ctx = ctx_with(&[], &[]);
+        ctx.model_param_keys =
+            Rc::new([("Blog::Post".to_string(), "post".to_string())].into_iter().collect());
+        let model = array(vec![bare_local("editor"), typed_local("post", "Blog::Post")]);
+        assert_eq!(
+            member_helper_and_arg(model, &ctx),
+            ("editor_post_path".to_string(), "id".to_string())
+        );
     }
 
     #[test]
