@@ -1191,7 +1191,12 @@ fn polymorphic_record_keys(el: &Expr, ctx: &ViewCtx) -> Option<(String, String)>
     let name = record_local_name(el)?;
     if let Some(crate::ty::Ty::Class { id, .. }) = el.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
         let class = id.0.as_str();
-        return Some((crate::naming::underscore_words(class), snake_case(class)));
+        let slug_key = ctx
+            .model_param_keys
+            .get(class)
+            .cloned()
+            .unwrap_or_else(|| crate::naming::model_param_key(class));
+        return Some((crate::naming::underscore_words(class), slug_key));
     }
     let key = ctx
         .ivar_models
@@ -1698,6 +1703,26 @@ mod tests {
         let ctx = ctx_with_slugs(&["message"], &[("new_message", "message")], &["message"]);
         let out = route_helperize(bare_local("new_message"), &route_helpers, &ctx);
         assert_persisted_ternary(&out, "message_path", "to_param", "messages_path");
+    }
+
+    #[test]
+    fn a_typed_namespaced_record_finds_its_to_param_override() {
+        // `slug_models` holds each model's param key (`admin_note`), so a
+        // `snake_case` key (`admin::note`) would miss Admin::Note's override
+        // and fill the nested member's `:id` with `id`.
+        let ctx = ctx_with_slugs(&[], &[], &["admin_note"]);
+        let mut note = bare_local("note");
+        note.ty = Some(crate::ty::Ty::Class {
+            id: crate::ident::ClassId(Symbol::from("Admin::Note")),
+            args: vec![].into(),
+        });
+        let (route_key, slug_key) = polymorphic_record_keys(&note, &ctx).expect("a record local");
+        assert_eq!(route_key, "admin_note");
+        assert_eq!(slug_key, "admin_note");
+        let ExprNode::Send { method, .. } = &*record_segment(&note, &slug_key, &ctx).node else {
+            panic!("expected a reader off the record");
+        };
+        assert_eq!(method.as_str(), "to_param");
     }
 
     #[test]
