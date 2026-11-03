@@ -76,6 +76,16 @@ module Net
     # method has no dispatch entry for a boxed receiver — the call
     # landed on nothing and raised `no block given (yield)`.
     def read_body(&blk)
+      # Since matz/spinel#10778 the package's `read_response` hands back a
+      # response whose body is still on the wire (`reading_body`); read it
+      # whole here, as the package's own `read_body` would, before slicing.
+      unless @body_reader.nil?
+        out = String.new
+        @body_reader.read_entity_body(@headers, @fields, out, @decode_content)
+        @body = out
+        @body_reader = nil
+      end
+      @read = true
       unless blk.nil?
         offset = 0
         total = @body.bytesize
@@ -273,7 +283,11 @@ module Net
       connect if @socket.nil?
       begin_transport(req)
       write_request(req)
-      read_response(req.method, req.decode_content)
+      res = read_response(req.method, req.decode_content)
+      # Read the body now: for an unstarted client the caller's `ensure
+      # finish` closes the socket before anything else would read it.
+      res.read_body
+      res
     end
 
     # The package connects direct or not at all (`Net::HTTP.new` raises
