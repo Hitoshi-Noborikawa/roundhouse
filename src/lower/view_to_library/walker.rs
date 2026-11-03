@@ -1731,6 +1731,8 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
     let mut out = Expr::new(e.span, new_node);
     // `f.object.class::X` stays a path (`expr::CONST_PATH`).
     out.decisions |= e.decisions & crate::expr::CONST_PATH;
+    // A grounded `iso8601` (`to_rfc3339`) stays one: the Ruby emit prints `iso8601` by this flag.
+    out.decisions |= e.decisions & crate::expr::GROUNDED_TIME_FORMAT;
     // Not a fresh, untyped node: a rebuilt `[]` the i18n lowering typed `Array[String]` would read as `Array[untyped]`
     out.ty = e.ty.clone();
     out
@@ -1836,6 +1838,7 @@ mod tests {
             nullable_locals: Default::default(),
             reference_reads: Default::default(),
             reference_targets: Default::default(),
+            nested_record_classes: Default::default(),
             nilable_scalar_reads: Default::default(),
             html_safe_methods: Default::default(),
             model_singulars: Default::default(),
@@ -1847,6 +1850,7 @@ mod tests {
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             form_with_entry: false,
+            model_param_keys: Default::default(),
             stylesheets: Vec::new(),
             lexxy: false,
             lexxy_editor_adapter: false,
@@ -1860,6 +1864,7 @@ mod tests {
             strict_locals: Default::default(),
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
+            record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
             own_flash: Default::default(),

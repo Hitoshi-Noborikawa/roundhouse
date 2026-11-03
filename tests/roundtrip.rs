@@ -208,6 +208,7 @@ fn tiny_blog_round_trips() {
         load_hook_class_macros: Vec::new(),
         load_hook_extended_macros: Vec::new(),
         spliced_class_methods: Default::default(),
+        time_tag_calls: Vec::new(),
         partial_local_types: roundhouse::det::HashMap::default(),
         view_ivar_types: roundhouse::det::HashMap::default(),
         html_safe_methods: std::collections::BTreeSet::new(),
@@ -232,6 +233,7 @@ fn tiny_blog_round_trips() {
         controller_resolutions: roundhouse::det::HashMap::default(),
         sources: vec![],
         wrap_parameters_by_default: false,
+        active_job_retry_jitter: 0.0,
         ports_active_model_validator: false,
         each_validator_calls: Vec::new(),
         // Derived from `sources` and `serde(skip)`, like `binary_assets`.
@@ -239,6 +241,7 @@ fn tiny_blog_round_trips() {
         source_index_required: false,
         root: String::new(),
         app_roots: vec!["app".to_string()],
+        isolated_namespaces: Vec::new(),
         spinel_int_overflow: None,
     };
 

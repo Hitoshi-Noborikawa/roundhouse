@@ -865,6 +865,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             }
         }
     }
+    app.isolated_namespaces = isolated_prefixes.keys().cloned().collect();
+    app.isolated_namespaces.sort();
     for (module, prefix) in isolated_prefixes {
         table_prefixes.entry(module).or_insert(prefix);
     }
@@ -1318,6 +1320,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     // not abort ingest.
     // Rails' ParamsWrapper default (see `App::wrap_parameters_by_default`).
     app.wrap_parameters_by_default = read_wrap_parameters_by_default(vfs, dir);
+    app.active_job_retry_jitter = read_active_job_retry_jitter(vfs, dir);
     // The ActiveJob queue adapter (see `App::queue_adapter`).
     app.queue_adapter = read_queue_adapter(vfs, dir);
     // Where Sidekiq pushes (see `App::sidekiq_redis`).
@@ -1450,6 +1453,20 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             let mut synth = crate::runtime_src::parse_methods(&caching).map_err(|message| IngestError::Unsupported {
                 file: "config/ (config.action_controller caching settings)".to_string(),
                 message: format!("the app's controller caching settings do not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
+        }
+        // Not refused when the replay can't read it (a comparison, say): only SolidQueue's clear reads it, and the adapter ingest already read stands in.
+        let adapter = super::active_job_config::synthesize(vfs, dir).unwrap_or_else(|_| {
+            Some(format!(
+                "def active_job_queue_adapter\n  {:?}\nend\n",
+                app.queue_adapter.as_deref().unwrap_or("async")
+            ))
+        });
+        if let Some(adapter) = adapter {
+            let mut synth = crate::runtime_src::parse_methods(&adapter).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.active_job.queue_adapter)".to_string(),
+                message: format!("the app's queue adapter setting does not parse once synthesized: {message}"),
             })?;
             methods.append(&mut synth);
         }
@@ -2712,6 +2729,7 @@ end
     let (rate_limit_stores, rate_limit_store_values) = super::rate_limit::install_boot_stores(&mut app, rate_limit_stores, &const_resolver.for_sources(&sources));
     if app.queue_adapter.as_deref() == Some("sidekiq") {
         sidekiq_warnings.into_iter().for_each(warn_sidekiq);
+        require_sidekiq_redis_url(&app);
     }
     if app.queue_adapter.as_deref() == Some("sidekiq") && app.cable_redis.is_none() {
         warn_sidekiq(format!(
@@ -2928,7 +2946,7 @@ end
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
-    qualify_model_class_method_ar_calls(&mut app);
+    qualify_model_class_method_ar_calls(&mut app, &const_resolver.for_sources(&sources));
     // After the splice too: the inverse `has_many …, as: :owner` may be
     // declared in a concern's `included do`.
     resolve_polymorphic_targets(&mut app);
@@ -2946,6 +2964,7 @@ end
     super::impersonates::lower_impersonates(&mut app);
     super::inertia::lower_inertia(&mut app);
     super::vite::lower_vite_tags(&mut app);
+    super::time_tag::lower_time_tags(&mut app);
     // The real drain, now that every pass re-ingesting synthesized
     // Ruby has run. A synthesized `"<label>"` re-ingest never takes a
     // slot (`sources::register` refuses a label starting with `<`), so
@@ -4969,7 +4988,7 @@ fn qualify_lexical_consts(
 /// (`scope_chain::AssocClassMethods`), reading the model constant back
 /// as the implicit self it stands for; the strict targets, which have
 /// no relation to thread, keep the class-level reading.
-fn qualify_model_class_method_ar_calls(app: &mut App) {
+fn qualify_model_class_method_ar_calls(app: &mut App, resolver: &crate::analyze::ConstResolver) {
     use crate::dialect::{MethodReceiver, ModelBodyItem};
     use crate::expr::{Expr, ExprNode};
 
@@ -4979,11 +4998,10 @@ fn qualify_model_class_method_ar_calls(app: &mut App) {
     /// the runtime.
     const AR_CLASS_METHODS: &[&str] = &["all", "count", "where", "find_by", "exists?"];
 
+    // Concerns have already been spliced. Preserve class-side ownership
+    // across the complete source ancestry, including tableless parents.
+    let classes = crate::analyze::source_finder_classes(app, resolver);
     for model in &mut app.models {
-        let own: crate::det::HashSet<String> = model
-            .methods()
-            .map(|m| m.name.as_str().to_string())
-            .collect();
         let recv = Expr::new(
             crate::span::Span::synthetic(),
             ExprNode::Const { path: vec![model.name.0.clone()] },
@@ -4992,19 +5010,60 @@ fn qualify_model_class_method_ar_calls(app: &mut App) {
             fn walk(
                 expr: &mut Expr,
                 recv: &Expr,
-                own: &crate::det::HashSet<String>,
-                ar: &[&str],
+                owner: &crate::ident::ClassId,
+                classes: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+                resolver: &crate::analyze::ConstResolver,
             ) {
-                expr.node.for_each_child_mut(&mut |c| walk(c, recv, own, ar));
+                expr.node.for_each_child_mut(&mut |c| walk(c, recv, owner, classes, resolver));
+                // Do this before query classification: a dynamic finder
+                // must consume the caller's threaded relation too.
+                // Only class-object syntax is proven at ingest. Chained
+                // receivers wait for the analyzer's relation type.
+                let finder_send = matches!(&*expr.node, ExprNode::Send { method, args, .. }
+                    if method.as_str().starts_with("find_by_") || matches!(method.as_str(), "find_by" | "find_by!")
+                        || (matches!(method.as_str(), "send" | "public_send" | "__send__")
+                            && match args.first().map(|a| &*a.node) {
+                                Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => value.as_str().starts_with("find_by_"),
+                                Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => value.starts_with("find_by_"),
+                                _ => false,
+                            }));
+                let class_receiver = finder_send && match &mut *expr.node {
+                    ExprNode::Send { recv: None, .. } => true,
+                    ExprNode::Send { recv: Some(r), .. } => match &*r.node {
+                        ExprNode::SelfRef => true,
+                        ExprNode::Const { path } => {
+                            // Constant spelling alone is not ownership:
+                            // Category inside Forum can name Forum::Category.
+                            if let Some(id) = resolver.namespace(r.span, path).filter(|id| classes.contains_key(*id)) {
+                                r.ty = Some(crate::ty::Ty::Class { id: id.clone(), args: vec![].into() });
+                                true
+                            } else {
+                                path.first().is_some_and(|head| head.as_str().is_empty())
+                            }
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if class_receiver {
+                    crate::lower::arel::normalize_dynamic_finder_send(expr, classes, Some(owner), true);
+                }
                 let ExprNode::Send { recv: r @ None, method, .. } = &mut *expr.node else {
                     return;
                 };
-                if !ar.contains(&method.as_str()) || own.contains(method.as_str()) {
+                if !AR_CLASS_METHODS.contains(&method.as_str())
+                    || crate::analyze::ClassInfo::source_class_method(classes, owner, method)
+                    || crate::analyze::ClassInfo::class_method_ownership_unknown(classes, owner, method)
+                {
                     return;
                 }
-                *r = Some(recv.clone());
+                let mut qualified = recv.clone();
+                if method.as_str() == "find_by" {
+                    qualified.decisions |= crate::expr::IMPLICIT_MODEL_FINDER_RECEIVER;
+                }
+                *r = Some(qualified);
             }
-            walk(expr, &recv, &own, AR_CLASS_METHODS);
+            walk(expr, &recv, &model.name, &classes, resolver);
         };
         for item in &mut model.body {
             let ModelBodyItem::Method { method, .. } = item else { continue };
@@ -6395,7 +6454,7 @@ fn filter_from_send(
         return None;
     };
     let kind = match method.as_str() {
-        "before_action" => FilterKind::Before,
+        "before_action" | "prepend_before_action" => FilterKind::Before,
         "around_action" => FilterKind::Around,
         "after_action" => FilterKind::After,
         "skip_before_action" => FilterKind::Skip,
@@ -6426,6 +6485,8 @@ fn filter_from_send(
     let mut targets: Vec<(crate::ident::Symbol, crate::span::Span)> = Vec::new();
     let mut only: Vec<crate::ident::Symbol> = Vec::new();
     let mut except: Vec<crate::ident::Symbol> = Vec::new();
+    let mut only_present = false;
+    let mut prepend = method.as_str() == "prepend_before_action";
     for arg in args {
         if let Some(sym) = sym_of(arg) {
             targets.push((sym, arg.span));
@@ -6445,8 +6506,16 @@ fn filter_from_send(
         };
         for (key, value) in entries {
             match sym_of(key).as_ref().map(|k| k.as_str().to_string()).as_deref() {
-                Some("only") => only = sym_list(value)?,
+                Some("only") => {
+                    only_present = true;
+                    only = sym_list(value)?;
+                }
                 Some("except") => except = sym_list(value)?,
+                Some("prepend") => match &*value.node {
+                    ExprNode::Lit { value: Literal::Bool { value: true } } => prepend = true,
+                    ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => {}
+                    _ => return None,
+                },
                 // if:/unless: guards on a macro-expanded filter would
                 // need the predicate to resolve in the INCLUDER; not
                 // modeled, and silently dropping a guard changes when a
@@ -6479,8 +6548,11 @@ fn filter_from_send(
                 unless_cond: None,
                 if_cond_expr: None,
                 unless_cond_expr: None,
+                unread_guard: false,
+                unread_options: false,
+                only_present,
                 block: None,
-                prepend: false,
+                prepend,
             })
             .collect(),
     )
@@ -12043,8 +12115,9 @@ fn read_sidekiq_redis<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::app::Sidek
 /// such assignment. Only those two keys are read, each as a String
 /// literal, `ENV["NAME"]` or `ENV.fetch("NAME"[, "default"])`. Any other
 /// key, a value in another form, or a `config.redis =` that isn't a Hash
-/// literal is a warning: the push then takes that setting from the
-/// environment fallbacks, or not at all.
+/// literal is a warning, and the setting is not read. A tree on
+/// `:sidekiq` whose blocks leave it no `url:` is an error
+/// (`require_sidekiq_redis_url`): there is no environment fallback.
 pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::app::SidekiqRedisConfig> {
     let src = String::from_utf8_lossy(source);
     // Cheap skip before parsing, as `kaminari_default_per_page` does.
@@ -12098,7 +12171,7 @@ pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::a
             let mut config = crate::app::SidekiqRedisConfig::default();
             let Some(hash) = value.as_hash_node() else {
                 warn_sidekiq(format!(
-                    "`{param}.redis = {}` in {file} is not a Hash literal, so it is not read; jobs are pushed to REDIS_PROVIDER, REDIS_URL or localhost",
+                    "`{param}.redis = {}` in {file} is not a Hash literal, so it is not read",
                     text(value)
                 ));
                 found = Some(config);
@@ -12166,11 +12239,88 @@ fn redis_setting(node: &Node<'_>, src: &str) -> Option<crate::app::RedisSetting>
     }
 }
 
+/// An app on `:sidekiq` names its Redis in `Sidekiq.configure_client`.
+/// Without a `url:` ingest reads, the push would have nowhere to go:
+/// that is an error, not a fallback to `REDIS_PROVIDER`, `REDIS_URL` or
+/// localhost, so the app's own config stays the only source of where
+/// jobs land.
+fn require_sidekiq_redis_url(app: &App) {
+    // `url: ""` names nothing: the push would raise at run time, so it
+    // is refused here with the rest.
+    let empty = matches!(&app.sidekiq_redis.url, Some(crate::app::RedisSetting::Literal(url)) if url.is_empty());
+    if app.sidekiq_redis.url.is_some() && !empty {
+        return;
+    }
+    let detail = "an app on `queue_adapter :sidekiq` must name its Redis in config/initializers: \
+                  `Sidekiq.configure_client do |config| config.redis = { url: ... } end`, the URL a String \
+                  literal, ENV[\"NAME\"] or ENV.fetch(\"NAME\"[, \"default\"]); there is no fallback to \
+                  REDIS_PROVIDER, REDIS_URL or localhost";
+    super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
+        None,
+        "Sidekiq",
+        detail,
+    ));
+}
+
 /// A warning about what ingest reads from the app's Sidekiq settings.
 fn warn_sidekiq(detail: String) {
     let mut d = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "Sidekiq", detail);
     d.severity = crate::diagnostic::Severity::Warning;
     super::prism::push(d);
+}
+
+/// `ActiveJob::Base.retry_jitter` app-wide (`App::active_job_retry_jitter`),
+/// read by line scan in Rails' precedence: `config.load_defaults` 6.1+
+/// sets 0.15 (Rails' `new_framework_defaults_6_1`), and an explicit
+/// `config.active_job.retry_jitter = <number>` (or
+/// `ActiveJob::Base.retry_jitter = <number>`) in config/application.rb,
+/// config/environments/production.rb or an initializer wins over that.
+fn read_active_job_retry_jitter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> f64 {
+    let code_lines = |bytes: &[u8]| -> Vec<String> {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.starts_with('#'))
+            .collect()
+    };
+    let mut jitter = 0.0;
+    let mut files: Vec<Vec<String>> = Vec::new();
+    if let Ok(source) = vfs.read(&dir.join("config/application.rb")) {
+        let lines = code_lines(&source);
+        for line in &lines {
+            if let Some(v) = load_defaults_version(line) {
+                jitter = if v >= 6.1 { 0.15 } else { 0.0 };
+            }
+        }
+        files.push(lines);
+    }
+    for sub in ["config/environments/production.rb", "config/initializers"] {
+        let path = dir.join(sub);
+        let paths = if vfs.is_dir(&path) { read_rb_files(vfs, &path).unwrap_or_default() } else { vec![path] };
+        for p in paths {
+            if let Ok(source) = vfs.read(&p) {
+                files.push(code_lines(&source));
+            }
+        }
+    }
+    for line in files.iter().flatten() {
+        let Some(i) = line.find("active_job.retry_jitter").or_else(|| line.find("ActiveJob::Base.retry_jitter")) else {
+            continue;
+        };
+        let Some((_, v)) = line[i..].split_once('=') else { continue };
+        // The whole numeric literal: `0.15`, `1e-2`, `1_0.0`.
+        let v: String = v
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '-' | '+' | '_'))
+            .filter(|c| *c != '_')
+            .collect();
+        if let Ok(v) = v.parse::<f64>() {
+            jitter = v;
+        }
+    }
+    jitter
 }
 
 /// What a trimmed, non-comment config line sets the app-wide

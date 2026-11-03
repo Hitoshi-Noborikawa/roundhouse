@@ -323,9 +323,10 @@ pub struct App {
     pub queue_adapter: Option<String>,
     /// The Redis the app's `Sidekiq.configure_client` block names
     /// (`config.redis = { url: …, password: … }`), read at ingest from
-    /// `config/initializers`. It is the source of truth for where jobs
-    /// are pushed; `REDIS_PROVIDER`, `REDIS_URL` and localhost are only
-    /// the fallback when it names no URL. Other keys are not read.
+    /// `config/initializers`. It is the only source of where jobs are
+    /// pushed: a tree on `:sidekiq` without a `url:` here is an ingest
+    /// error, with no fallback to `REDIS_PROVIDER`, `REDIS_URL` or
+    /// localhost. Other keys are not read.
     #[serde(default, skip_serializing_if = "SidekiqRedisConfig::is_empty")]
     pub sidekiq_redis: SidekiqRedisConfig,
     /// The worker's defaults from `config/sidekiq.yml` (concurrency,
@@ -371,6 +372,11 @@ pub struct App {
     /// (`ingest::extend_splice`), by name.
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     pub spliced_class_methods: crate::det::HashSet<Symbol>,
+    /// The `time_tag` calls `ingest::time_tag` rewrote to the `tag.time`
+    /// builder, by span: `project::report_time_tag_calls` refuses them on the
+    /// targets whose `iso8601` of a record's time differs from Rails'.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub time_tag_calls: Vec<crate::span::Span>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -709,6 +715,13 @@ pub struct App {
     /// Read by `lower::controller_to_library::params_wrapper`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wrap_parameters_by_default: bool,
+    /// `ActiveJob::Base.retry_jitter`, app-wide: 0.15 when
+    /// `config.load_defaults` is 6.1 or later, else 0.0, unless
+    /// `config.active_job.retry_jitter = <number>` sets it (application,
+    /// production or an initializer). `retry_on`'s delays use it when the
+    /// handler gives no `jitter:` and the job class doesn't set its own.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub active_job_retry_jitter: f64,
     /// The target's runtime defines `ActiveModel::Validator`
     /// (`runtime/ruby/active_model_validator.rb`, the ruby family), so a
     /// `validates_with` class keeps its base instead of being dropped as
@@ -752,6 +765,9 @@ pub struct App {
     /// report what got walked without recomputing it from the VFS.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_roots: Vec<String>,
+    /// Literal engine namespaces with Rails' relative model naming.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub isolated_namespaces: Vec<String>,
 }
 
 /// One controller's resolved request machinery: the full filter chain
@@ -970,6 +986,14 @@ pub struct ImportmapPin {
 }
 
 impl App {
+    pub(crate) fn model_param_key(&self, name: &str) -> String {
+        let name = name.trim_start_matches("::");
+        let relative = self.isolated_namespaces.iter()
+            .filter_map(|namespace| name.strip_prefix(namespace.as_str()).and_then(|tail| tail.strip_prefix("::")))
+            .min_by_key(|tail| tail.len()).unwrap_or(name);
+        crate::naming::model_param_key(relative)
+    }
+
     /// Module → the one non-module class that includes it, directly or
     /// through another module; absent when none or several do. A
     /// concern's methods run on its includer, and with exactly one
@@ -1203,6 +1227,7 @@ impl App {
             load_hook_class_macros: Vec::new(),
             load_hook_extended_macros: Vec::new(),
             spliced_class_methods: Default::default(),
+            time_tag_calls: Vec::new(),
             partial_local_types: HashMap::default(),
             view_ivar_types: HashMap::default(),
             html_safe_methods: BTreeSet::new(),
@@ -1244,12 +1269,14 @@ impl App {
             controller_resolutions: HashMap::default(),
             sources: Vec::new(),
             wrap_parameters_by_default: false,
+            active_job_retry_jitter: 0.0,
             ports_active_model_validator: false,
             each_validator_calls: Vec::new(),
             const_resolver: Default::default(),
             source_index_required: false,
             root: String::new(),
             app_roots: Vec::new(),
+            isolated_namespaces: Vec::new(),
         }
     }
 }
@@ -1404,6 +1431,10 @@ pub enum ProgramItem {
     /// A statement the ingest cannot carry, reported as
     /// `file_statement_unsupported` and named when the file loads.
     NotCarried { span: crate::span::Span, message: String },
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// A support file the class ingest left out (`App::ingest_drops`).

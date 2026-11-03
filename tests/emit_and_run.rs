@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/controller_content_type_writer.rs"]
+mod controller_content_type_writer;
 #[path = "support/time_change_usec.rs"]
 mod time_change_usec_contract;
 #[path = "emit_and_run/time_change_usec.rs"]
@@ -28,6 +30,8 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/time_tag.rs"]
+mod time_tag;
 #[path = "emit_and_run/nested_record_form.rs"]
 mod nested_record_form;
 #[path = "emit_and_run/multiparameter_params.rs"]
@@ -417,6 +421,8 @@ mod defined_const_fold;
 mod job_payload;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
+#[path = "emit_and_run/sidekiq_retry_on.rs"]
+mod sidekiq_retry_on;
 #[path = "emit_and_run/silent_lowerings.rs"]
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
@@ -9093,12 +9099,12 @@ fn an_app_without_jobs_runs_its_tests() {
 fn the_job_queue_keeps_its_thread_safe_methods() {
     emit_and_run::real_blog()
         .run_ruby(
-            r#"%i[drain pending_count performed enqueue_locked record_performed_for_tests].each do |m|
+            r#"%i[drain pending_count performed enqueue_locked clear_queue record_performed_for_tests].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/thread_state.rb")
 end
 # The serving drain wraps these two, and calls the locked ones above.
-%i[enqueue record_performed].each do |m|
+%i[enqueue_on record_performed].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/active_job_cruby.rb")
 end
@@ -20577,6 +20583,10 @@ mod page_caching;
 mod route_requirement_span;
 #[path = "emit_and_run/boot_program.rs"]
 mod boot_program;
+#[path = "emit_and_run/route_helper_segment_escape.rs"]
+mod route_helper_segment_escape;
+#[path = "emit_and_run/solid_queue_clear.rs"]
+mod solid_queue_clear;
 
 #[path = "emit_and_run/route_dot_span.rs"]
 mod route_dot_span;
@@ -20596,3 +20606,6 @@ mod record_slice;
 
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
+
+#[path = "emit_and_run/boolop_precedence.rs"]
+mod boolop_precedence;
