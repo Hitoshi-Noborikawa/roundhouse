@@ -130,6 +130,11 @@ pub struct App {
     /// None when the app has no importmap.rb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub importmap: Option<Importmap>,
+    /// An engine's own import map (`MissionControl::Jobs.importmap`), by
+    /// the module it is drawn onto: `Importmap.pins_for_<module>` in the
+    /// emitted tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_importmaps: Vec<(String, Importmap)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inertia: Option<InertiaConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,7 +243,7 @@ pub struct App {
     pub binary_assets: Vec<(String, Vec<u8>)>,
     /// `config/locales` for the default locale (see `crate::i18n`).
     #[serde(default, skip_serializing_if = "crate::i18n::Catalog::is_empty")]
-    pub i18n: crate::i18n::Catalog,
+    pub i18n: std::sync::Arc<crate::i18n::Catalog>,
     /// The sites of a `t` whose answer differs by locale
     /// (`lower::i18n_translate`), whose entries the ruby-family trees write
     /// to the translation table the runtime reads.
@@ -635,6 +640,11 @@ pub struct App {
     /// descriptions then disagree about the parameter types.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_spliced_class_methods: HashMap<ClassId, HashMap<Symbol, ClassId>>,
+    /// The name spans of the class-side methods a concern's `class_methods
+    /// do` / `module ClassMethods` declares. Rails gives them to includers
+    /// only, never to the module itself (`lower::spliced_concern_bodies`).
+    #[serde(default, skip_serializing_if = "crate::det::HashSet::is_empty")]
+    pub concern_class_side_spans: crate::det::HashSet<crate::span::Span>,
     /// Model DSL declared inside a concern module's `included do`
     /// (`Account::Associations` → its `has_many :statuses` etc.),
     /// keyed by the module and classified as the same
@@ -986,6 +996,29 @@ pub struct ImportmapPin {
 }
 
 impl App {
+    /// Drop the spare capacity ingest leaves in the unit collections.
+    ///
+    /// Building a tree by pushing leaves every `Vec` and `String` in it
+    /// with up to twice the capacity it holds, and an app's IR is almost
+    /// all such trees. A clone allocates exactly what each one holds, so
+    /// each unit is replaced by its clone, one at a time: the extra memory
+    /// in flight is one unit, and the result is equal to what it replaces.
+    pub fn compact_units(&mut self) {
+        fn compact<T: Clone>(units: &mut Vec<T>) {
+            for unit in units.iter_mut() {
+                *unit = unit.clone();
+            }
+            units.shrink_to_fit();
+        }
+        compact(&mut self.library_classes);
+        compact(&mut self.models);
+        compact(&mut self.controllers);
+        compact(&mut self.views);
+        compact(&mut self.test_modules);
+        compact(&mut self.fixtures);
+        compact(&mut self.file_programs);
+    }
+
     pub(crate) fn model_param_key(&self, name: &str) -> String {
         let name = name.trim_start_matches("::");
         let relative = self.isolated_namespaces.iter()
@@ -1181,7 +1214,7 @@ impl App {
             schema_version: Self::SCHEMA_VERSION,
             schema: Schema::default(),
             binary_assets: Vec::new(),
-            i18n: crate::i18n::Catalog::default(),
+            i18n: Default::default(),
             i18n_table: Vec::new(),
             i18n_runtime_sites: Vec::new(),
             i18n_table_sites: Vec::new(),
@@ -1198,6 +1231,7 @@ impl App {
             seeds: None,
             boot_program: Vec::new(),
             importmap: None,
+            engine_importmaps: Vec::new(),
             inertia: None,
             vite_manifest: None,
             stylesheets: Vec::new(),
@@ -1259,6 +1293,7 @@ impl App {
             helper_diagnostics: None,
             helper_modules: BTreeSet::new(),
             concern_spliced_class_methods: HashMap::default(),
+            concern_class_side_spans: crate::det::HashSet::default(),
             concern_model_items: HashMap::default(),
             concern_guarded_items: HashMap::default(),
             concern_included_redefs: HashMap::default(),

@@ -44,12 +44,20 @@ pub mod preload;
 pub mod block_refine;
 pub mod mutates_self;
 mod registry;
+
+/// A job's fields and hooks only the ruby family's runtime defines (runtime/spinel/active_job_serialization.rb).
+pub const ACTIVE_JOB_RUBY_FIELDS: &[&str] = &[
+    "job_id", "queue_name", "priority", "scheduled_at", "enqueued_at", "executions",
+    "provider_job_id", "successfully_enqueued?", "serialize", "run_callbacks",
+    "enqueue_error", "set", "enqueue", "concurrency_key",
+];
 mod test_module;
 mod render;
 mod ivar_set;
 pub(crate) use ivar_set::controller_name_of;
 mod effects;
 mod diagnostics;
+pub(crate) use diagnostics::datetime_local_time_reads;
 pub mod open_classes;
 pub(crate) mod forwarding;
 mod private_calls;
@@ -136,7 +144,7 @@ pub struct Analyzer {
     /// `content_type.attachment?` as Bool on a `Str` receiver.
     inquirers: crate::det::HashSet<Symbol>,
     /// The app's translations, for `t` / `I18n.t` (see `crate::i18n`).
-    i18n: crate::i18n::Catalog,
+    i18n: std::sync::Arc<crate::i18n::Catalog>,
     /// `app/helpers` modules, whose bodies run in a view and take
     /// ActionView's `t`.
     helper_modules: crate::det::HashSet<ClassId>,
@@ -1216,6 +1224,9 @@ impl Analyzer {
                 }
             } else {
                 classes.entry(id.clone()).or_default().source_instance_methods.insert(method.name.clone());
+                if method.name.as_str() == "each" && forwards_block_to_each(method) {
+                    classes.entry(id.clone()).or_default().each_forwards_block = true;
+                }
                 if expr_calls_super(&method.body) {
                     classes.entry(id.clone()).or_default().delegating_instance_methods.insert(method.name.clone());
                 }
@@ -1324,7 +1335,7 @@ impl Analyzer {
             host_folded: HashMap::default(),
             refined_action_bindings: HashMap::default(),
             inquirers: inquiry::inquirer_methods(app),
-            i18n: app.i18n.clone(),
+            i18n: std::sync::Arc::clone(&app.i18n),
             helper_modules: app.helper_method_index.values().cloned().collect(),
             helper_index: helper_instance_index(app),
             open_classes: open_classes::OpenClasses::of(app),
@@ -1365,6 +1376,13 @@ impl Analyzer {
     /// completion) can *enumerate* what dispatch can *resolve*.
     pub fn class_registry(&self) -> &HashMap<ClassId, ClassInfo> {
         &self.classes
+    }
+
+    /// The class registry, with everything else the analysis kept
+    /// dropped: the lowerings read only the registry, and the rest (the
+    /// call-site, constant and signature caches) grows with the app.
+    pub fn into_class_registry(self) -> HashMap<ClassId, ClassInfo> {
+        self.classes
     }
 
     /// Parameter types unified from call sites for `class#method`
@@ -2036,7 +2054,7 @@ impl Analyzer {
                 query_class_objects: Default::default(),
                 constants: Default::default(),
                 annotate_self_dispatch: false,
-                in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                 view_name: None,
             };
             self.body_typer().analyze_expr(&mut helper.body, &ctx);
@@ -2377,7 +2395,7 @@ impl Analyzer {
                     query_class_objects: Default::default(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
-                    in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                    in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                     view_name: None,
                 };
                 let ty = typer.analyze_expr(value, &ctx);
@@ -2659,7 +2677,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
             };
             for item in model.body.iter_mut() {
                 if let ModelBodyItem::Unknown { expr, .. } = item {
@@ -2677,7 +2695,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -2748,7 +2766,7 @@ impl Analyzer {
                     class_objects: Default::default(),
                     query_class_objects: Default::default(),
                     constants: class_constants.clone(),
-                    annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                    annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                 };
 
                 // The class body has run before any class method does, so its writes are not nilable there.
@@ -2815,7 +2833,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
             };
             if retype {
                 for item in controller.body.iter_mut() {
@@ -2837,7 +2855,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
             };
 
             // Snapshot this controller's own segment of the filter chain
@@ -3416,7 +3434,7 @@ impl Analyzer {
                             class_objects: Default::default(),
                             query_class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
-                            annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                            annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                         };
                         // Seed helper-method params from the inferred-params
                         // table too, so `period(query)`'s body resolves on
@@ -3923,7 +3941,7 @@ impl Analyzer {
                         query_class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
-                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                         view_name: None,
                     };
                     let origin = app
@@ -3995,7 +4013,7 @@ impl Analyzer {
                         query_class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
-                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                         view_name: None,
                     };
                     let inner_ctx = self.seed_action_params(
@@ -4179,7 +4197,7 @@ impl Analyzer {
                 local_bindings: HashMap::default(),
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
-                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: self.helper_modules.contains(&lc.name),
+                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: self.helper_modules.contains(&lc.name),
             };
 
             if retype {
@@ -4320,7 +4338,7 @@ impl Analyzer {
                     local_bindings: HashMap::default(),
                     class_objects: Default::default(),
                     query_class_objects: Default::default(),
-                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: class_ctx.helper_body,
+                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: class_ctx.helper_body,
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);
@@ -4336,6 +4354,13 @@ impl Analyzer {
             start = end;
         }
         drop(_typing_library);
+        self.library_class_vars(app);
+        // The initializers' top-level statements: top-level Ruby at boot, whose calls type the library methods they reach.
+        for stmt in app.boot_program.iter_mut() {
+            let mut ctx = Ctx::default();
+            ctx.constants = global_constants.clone();
+            self.body_typer().analyze_expr(stmt, &ctx);
+        }
 
         // Not the assigning actions' types alone: only UsersController sets lobsters' `@title_class`, and every other page rendered its nil as a `Symbol` (`class="x"`).
         for (layout, (rendering, assigning)) in &layout_presence {
@@ -4714,12 +4739,6 @@ impl Analyzer {
             ctx.constants = global_constants.clone();
             self.body_typer().analyze_expr(expr, &ctx);
         }
-        // The initializers' top-level statements, typed the same way: top-level Ruby at boot.
-        for stmt in app.boot_program.iter_mut() {
-            let mut ctx = Ctx::default();
-            ctx.constants = global_constants.clone();
-            self.body_typer().analyze_expr(stmt, &ctx);
-        }
         drop(_typing_tests);
     }
 
@@ -4813,6 +4832,41 @@ impl Analyzer {
     /// `dsl_macro_host`: model and library-class concern hosts may declare
     /// first-class DSL macros (`has_markdown` on `ActionText::HasMarkdown`).
     /// Controllers and test modules do not — keep their diagnostics.
+    // Not typed from a write whose value has no type yet (a writer no call reaches), nor as a lone nil: the default alone says nothing of what a writer stores.
+    fn library_class_vars(&mut self, app: &App) {
+        fn writes(e: &Expr, out: &mut HashMap<Symbol, Ty>) {
+            if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } = &*e.node
+                && let Some(cvar) = name.as_str().strip_prefix("@@")
+                && let Some(ty) = value.ty.clone().filter(|t| !t.is_open() && !matches!(t, Ty::Untyped))
+            {
+                let key = Symbol::from(cvar);
+                let joined = match out.remove(&key) {
+                    Some(old) => union_of(old, ty),
+                    None => ty,
+                };
+                out.insert(key, joined);
+            }
+            e.node.for_each_child(&mut |c| writes(c, out));
+        }
+        for lc in app.library_classes.iter().filter(|lc| !app.models.iter().any(|m| m.name == lc.name)) {
+            let mut vars: HashMap<Symbol, Ty> = HashMap::default();
+            for init in &lc.class_ivar_initializers {
+                writes(init, &mut vars);
+            }
+            for method in lc.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Class) {
+                writes(&method.body, &mut vars);
+            }
+            let cls = self.classes.entry(lc.name.clone()).or_default();
+            for (name, ty) in vars {
+                if ty == Ty::Nil {
+                    cls.class_vars.remove(&name);
+                } else {
+                    cls.class_vars.insert(name, ty);
+                }
+            }
+        }
+    }
+
     fn seed_method_params(
         &self,
         base: &Ctx,
@@ -4826,6 +4880,7 @@ impl Analyzer {
         ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
         ctx.instance_body = !ctx.class_side;
         ctx.method_body = true;
+        ctx.super_method = Some((class_id.clone(), method.name.clone(), ctx.class_side));
         // A Module hook's implicit self mixes in while the includer's body loads; an explicit existing class is still a live change
         ctx.building_self = ctx.class_side
             && matches!(
@@ -5567,32 +5622,46 @@ impl Analyzer {
             .map(|(id, c)| (id.clone(), c.includes.clone()))
             .collect();
         for (id, includes) in targets {
-            // Transitive closure over module includes.
-            let mut queue = includes;
-            let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
-            let mut qi = 0;
-            while qi < queue.len() {
-                let m = queue[qi].clone();
-                qi += 1;
-                let Some((inst, class_side, nested)) = module_surfaces.get(&m) else {
-                    continue;
-                };
-                for n in nested {
-                    if seen.insert(n.clone()) {
-                        queue.push(n.clone());
+            // Not breadth-first over the closure: Ruby looks a method up in the last-included module first, and in a module before the modules it includes.
+            fn ancestors(m: &ClassId, surfaces: &HashMap<ClassId, Surface>, seen: &mut BTreeSet<ClassId>, out: &mut Vec<ClassId>) {
+                if !seen.insert(m.clone()) {
+                    return;
+                }
+                out.push(m.clone());
+                if let Some((_, _, nested)) = surfaces.get(m) {
+                    for n in nested.iter().rev() {
+                        ancestors(n, surfaces, seen, out);
                     }
                 }
+            }
+            let mut queue = Vec::new();
+            let mut seen: BTreeSet<ClassId> = BTreeSet::new();
+            for m in includes.iter().rev() {
+                ancestors(m, &module_surfaces, &mut seen, &mut queue);
+            }
+            let mut taken_inst: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
+            let mut taken_class: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
+            for m in &queue {
+                let Some((inst, class_side, _)) = module_surfaces.get(m) else {
+                    continue;
+                };
                 let folded = self.concern_folded.entry(id.clone()).or_default();
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
                         continue; // own/catalog entry wins
                     }
+                    if !taken_inst.insert(name.clone()) {
+                        continue;
+                    }
                     cls.instance_methods.insert(name.clone(), ty.clone());
                     folded.0.insert(name.clone());
                 }
                 for (name, ty) in class_side {
                     if cls.class_methods.contains_key(name) && !folded.1.contains(name) {
+                        continue;
+                    }
+                    if !taken_class.insert(name.clone()) {
                         continue;
                     }
                     cls.class_methods.insert(name.clone(), ty.clone());
@@ -6029,6 +6098,9 @@ impl Analyzer {
             if let Some(seeds) = &app.seeds {
                 work.push(Work { owner: None, roots: vec![(seeds, false)] });
             }
+        }
+        for stmt in &app.boot_program {
+            work.push(Work { owner: None, roots: vec![(stmt, false)] });
         }
 
         // Walk immutable trees concurrently; replay caller boundaries and sites in order.
@@ -8480,6 +8552,19 @@ pub(crate) fn source_finder_classes(app: &App, resolver: &ConstResolver) -> Hash
     classes
 }
 
+/// `def each(&block) = <collection>.each(&block)`, the block handed on untouched.
+fn forwards_block_to_each(method: &crate::dialect::MethodDef) -> bool {
+    let Some(block) = method.block_param.as_ref() else { return false };
+    let mut tail = &method.body;
+    while let ExprNode::Seq { exprs } = &*tail.node {
+        let [only] = exprs.as_slice() else { return false };
+        tail = only;
+    }
+    matches!(&*tail.node, ExprNode::Send { recv: Some(_), method, args, block: Some(passed), .. }
+        if method.as_str() == "each" && args.is_empty()
+            && matches!(&*passed.node, ExprNode::Var { name, .. } if *name == block.name))
+}
+
 /// Shared by ingest qualification and the typed finder registry. Retained
 /// hooks are effects, whereas expanded carriers already have concrete defs.
 pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassInfo>, app: &App, resolver: &ConstResolver) {
@@ -9613,7 +9698,12 @@ fn walk_ivar_assignments(
 ) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            if let Some(ty) = value.ty.clone() {
+            // An empty indifferent hash in a slot is `{}`'s pending value: its `[]=` writes type it (`widen_hash_ivar_value`).
+            let empty_indifferent = matches!(&*value.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if method.as_str() == "new" && args.is_empty() && matches!(&*r.node, ExprNode::Const { path }
+                    if matches!(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().as_slice(), ["HashWithIndifferentAccess"] | ["ActiveSupport", "HashWithIndifferentAccess"])));
+            let ty = if empty_indifferent { Some(crate::analyze::indifferent::of(crate::analyze::body::unknown())) } else { value.ty.clone() };
+            if let Some(ty) = ty {
                 // Union with existing entry so repeated assignments to
                 // the same ivar accumulate (rather than the last write
                 // winning). Mirrors the simple flow-sensitive join.
@@ -9820,6 +9910,13 @@ fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, written_k
         Ty::Union { variants } => variants,
         other => std::slice::from_ref(other),
     };
+    if let [arm] = arms
+        && let Some(value) = crate::analyze::indifferent::value_of(arm)
+    {
+        let value = crate::analyze::body::join_ivar_slot(value.clone(), incoming);
+        out.insert(name.clone(), crate::analyze::indifferent::of(value));
+        return;
+    }
     let key = match arms.iter().find(|v| matches!(v, Ty::Hash { .. })) {
         Some(Ty::Hash { key, .. }) if !matches!(**key, Ty::Var { .. }) => match &written_key {
             Some(w) => std::sync::Arc::new(crate::analyze::body::union_of((**key).clone(), w.clone())),
@@ -10226,7 +10323,11 @@ fn register_serialized_columns(body: &[ModelBodyItem], methods: &mut HashMap<Sym
         if method.as_str() != "serialize" {
             continue;
         }
-        for name in args.iter().map_while(symbol_arg) {
+        let name_arg = |e: &Expr| match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+            _ => symbol_arg(e).cloned(),
+        };
+        for name in args.iter().map_while(name_arg) {
             methods.insert(name.clone(), Ty::Untyped);
             methods.insert(Symbol::from(format!("{}=", name.as_str())), Ty::Untyped);
         }
@@ -11102,4 +11203,50 @@ mod finder_reopening_tests {
     fn source_finder_reopenings_are_ambiguous_in_both_model_orders() { check(false); }
     #[test]
     fn source_finder_reopenings_are_ambiguous_in_both_library_orders() { check(true); }
+}
+
+#[cfg(feature = "memory-census")]
+impl Analyzer {
+    /// Drop the analyzer one field at a time and report what each held
+    /// (`ROUNDHOUSE_MEMORY_CENSUS=1`), keeping the class registry the
+    /// lowerings read, as [`Analyzer::into_class_registry`] does; its size
+    /// is measured on a copy. Destructured without `..`, so a new field has
+    /// to be listed here; `Copy` fields own no heap.
+    pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
+        let Analyzer { classes, upload_array_fields, materialized_associations, inferred_params, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks } = self;
+        let mut freed: Vec<(&str, i64)> = vec![
+            ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
+            ("upload_array_fields", crate::memory_census::freed_by(|| drop(upload_array_fields))),
+            ("materialized_associations", crate::memory_census::freed_by(|| drop(materialized_associations))),
+            ("inferred_params", crate::memory_census::freed_by(|| drop(inferred_params))),
+            ("declared_signatures", crate::memory_census::freed_by(|| drop(declared_signatures))),
+            ("adapter", crate::memory_census::freed_by(|| drop(adapter))),
+            ("concern_folded", crate::memory_census::freed_by(|| drop(concern_folded))),
+            ("host_folded", crate::memory_census::freed_by(|| drop(host_folded))),
+            ("inquirers", crate::memory_census::freed_by(|| drop(inquirers))),
+            ("i18n", crate::memory_census::freed_by(|| drop(i18n))),
+            ("helper_modules", crate::memory_census::freed_by(|| drop(helper_modules))),
+            ("helper_index", crate::memory_census::freed_by(|| drop(helper_index))),
+            ("open_classes", crate::memory_census::freed_by(|| drop(open_classes))),
+            ("refined_action_bindings", crate::memory_census::freed_by(|| drop(refined_action_bindings))),
+            ("const_resolver", crate::memory_census::freed_by(|| drop(const_resolver))),
+            ("source_indexed", crate::memory_census::freed_by(|| drop(source_indexed))),
+            ("typed_constants", crate::memory_census::freed_by(|| drop(typed_constants))),
+            ("data_factories", crate::memory_census::freed_by(|| drop(data_factories))),
+            ("class_factories", crate::memory_census::freed_by(|| drop(class_factories))),
+            ("data_factories_without_custom_initialize", crate::memory_census::freed_by(|| drop(data_factories_without_custom_initialize))),
+            ("view_seeds", crate::memory_census::freed_by(|| drop(view_seeds))),
+            ("callers_by_target", crate::memory_census::freed_by(|| drop(callers_by_target))),
+            ("controller_action_meta_cache", crate::memory_census::freed_by(|| drop(controller_action_meta_cache))),
+            ("fixpoint_rounds", crate::memory_census::freed_by(|| drop(fixpoint_rounds))),
+            ("fixpoint_checks", crate::memory_census::freed_by(|| drop(fixpoint_checks))),
+        ];
+        let total: i64 = freed.iter().map(|(_, bytes)| bytes).sum();
+        freed.sort_by_key(|(name, bytes)| (-bytes, *name));
+        for (name, bytes) in freed.iter().filter(|(_, bytes)| *bytes >= 1_000_000) {
+            crate::memory_census::note("analyzer", format_args!("field {name}: {:.1}MB", *bytes as f64 / 1e6));
+        }
+        crate::memory_census::note("analyzer", format_args!("total {:.1}MB", total as f64 / 1e6));
+        classes
+    }
 }

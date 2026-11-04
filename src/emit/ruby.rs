@@ -24,6 +24,7 @@ const SPINEL_TEST_HELPER: &str =
 pub(crate) mod expr;
 mod library;
 pub(crate) use library::install_lookup_indexes;
+pub(crate) use library::app_presents_time_zoned;
 mod rbs;
 /// Host-only, like the `project` tree passes that run it and whose RBS
 /// declaration spans it shares; excluded from the wasm build.
@@ -1100,7 +1101,8 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
     // per named route. Generated from `app.routes`; supersedes the
     // hand-written `runtime/ruby/action_view/route_helpers.rb` (which
     // is being kept for backward compat until callers migrate).
-    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    let mut route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    crate::lower::routes_to_library::guard_required_segments(&mut route_helper_funcs, app);
     // The segment interpolations stay bare. `to_param` used to be
     // applied here, to every segment of every helper — which reads as
     // Rails-faithful but isn't, because our segments are declared
@@ -1258,6 +1260,10 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
             &crate::lower::routes::direct_helper_names(app),
             true,
         );
+        // The url-rewritten copy of every test module is lowering input
+        // only. It is as large as the lowered classes, so free it before
+        // the passes below rather than holding both to the end of emit.
+        drop(test_modules);
         // A test body writes the same relation chains an app body does —
         // `@room.messages.ordered`, `user.push_subscriptions.find_by(…)`,
         // `room.memberships.grant_to(users)`. The has_many reader hands
@@ -1279,12 +1285,16 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
         // half (scope-method synthesis, `push_scope_variants`) is inert
         // here and only the call-site rewrite runs.
         {
-            let mut test_lcs: Vec<crate::dialect::LibraryClass> = test_lowered
-                .iter()
-                .flat_map(|m| {
-                    std::iter::once(m.test_class.clone()).chain(m.inner_classes.iter().cloned())
-                })
-                .collect();
+            // Moved out, not cloned: a copy of every lowered test class
+            // doubled the heap's largest holding for these passes.
+            let inner_counts: Vec<usize> = test_lowered.iter().map(|m| m.inner_classes.len()).collect();
+            let mut constants = Vec::with_capacity(test_lowered.len());
+            let mut test_lcs: Vec<crate::dialect::LibraryClass> = Vec::new();
+            for m in test_lowered.drain(..) {
+                test_lcs.push(m.test_class);
+                test_lcs.extend(m.inner_classes);
+                constants.push(m.constants);
+            }
             // A record Array at a Relation-typed parameter, restated as
             // the Relation over those records — BEFORE the scope
             // lowering, which is what turns the `M.where` it writes
@@ -1314,12 +1324,15 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
                 library::RootingScope::AppAndRuntime,
             );
             let mut it = test_lcs.into_iter();
-            for m in &mut test_lowered {
-                m.test_class = it.next().expect("one lowered class per test module");
-                for inner in &mut m.inner_classes {
-                    *inner = it.next().expect("one lowered class per inner class");
-                }
-            }
+            test_lowered = constants
+                .into_iter()
+                .zip(inner_counts)
+                .map(|(constants, inner_count)| crate::lower::test_module_to_library::LoweredTestModule {
+                    test_class: it.next().expect("one lowered class per test module"),
+                    inner_classes: it.by_ref().take(inner_count).collect(),
+                    constants,
+                })
+                .collect();
         }
         // Fixture classes (`ArticlesFixtures`, etc.) live at
         // `test/fixtures/<plural>.rb` — outside the model/controller

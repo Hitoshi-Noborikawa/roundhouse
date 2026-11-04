@@ -1597,6 +1597,7 @@ mod tests {
             ),
             slug_models: Default::default(),
             bool_readers: Default::default(),
+            time_columns: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
             i18n: Default::default(),
@@ -1615,6 +1616,8 @@ mod tests {
             partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            yielding_partials: Default::default(),
+            record_carries_yield: false,
             record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
@@ -1625,6 +1628,7 @@ mod tests {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect::<HashMap<_, _>>(),
             ),
+            nilable_ivar_models: Default::default(),
         }
     }
 

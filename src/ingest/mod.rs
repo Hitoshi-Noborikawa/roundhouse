@@ -41,6 +41,10 @@ mod dry_types;
 mod oj;
 pub(crate) mod source_gems;
 mod auto_source_gems;
+mod absence_guards;
+mod uncalled_definers;
+mod job_class_lookup;
+mod settled_conditionals;
 mod dry_monads;
 mod dry_validation;
 mod representable;
@@ -53,9 +57,19 @@ pub mod sidekiq_yml;
 pub mod cable_yml;
 mod public_file_server_config;
 mod action_controller_caching_config;
+mod json_response_config;
 mod active_job_config;
 mod caches_page;
 mod boot_program;
+mod engine_config;
+mod engine_helpers;
+mod interpolated_renders;
+mod container_specialize;
+mod controller_delegates;
+mod active_model_super;
+mod queue_adapter_reader;
+mod library_concern_items;
+mod unreached_gem_modules;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
@@ -131,10 +145,12 @@ pub(crate) mod rake_tasks;
 pub mod util;
 pub mod view;
 pub mod vite;
+pub mod current_page;
 pub mod time_tag;
 mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
+pub use concern_accessors::{defer as defer_accessor_surface, DeferredAccessorSurface};
 
 /// The construct an ActiveRecord class outside app/models is reported
 /// under (`app::report_unmodelled_records`): the CLI keys its per-target
