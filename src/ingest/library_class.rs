@@ -69,7 +69,21 @@ pub fn ingest_library_classes(
     source: &[u8],
     file: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, None)
+    ingest_library_classes_impl(source, file, Walk::All)
+}
+
+/// [`ingest_library_classes`] for an app file Rails' autoloader loads
+/// (`app/models`, the autoloaded support dirs): a file that declares no
+/// class or module but writes file-level constants still defines them,
+/// so it is carried as a `LibraryClassOrigin::FileConstants` holder
+/// named for its first constant (`RemoteThing = Thing` in
+/// `remote_thing.rb`). Other callers ingest snippets, or files whose
+/// constants another path owns (initializers, gem sources).
+pub fn ingest_app_library_classes(
+    source: &[u8],
+    file: &str,
+) -> IngestResult<Vec<LibraryClass>> {
+    ingest_library_classes_impl(source, file, Walk::App)
 }
 
 /// Like [`ingest_library_classes`], but only classes/modules NESTED
@@ -99,7 +113,30 @@ pub fn ingest_nested_library_classes(
     file: &str,
     outer: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, Some(outer))
+    ingest_library_classes_impl(source, file, Walk::NestedIn(outer))
+}
+
+/// Every declaration in a gem model's file except the model's own class
+/// and what nests under it, which the model ingest and
+/// [`ingest_nested_library_classes`] take: a sibling written beside the
+/// model (`Tessera::Helpers` beside `Tessera::Node`) is a library class
+/// the file declares and loads like any other. The model's class is left
+/// out so its synthesized methods are not needed to walk it.
+pub fn ingest_library_classes_beside(
+    source: &[u8],
+    file: &str,
+    model: &str,
+) -> IngestResult<Vec<LibraryClass>> {
+    ingest_library_classes_impl(source, file, Walk::Beside(model))
+}
+
+#[derive(Clone, Copy)]
+enum Walk<'a> {
+    All,
+    /// `All`, for a file Rails autoloads (`ingest_app_library_classes`).
+    App,
+    NestedIn(&'a str),
+    Beside(&'a str),
 }
 
 /// The modules a file declares with an empty body (`module MarkA; end`):
@@ -120,18 +157,32 @@ pub(super) fn ingest_empty_modules(source: &[u8], file: &str) -> IngestResult<Ve
     Ok(out)
 }
 
-/// `nested_in`: `None` walks every declaration; `Some(outer)` walks
-/// only nested ones and top-level compact names under `outer`.
+/// `Walk::All` walks every declaration; `NestedIn(outer)` walks only
+/// nested ones and top-level compact names under `outer`; `Beside(model)`
+/// walks every class and module but `model` and the ones under it, and
+/// takes nothing written at file level (the model's file program carries
+/// that, as it did before the walk).
 fn ingest_library_classes_impl(
     source: &[u8],
     file: &str,
-    nested_in: Option<&str>,
+    walk: Walk<'_>,
 ) -> IngestResult<Vec<LibraryClass>> {
-    let walked = |scope: &[String], path: Option<Vec<String>>| match nested_in {
-        None => true,
-        Some(_) if !scope.is_empty() => true,
-        Some(outer) => path.is_some_and(|path| {
+    let nested_in = match walk {
+        Walk::NestedIn(outer) => Some(outer),
+        _ => None,
+    };
+    let file_level = matches!(walk, Walk::All | Walk::App);
+    let outside = |model: &str, name: &str| {
+        name != model && !name.strip_prefix(model).is_some_and(|rest| rest.starts_with("::"))
+    };
+    let walked = |scope: &[String], path: Option<Vec<String>>| match walk {
+        Walk::All | Walk::App => true,
+        Walk::NestedIn(_) if !scope.is_empty() => true,
+        Walk::NestedIn(outer) => path.is_some_and(|path| {
             path.join("::").strip_prefix(outer).is_some_and(|rest| rest.starts_with("::"))
+        }),
+        Walk::Beside(model) => path.is_some_and(|path| {
+            outside(model, &scope.iter().chain(&path).cloned().collect::<Vec<_>>().join("::"))
         }),
     };
     super::sources::register(file, &String::from_utf8_lossy(source));
@@ -191,9 +242,13 @@ fn ingest_library_classes_impl(
     // module body declares (`ConditionalArm::declarations`), which the
     // finders above do not reach: each loads only where its branch runs.
     if nested_in.is_none() {
-        out.extend(conditional_declaration_classes(&root, file)?);
+        let conditional = conditional_declaration_classes(&root, file)?;
+        out.extend(conditional.into_iter().filter(|lc| match walk {
+            Walk::Beside(model) => outside(model, lc.name.0.as_str()),
+            _ => true,
+        }));
     }
-    if out.is_empty() {
+    if out.is_empty() && file_level {
         if let Some(lc) = file_data_class(&root, file)? {
             return Ok(vec![lc]);
         }
@@ -225,10 +280,10 @@ fn ingest_library_classes_impl(
     // classes (any of which may subclass them); a factory that subclasses
     // an in-file class follows that class — Ruby resolves the superclass
     // while defining the subclass. A file of nothing else defines just
-    // those classes. The nested walk (`nested_in`) takes no top-level
+    // those classes. The nested and beside walks take no top-level
     // declaration.
-    let made = match (nested_in, root.as_program_node()) {
-        (None, Some(program)) => {
+    let made = match (file_level, root.as_program_node()) {
+        (true, Some(program)) => {
             super::class_new_factory::constant_classes(None, Some(program.statements().as_node()), file)
         }
         _ => Vec::new(),
@@ -239,12 +294,29 @@ fn ingest_library_classes_impl(
     // Class.new-only library file drops `TIMEOUT = 5` beside the
     // factories, and a refused factory that should stay a constant has
     // nowhere to land.
-    let file_constants = if nested_in.is_none() {
+    let file_constants = if file_level {
         file_level_constants(&root, file, &made)?
     } else {
         Vec::new()
     };
     let mut factories: Vec<LibraryClass> = made.into_iter().map(|(_, c)| c).collect();
+    // No class, module or factory to host them: the file is its
+    // constants, which Ruby binds on Object as the autoloader loads it.
+    // Only when they are all it runs: the holder carries the writes
+    // alone, so a `Labels << "ready"` after `Labels = []` would be lost.
+    // Such a file is not carried, as before, and a read of its constants
+    // stays refused.
+    if matches!(walk, Walk::App) && out.is_empty() && factories.is_empty() && !file_constants.is_empty() {
+        let only_writes = root.as_program_node().is_some_and(|program| {
+            program.statements().body().iter().all(|stmt| stmt.as_constant_write_node().is_some())
+        });
+        if !only_writes {
+            return Ok(Vec::new());
+        }
+        let mut holder = file_constants_holder(file, &file_constants);
+        holder.constants = file_constants;
+        return Ok(vec![holder]);
+    }
     if !file_constants.is_empty() {
         // A Class.new-only file with admitted factories: hoist onto the
         // first factory. Refuse when there is no host, or when the hoist
@@ -4608,6 +4680,21 @@ pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
         .is_some_and(|p| bases.contains(&bases.resolve_superclass(&scope, &p)))
 }
 
+/// A file whose primary class has no superclass and includes
+/// `ActiveModel::Model` or `ActiveModel::Validations`, as
+/// `classify_class_file` reads a tableless model under `app/models`. A
+/// gem's `class Node; include ActiveModel::Validations; validate :check`
+/// carried as a library class emitted the include of a module no runtime
+/// port defines, a NameError as the file loaded.
+pub fn is_tableless_active_model(source: &[u8]) -> bool {
+    let result = parse(source);
+    let root = result.node();
+    let Some((_, class)) = super::util::primary_class_with_scope(&root) else {
+        return false;
+    };
+    class.superclass().is_none() && includes_active_model(&class)
+}
+
 pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKind> {
     let result = parse(source);
     let root = result.node();
@@ -4633,7 +4720,12 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         if super::class_new_factory::file_has_factory(&root) {
             return Some(ClassKind::LibraryClass);
         }
-        return None;
+        // `RemoteThing = Thing`: a file of file-level constants declares
+        // those (`ingest_app_library_classes`), not a model.
+        let writes_constants = root.as_program_node().is_some_and(|program| {
+            program.statements().body().iter().any(|stmt| stmt.as_constant_write_node().is_some())
+        });
+        return writes_constants.then_some(ClassKind::LibraryClass);
     };
     let parent_path = class
         .superclass()
@@ -5129,39 +5221,7 @@ pub fn ingest_concern_filters(
             let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
             let Some(block_body) = block.body() else { continue };
             for inner in flatten_statements(block_body) {
-                match super::controller::parse_filter_call(&inner, file) {
-                    Ok(Some(fs)) => filters.extend(fs),
-                    // `parse_filter_call` itself only returns `Err` for a
-                    // non-literal `only:`/`except:` (refused rather than
-                    // silently applied to every action — that function's
-                    // doc comment). Strict mode must fail ingest the same
-                    // way a controller's own `only:`/`except:` would;
-                    // survey mode records the gap and keeps scanning.
-                    Err(err) => super::survey::continue_or_fail(err)?,
-                    Ok(None) => {
-                        if let Some(f) = content_security_policy_filter(&inner, file) {
-                            filters.push(f);
-                        } else if let Some(f) = block_form_concern_filter(&inner, file) {
-                            filters.push(f);
-                        } else if let Some(name) = forgery_macro_name(&inner) {
-                            // A forgery declaration `parse_filter_call` does not
-                            // model (`prepend:`, a custom `store:`, an unknown
-                            // `with:`) changes how every
-                            // includer checks requests. The `included` block is
-                            // otherwise dropped, so it would vanish without a
-                            // trace where the same line in a controller is a
-                            // survey gap; name it the same way.
-                            super::survey::record(&super::IngestError::Unsupported {
-                                file: file.to_string(),
-                                message: format!(
-                                    "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
-                                ),
-                            });
-                        } else {
-                            record_concern_csp_divergence(&inner, file);
-                        }
-                    }
-                }
+                ingest_included_filter_statement(&inner, file, &mut filters)?;
             }
         }
         if !filters.is_empty() {
@@ -5171,17 +5231,132 @@ pub fn ingest_concern_filters(
     Ok(out)
 }
 
-/// `protect_from_forgery` / `skip_forgery_protection`, receiverless.
-fn forgery_macro_name(stmt: &ruby_prism::Node<'_>) -> Option<&'static str> {
-    let call = stmt.as_call_node()?;
-    if call.receiver().is_some() {
+fn ingest_included_filter_statement(
+    inner: &Node<'_>,
+    file: &str,
+    filters: &mut Vec<crate::dialect::Filter>,
+) -> super::IngestResult<()> {
+    match super::controller::parse_filter_call(inner, file) {
+        Ok(Some(fs)) => filters.extend(fs),
+        // `parse_filter_call` itself only returns `Err` for a
+        // non-literal `only:`/`except:` (refused rather than
+        // silently applied to every action — that function's
+        // doc comment). Strict mode must fail ingest the same
+        // way a controller's own `only:`/`except:` would;
+        // survey mode records the gap and keeps scanning.
+        Err(err) => super::survey::continue_or_fail(err)?,
+        Ok(None) => {
+            if let Some(guarded) = controller_callback_guarded_body(inner) {
+                for stmt in guarded {
+                    ingest_included_filter_statement(&stmt, file, filters)?;
+                }
+            } else if let Some(f) = content_security_policy_filter(inner, file) {
+                filters.push(f);
+            } else if let Some(f) = block_form_concern_filter(inner, file) {
+                filters.push(f);
+            } else if let Some(name) = callback_macro_name(inner) {
+                // A callback macro `parse_filter_call` does not model
+                // (`append_before_action`, `self.before_action`, a forgery
+                // declaration with `prepend:` or a custom `store:`) changes
+                // how every includer handles requests. The `included` block
+                // is otherwise dropped, so it would vanish without a trace
+                // where the same line in a controller is a survey gap; name
+                // it the same way.
+                super::survey::record(&super::IngestError::Unsupported {
+                    file: file.to_string(),
+                    message: format!(
+                        "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
+                    ),
+                });
+            } else if let Some(name) = conditional_callback_macro_name(inner) {
+                // A filter behind a guard ingest cannot decide would otherwise
+                // vanish with the rest of the `included` block, so the
+                // includer's actions would run unfiltered without a trace.
+                super::survey::record(&super::IngestError::Unsupported {
+                    file: file.to_string(),
+                    message: format!(
+                        "controller concern `{name}` under a condition is not modelled (its effect is dropped from the output)"
+                    ),
+                });
+            } else {
+                record_concern_csp_divergence(inner, file);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The class methods `AbstractController::Callbacks` and
+/// `RequestForgeryProtection` give every controller.
+const CONTROLLER_CALLBACK_MACROS: &[&str] = &[
+    "before_action",
+    "prepend_before_action",
+    "append_before_action",
+    "skip_before_action",
+    "around_action",
+    "prepend_around_action",
+    "append_around_action",
+    "skip_around_action",
+    "after_action",
+    "prepend_after_action",
+    "append_after_action",
+    "skip_after_action",
+    "protect_from_forgery",
+    "skip_forgery_protection",
+];
+
+/// The statements under `if respond_to?(:before_action)` (modifier or
+/// block form) in an `included` block. Its filters only ever reach a
+/// controller (`App::concern_filters`), and a controller class answers
+/// true for every callback macro, so the `if` branch is the one Rails runs.
+fn controller_callback_guarded_body<'pr>(stmt: &Node<'pr>) -> Option<Vec<Node<'pr>>> {
+    let if_node = stmt.as_if_node()?;
+    let predicate = if_node.predicate().as_call_node()?;
+    if predicate.receiver().is_some_and(|r| r.as_self_node().is_none())
+        || constant_id_str(&predicate.name()) != "respond_to?"
+    {
         return None;
     }
-    match constant_id_str(&call.name()) {
-        "protect_from_forgery" => Some("protect_from_forgery"),
-        "skip_forgery_protection" => Some("skip_forgery_protection"),
-        _ => None,
+    let args: Vec<_> = predicate.arguments()?.arguments().iter().collect();
+    let [arg] = args.as_slice() else { return None };
+    if !CONTROLLER_CALLBACK_MACROS.contains(&symbol_value(arg)?.as_str()) {
+        return None;
     }
+    Some(if_node.statements().map(|s| flatten_statements(s.as_node())).unwrap_or_default())
+}
+
+/// A callback macro anywhere under an `if` / `unless` that
+/// `controller_callback_guarded_body` does not decide.
+fn conditional_callback_macro_name(stmt: &Node<'_>) -> Option<&'static str> {
+    let branches: Vec<Node<'_>> = if let Some(if_node) = stmt.as_if_node() {
+        if_node.statements().map(|s| s.as_node()).into_iter().chain(if_node.subsequent()).collect()
+    } else if let Some(unless) = stmt.as_unless_node() {
+        unless
+            .statements()
+            .map(|s| s.as_node())
+            .into_iter()
+            .chain(unless.else_clause().and_then(|e| e.statements()).map(|s| s.as_node()))
+            .collect()
+    } else if let Some(else_node) = stmt.as_else_node() {
+        else_node.statements().map(|s| s.as_node()).into_iter().collect()
+    } else {
+        return None;
+    };
+    branches
+        .into_iter()
+        .flat_map(flatten_statements)
+        .find_map(|inner| callback_macro_name(&inner).or_else(|| conditional_callback_macro_name(&inner)))
+}
+
+/// A callback macro called receiverless or on `self`; both reach the
+/// includer, since Rails runs the `included` block on it.
+fn callback_macro_name(stmt: &Node<'_>) -> Option<&'static str> {
+    let call = stmt.as_call_node()?;
+    if call.receiver().is_some_and(|r| r.as_self_node().is_none()) {
+        return None;
+    }
+    let name = constant_id_str(&call.name());
+    CONTROLLER_CALLBACK_MACROS.iter().find(|m| **m == name).copied()
 }
 
 /// `content_security_policy if: -> { … } do |policy| … end` inside
@@ -5549,6 +5724,63 @@ fn includer_guard_classes(cond: &crate::expr::Expr) -> Option<(Vec<String>, bool
     }
 }
 
+/// A statement of a concern's `included do` block, or the items a
+/// `with_options` block in it merges into (`walk_concern_dsl`).
+enum ConcernDsl<'pr> {
+    Stmt(ruby_prism::Node<'pr>),
+    Merged(Vec<crate::dialect::ModelBodyItem>),
+}
+
+/// `walk_dsl_stmts` for a concern's `included do`, with each `with_options`
+/// block merged as the model walk merges it (`model::with_options::expand`):
+/// flattened, its calls lost their options (`class_name:`), so a
+/// `has_many` read a class named after itself. A block that doesn't merge
+/// wholly into associations, scopes, validations and callbacks is
+/// flattened as before.
+fn walk_concern_dsl<'pr>(
+    body: ruby_prism::Node<'pr>,
+    owner: &ClassId,
+    file: &str,
+    consts: &super::model::ClassConsts,
+    out: &mut Vec<ConcernDsl<'pr>>,
+) {
+    for stmt in flatten_statements(body) {
+        if let Some(call) = stmt.as_call_node()
+            && super::model::with_options::is_with_options(&call)
+            && call.block().and_then(|b| b.as_block_node()).is_some()
+        {
+            // A gap `expand` records (a `validates` option it drops) and
+            // its warning stay when its items are taken, as the model walk
+            // keeps them; the flattened walk ingests the same calls again,
+            // so the fallback rewinds both.
+            let mark = super::survey::mark();
+            let warned = super::prism::mark();
+            let merged = super::model::with_options::expand(&call, &[], owner, file, consts);
+            match merged {
+                Ok(items)
+                    if !items.is_empty()
+                        && items.iter().all(|item| matches!(item,
+                            crate::dialect::ModelBodyItem::Association { .. }
+                            | crate::dialect::ModelBodyItem::Scope { .. }
+                            | crate::dialect::ModelBodyItem::Validation { .. }
+                            | crate::dialect::ModelBodyItem::Callback { .. })) =>
+                {
+                    out.push(ConcernDsl::Merged(items));
+                }
+                _ => {
+                    super::survey::rewind(mark);
+                    super::prism::rewind(warned);
+                    let mut flat = Vec::new();
+                    walk_dsl_stmts(stmt, &mut flat);
+                    out.extend(flat.into_iter().map(ConcernDsl::Stmt));
+                }
+            }
+            continue;
+        }
+        out.push(ConcernDsl::Stmt(stmt));
+    }
+}
+
 fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
     for stmt in flatten_statements(body) {
         if let Some(call) = stmt.as_call_node() {
@@ -5718,8 +5950,15 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
             let block_start = items.len();
             let mut unclaimed = false;
             let mut stmts = Vec::new();
-            walk_dsl_stmts(block.body().unwrap(), &mut stmts);
-            for inner in stmts {
+            walk_concern_dsl(block.body().unwrap(), &id, file, &concern_consts, &mut stmts);
+            for dsl in stmts {
+                let inner = match dsl {
+                    ConcernDsl::Merged(merged) => {
+                        items.extend(merged);
+                        continue;
+                    }
+                    ConcernDsl::Stmt(inner) => inner,
+                };
                 // `has_many :x, ... if self == Account`: `included do`
                 // runs with `self` bound to the includer, so the guard
                 // is a fact each includer answers. Carry the statement's
@@ -6318,4 +6557,29 @@ fn inert_value(node: &ruby_prism::Node<'_>, targets: &[String]) -> bool {
             && call.block().is_none()
             && call.receiver().is_some_and(|r| inert_value(&r, targets))
     })
+}
+
+/// The `LibraryClassOrigin::FileConstants` holder of `file`, named for
+/// the constant Rails' autoloader maps the file to (`Labels` in
+/// `labels.rb`), so the emitted file keeps that path, or else for its
+/// first constant.
+fn file_constants_holder(file: &str, constants: &[(Symbol, Expr)]) -> LibraryClass {
+    let stem = std::path::Path::new(file).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    let mapped = crate::naming::camelize(stem);
+    let name = constants.iter().find(|(name, _)| name.as_str() == mapped).unwrap_or(&constants[0]).0.clone();
+    LibraryClass {
+        name: ClassId(name),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: Some(crate::dialect::LibraryClassOrigin::FileConstants),
+        constants: Vec::new(),
+        conditional_definitions: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    }
 }

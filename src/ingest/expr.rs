@@ -354,9 +354,21 @@ fn assigned_literal(mut value: Expr, file: &str) -> Expr {
 }
 
 /// Does the source's leading comment block say `frozen_string_literal: true`?
-fn freezes_literals(text: &str) -> bool {
-    for line in text.lines() {
-        let line = line.trim();
+pub(crate) fn freezes_literals(text: &str) -> bool {
+    // Not a bare prefix test: `=endnotes` neither opens nor closes an embedded document.
+    let marks = |line: &str, word: &str| line.strip_prefix(word).is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t', '\r']));
+    let mut in_block = false;
+    for raw in text.lines() {
+        // Not the end of the comment section at `=begin`: Ruby still reads a directive after an `=begin`/`=end` block.
+        if in_block {
+            in_block = !marks(raw, "=end");
+            continue;
+        }
+        if marks(raw, "=begin") {
+            in_block = true;
+            continue;
+        }
+        let line = raw.trim();
         if line.is_empty() {
             continue;
         }
@@ -799,7 +811,8 @@ fn must_because_message(
 /// evaluated once: a local read is tested directly, anything else is
 /// bound to a generated local inside the condition,
 /// `if (__must_N = x).nil? then raise ... else __must_N end`, so the
-/// else side reads it with nil narrowed away.
+/// else side reads it with nil narrowed away. `#: as !nil` lowers to the
+/// same check (`type_ascription::ascribe_trailing`) with its own message.
 ///
 /// `message` is the argument to `TypeError.new`. It is built by the
 /// caller because the two forms differ only there: a fixed string for
@@ -807,7 +820,7 @@ fn must_because_message(
 /// block's body for `T.must_because`. It sits in the `then` branch, so
 /// a `must_because` reason is evaluated only when the value IS nil,
 /// which is where sorbet-runtime's `yield` evaluates it too.
-fn must_check(span: Span, value: Expr, location: &ruby_prism::Location<'_>, message: Expr) -> Expr {
+pub(super) fn must_check(span: Span, value: Expr, location: &ruby_prism::Location<'_>, message: Expr) -> Expr {
     let (tested, read) = match &*value.node {
         ExprNode::Var { .. } => (value.clone(), value),
         _ => {
@@ -967,6 +980,38 @@ fn takes_trailing_ascription(node: &Node<'_>) -> bool {
         || node.as_yield_node().is_some()
 }
 
+/// A write's value with the trailing `#:` that ends the write applied
+/// once. The value ends where the write does (`n = @names.first #: as
+/// !nil`), so the write claims that offset before ingesting it: a value
+/// that reads its own trailing comment (a call, a variable read) then
+/// leaves it to the write, and a nested write ending at the same place
+/// (`a = b = x #: T`) leaves it to the outermost one. `finish` runs on
+/// the value before the ascription, as the write's own step.
+fn ingest_written_value(
+    value: &Node<'_>,
+    loc: &ruby_prism::Location<'_>,
+    file: &str,
+    finish: impl FnOnce(Expr) -> Expr,
+) -> IngestResult<Expr> {
+    let end = loc.end_offset();
+    let outermost = super::type_ascription::push_trailing_ascription_claim(end);
+    struct PopClaim;
+    impl Drop for PopClaim {
+        fn drop(&mut self) {
+            super::type_ascription::pop_trailing_ascription_claim();
+        }
+    }
+    let value = {
+        let _pop = PopClaim;
+        ingest_expr(value, file)
+    }?;
+    let value = finish(value);
+    if !outermost {
+        return Ok(value);
+    }
+    Ok(super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, end), loc))
+}
+
 /// Strict expression ingest: never substitutes survey-mode `nil`.
 /// Call sites that claim a default or other recovered value use this so
 /// a survey recovery cannot be mistaken for a successful parse.
@@ -997,6 +1042,7 @@ pub(super) fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Ex
     Ok(super::type_ascription::ascribe_trailing(
         expr,
         super::type_ascription::trailing_ascription(file, end),
+        &node.location(),
     ))
 }
 
@@ -1175,6 +1221,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                         Some(super::type_ascription::ascribe_trailing(
                             value,
                             super::type_ascription::receiver_rbs_assertion(file, r.location().end_offset()),
+                            &r.location(),
                         ))
                     }
                 }
@@ -1834,8 +1881,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let w = n.as_instance_variable_write_node().unwrap();
             let raw = constant_id_str(&w.name());
             let name = raw.strip_prefix('@').unwrap_or(raw);
-            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
-            let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
+            let value = ingest_written_value(&w.value(), &loc, file, |value| assigned_literal(value, file))?;
             ExprNode::Assign {
                 target: crate::expr::LValue::Ivar { name: Symbol::from(name) },
                 value,
@@ -1844,8 +1890,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_local_variable_write_node().is_some() => {
             let w = n.as_local_variable_write_node().unwrap();
             let name = Symbol::from(constant_id_str(&w.name()));
-            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
-            let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
+            let value = ingest_written_value(&w.value(), &loc, file, |value| assigned_literal(value, file))?;
             ExprNode::Assign {
                 target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
                 value,
@@ -2029,8 +2074,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let w = n.as_instance_variable_or_write_node().unwrap();
             let raw = constant_id_str(&w.name());
             let name = Symbol::from(raw.strip_prefix('@').unwrap_or(raw));
-            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
-            let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
+            let value = ingest_written_value(&w.value(), &loc, file, |value| assigned_literal(value, file))?;
             ExprNode::OpAssign {
                 target: crate::expr::LValue::Ivar { name },
                 op: crate::expr::OpAssignOp::OrOr,

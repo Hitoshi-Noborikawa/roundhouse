@@ -72,6 +72,7 @@ fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::Bui
 pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
     if matches!(target, crate::build_target::BuildTarget::Ruby | crate::build_target::BuildTarget::Jruby | crate::build_target::BuildTarget::Spinel) {
         app.native_library_keywords = true;
+        app.pins_unresolved_params = true;
         for class in &mut app.library_classes {
             for method in &mut class.methods {
                 for param in &mut method.params {

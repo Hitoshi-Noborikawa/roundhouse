@@ -2287,7 +2287,7 @@ fn redirect_expression_is_string_in(
         }
         ExprNode::Send { method, recv, args, .. } => {
             // `strip` returns a string. `empty?`, `present?`, and `!`
-            // return booleans (`present?` lowers to `!(...).strip.empty?`),
+            // return booleans (`present?` lowers to the runtime predicate),
             // so a redirect whose value is that predicate stays unsupported.
             if matches!(method.as_str(), "!" | "empty?" | "present?") {
                 for arg in args {

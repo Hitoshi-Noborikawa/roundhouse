@@ -1077,7 +1077,7 @@ fn subclass_template_hooks(
                         parenthesized: true,
                     },
                 );
-                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, false, &[])
+                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, false, &[], overlaid(controller, controllers))
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -1448,7 +1448,7 @@ fn build_methods(
                 body, controller, "process_action", &privs, &params_privs,
                 /*is_public=*/ false, params_specs, assocs, &[], view_ivars, partials,
                 format_breadth, &shadows, route_id_segments, false, false, None, None, &[],
-                /*preserve_named_layout=*/ true,
+                /*preserve_named_layout=*/ true, overlaid(controller, all_controllers),
             ).0
         });
         // Template lowering can introduce a read of self.action_name.
@@ -2394,7 +2394,7 @@ fn default_forgery_protection() -> Filter {
 /// Always includes `controller_path`: ActionController::Base answers it
 /// (and the lowerer synthesizes a literal override) even when no source
 /// `def` appears in the ancestry.
-fn route_helper_shadows(
+pub(crate) fn route_helper_shadows(
     controller: &Controller,
     all: &[Controller],
 ) -> crate::det::HashSet<Symbol> {
@@ -2651,6 +2651,14 @@ fn inheritor_view_modules(controller: &Controller, all: &[Controller]) -> Vec<St
         .collect()
 }
 
+/// Whether the controller has `route_param_recall::OVERLAY`, its own or inherited.
+fn overlaid(controller: &Controller, all: &[Controller]) -> bool {
+    let name = crate::lower::route_param_recall::OVERLAY;
+    std::iter::once(controller)
+        .chain(ancestor_chain(controller, all))
+        .any(|c| c.actions().any(|a| a.name.as_str() == name))
+}
+
 fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a Controller> {
     let mut chain: Vec<&'a Controller> = Vec::new();
     let mut cur = controller.parent.as_ref();
@@ -2695,7 +2703,7 @@ fn reads_action_name(
             // diagnostics; inspecting its binding must not report them.
             let (bound, _) = crate::emit::diagnostics::scope(|| rewrite_render_to_views(
                 e, views_module_name(c).as_deref(), &[], view_ivars, partials,
-                "", false, false, &[],
+                "", false, false, &[], false,
             ));
             reads(&bound)
         }
@@ -2747,7 +2755,7 @@ mod action_name_probe_tests {
         let action = controller.actions().next().expect("index action");
         let (_, actual) = crate::emit::diagnostics::scope(|| {
             rewrite_render_to_views(&action.body, Some("Probes"), &[], &views,
-                &partials, "index", true, false, &[])
+                &partials, "index", true, false, &[], false)
         });
         assert_eq!(actual.len(), 1, "actual lowering diagnostics: {actual:?}");
         assert!(matches!(&actual[0].kind,
@@ -3263,6 +3271,7 @@ fn action_to_method(
         formats_template.as_ref(),
         &inheritor_modules,
         /*preserve_named_layout=*/ false,
+        overlaid(controller, all_controllers_for_params),
     );
     if let Some(tail) = deferred_tail {
         deferred_out.insert(a.name.clone(), tail);
@@ -3296,6 +3305,9 @@ fn action_to_method(
             || a.name.as_str() == "absolute_redirect_location");
     let ret_ty = if host_policy {
         Ty::Str
+    } else if a.name.as_str() == crate::lower::route_param_recall::OVERLAY {
+        // The request's path parameters, which its views take: the same Hash the runtime's `path_parameters` is.
+        Ty::Hash { key: Ty::Str.into(), value: Ty::Str.into() }
     } else if !is_public && method_name.ends_with("_params") {
         let spec = self::params::first_permit_in(&a.body)
             .and_then(|(resource, fields, nested)| params_specs.find(&resource, &fields, &nested));
@@ -3504,6 +3516,7 @@ fn lower_action_body(
     formats_only_render: Option<&Symbol>,
     inheritor_modules: &[String],
     preserve_named_layout: bool,
+    overlaid: bool,
 ) -> (Expr, Option<Expr>) {
     // BEFORE everything else: this turns a helper the permit recognizer
     // could not read into one that yields the params class, so every
@@ -3608,6 +3621,7 @@ fn lower_action_body(
             is_public,
             preserve_named_layout,
             inheritor_modules,
+            overlaid,
         )
     };
 
@@ -3630,7 +3644,7 @@ fn lower_action_body(
     let with_typed_params = self::params::rewrite_params_writes(
         &with_typed_params, params_privs, params_specs, &controller.name,
     );
-    let with_redirects = rewrite_redirect_to(&with_typed_params, route_id_segments);
+    let with_redirects = rewrite_redirect_to(&with_typed_params, shadows, route_id_segments);
     // Rewrite `<Model>.new(<resource>_params)` → `<Model>.from_params(<resource>_params)`
     // BEFORE the assoc-through-parent rewrite, so the build path picks
     // up the typed factory shape rather than the legacy attrs-Hash.

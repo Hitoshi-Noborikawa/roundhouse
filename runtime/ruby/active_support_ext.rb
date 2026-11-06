@@ -2,7 +2,7 @@
 # ActiveSupport blank-predicate reopen — ruby-family surface only
 # (inflector_ext.rb pattern): shipped to the scaffold trees via the
 # project.rs stems list, NOT in the runtime_loader tables, so the
-# strict-target transpilers never see the `is_a?` dispatch below.
+# strict-target transpilers never see the class dispatch below.
 #
 # String inflection helpers (`underscore` / `demodulize` / …) live in
 # `active_support_inflections.rb` for the Ruby/Spinel scaffold. Strict
@@ -26,24 +26,23 @@ require_relative "active_support_number_helper"
 # So the residue routes HERE instead. Taking the receiver as an ARGUMENT
 # is what makes this legal where the type-directed forms are not: the
 # value is evaluated exactly once, so a receiver with effects grounds
-# too, and no `respond_to?` is needed because the branch is on the value.
+# too; the helper checks the value's class and optional `empty?`.
 #
 # Semantics are Rails', not an approximation — nil, false, and an empty
 # String/Array/Hash are blank; `0` and `:sym` are present. Verified shape
 # by shape against `Object#blank?`.
 #
-# The STRING tail is `strip.empty?`, not `empty?`: ActiveSupport's
+# The STRING branch uses Rails' whitespace match. ActiveSupport's
 # `String#blank?` is `/\A[[:space:]]*\z/`, so `" ".blank?` is true.
-# `lower::blank` grounds the typed String sites the same way and for the
-# same reason — the two must agree, because which of them serves a given
+# `lower::blank` grounds typed String sites separately. The two must
+# agree, because which of them serves a given
 # call is a fact about type INFERENCE, not about the program. campfire's
 # bot API is what priced it: `raw_request_body.blank?` reaches this
 # function (the reader's type is not inferred), and a boost posted with
 # a body of three spaces was accepted where Rails answers 422.
 #
-# `to_s` first, so the tail is one branch for every remaining shape: an
-# Integer's `"0"` is not blank, a Symbol's `"sym"` is not blank, and a
-# String is itself.
+# Other objects use Rails' optional `empty?` protocol. Their `to_s`
+# says nothing about blankness and may even return nil.
 module ActiveSupport
   # `ActiveSupport::JSON` — Rails' JSON coder over the json library.
   #
@@ -77,6 +76,16 @@ module ActiveSupport
 
     def self.decode(text)
       ::JSON.parse(text)
+    end
+
+    # Rails' aliases (`alias_method :load, :decode`, `:dump, :encode`);
+    # solid_queue's recurring task arguments go through them.
+    def self.load(text)
+      ActiveSupport::JSON.decode(text)
+    end
+
+    def self.dump(value)
+      ActiveSupport::JSON.encode(value)
     end
 
     # One `case` rather than a chain of tests: each read of the untyped
@@ -179,11 +188,18 @@ module ActiveSupport
   end
 
   def self.blank?(value)
-    return true if value.nil?
-    return true if value == false
-    return value.empty? if value.is_a?(Array)
-    return value.empty? if value.is_a?(Hash)
-    value.to_s.strip.empty?
+    case value
+    when NilClass, FalseClass then true
+    when TrueClass, Numeric, Time then false
+    when String
+      value.empty? || begin
+        /\A[[:space:]]*\z/.match?(value)
+      rescue Encoding::CompatibilityError
+        Regexp.new("\\A[[:space:]]*\\z".encode(value.encoding), Regexp::FIXEDENCODING).match?(value)
+      end
+    else
+      value.respond_to?(:empty?) ? !!value.empty? : false
+    end
   end
 
   def self.present?(value)

@@ -113,18 +113,18 @@ pub fn emit_method(m: &MethodDef) -> String {
     }
     let body_text = emit_expr(&m.body);
     fn emit_default(default: &crate::expr::Expr) -> String {
-        let src = expr::emit_expr(default);
         // A command-call default (`raise "…"`, the dead_default
         // grounding) needs parens to close unambiguously inside the
         // parameter list.
         if matches!(&*default.node, crate::expr::ExprNode::Raise { .. }) {
-            format!("({src})")
+            format!("({})", expr::emit_expr(default))
         } else if matches!(&*default.node, crate::expr::ExprNode::Seq { .. } | crate::expr::ExprNode::Assign { .. }) {
             // `name = (marker = true; nil)`: the statements, or an
             // assignment, stay one parenthesized expression.
+            let src = expr::emit_expr(default);
             format!("({})", src.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; "))
         } else {
-            src
+            expr::emit_arg(default)
         }
     }
     for line in body_text.lines() {

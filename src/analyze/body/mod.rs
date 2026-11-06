@@ -534,6 +534,7 @@ pub(crate) fn lexical_class<T>(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    module_self_types: Option<&'a HashMap<ClassId, (ClassId, Ty)>>,
     materialized_associations: Option<&'a crate::det::HashSet<Symbol>>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
@@ -684,6 +685,7 @@ impl<'a> BodyTyper<'a> {
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
         Self {
             classes,
+            module_self_types: None,
             materialized_associations: None,
             const_resolver: None,
             typed_constants: None,
@@ -808,6 +810,17 @@ impl<'a> BodyTyper<'a> {
         changed
     }
 
+    pub(super) fn with_module_self_types(mut self, types: &'a HashMap<ClassId, (ClassId, Ty)>) -> Self {
+        self.module_self_types = Some(types);
+        self
+    }
+
+    fn self_value_ty(&self, ctx: &Ctx) -> Option<&Ty> {
+        let (module, _, false) = ctx.super_method.as_ref()? else { return None };
+        let (lookup, value) = self.module_self_types?.get(module)?;
+        (!ctx.class_side && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if id == lookup)).then_some(value)
+    }
+
     pub(crate) fn with_materialized_associations(mut self, names: &'a crate::det::HashSet<Symbol>) -> Self {
         self.materialized_associations = Some(names);
         self
@@ -872,12 +885,23 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        self.analyze_expr_role(expr, ctx, false)
+    }
+
+    fn analyze_receiver(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        self.analyze_expr_role(expr, ctx, true)
+    }
+
+    fn analyze_expr_role(&self, expr: &mut Expr, ctx: &Ctx, receiver: bool) -> Ty {
         // The outermost call types a whole body: count the locals it binds.
         let root = self.inquirers.is_some() && self.scope_bindings.borrow().is_none();
         if root {
             *self.scope_bindings.borrow_mut() = Some(active_storage::ScopeBindings::of(expr));
         }
-        let ty = self.compute(expr, ctx);
+        // A direct self receiver keeps main's lookup type and identity evidence.
+        let ty = if receiver && matches!(&*expr.node, ExprNode::SelfRef) {
+            ctx.self_ty.clone().unwrap_or_else(unknown)
+        } else { self.compute(expr, ctx) };
         if root {
             *self.scope_bindings.borrow_mut() = None;
         }
@@ -1358,7 +1382,14 @@ impl<'a> BodyTyper<'a> {
                         let id = class.as_ref().clone();
                         if self.classes().contains_key(&id) || *runtime {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
-                            qualify_resolved_path(path, &id);
+                            if *runtime && crate::gems::preloaded_constant(id.0.as_str()) {
+                                // Object:: and Object aliases name this same preloaded
+                                // namespace. Its resolved name lets BUNDLED load the package.
+                                *path = std::iter::once(Symbol::from(""))
+                                    .chain(id.0.as_str().split("::").map(Symbol::from)).collect();
+                            } else {
+                                qualify_resolved_path(path, &id);
+                            }
                             Ty::Class { id, args: vec![].into() }
                         } else {
                             unknown()
@@ -1574,7 +1605,7 @@ impl<'a> BodyTyper<'a> {
                 ctx.ivar_bindings.get(name).cloned().unwrap_or_else(unknown)
             }
 
-            ExprNode::SelfRef => ctx.self_ty.clone().unwrap_or_else(unknown),
+            ExprNode::SelfRef => self.self_value_ty(ctx).cloned().or_else(|| ctx.self_ty.clone()).unwrap_or_else(unknown),
 
             ExprNode::Return { value } => {
                 self.analyze_expr(value, ctx);
@@ -1792,7 +1823,7 @@ impl<'a> BodyTyper<'a> {
                 self.propagate_match_bindings(left, &mut seeded, true);
                 let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
                 let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &seeded);
-                let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member });
+                let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member, class_side: ctx.class_side });
                 let mut right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
                         narrowing::apply_narrowing(&seeded, p, true)
@@ -1978,7 +2009,7 @@ impl<'a> BodyTyper<'a> {
             // directly somewhere feeds its own param types).
             ExprNode::MethodRef { recv, name } => {
                 let recv_ty = match recv {
-                    Some(r) => Some(self.analyze_expr(r, ctx)),
+                    Some(r) => Some(self.analyze_receiver(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
@@ -2033,7 +2064,7 @@ impl<'a> BodyTyper<'a> {
                 }
                 if let Some(ty) = self.class_factories.and_then(|factories| factories.get(&expr_span)) {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
-                    if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
+                    if let Some(recv) = recv { self.analyze_receiver(recv, ctx); }
                     // A literal superclass is declaration metadata, just as
                     // in an ordinary class header. An external parent need
                     // not resolve as a supported value expression in main.
@@ -2065,7 +2096,7 @@ impl<'a> BodyTyper<'a> {
                     // Only admitted declarations establish a Data class identity.
                     expr.decisions |= crate::expr::RESOLVED_DATA_FACTORY;
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
-                    if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
+                    if let Some(recv) = recv { self.analyze_receiver(recv, ctx); }
                     for arg in args.iter_mut() { self.analyze_expr(arg, ctx); }
                     return ty.clone();
                 }
@@ -2087,7 +2118,7 @@ impl<'a> BodyTyper<'a> {
                     if let Some(r) = recv.as_mut() {
                         if let ExprNode::Var { name, .. } = &*r.node {
                             if let Some(ty) = ctx.local_bindings.get(&narrowing::member_key(name, method)).cloned() {
-                                self.analyze_expr(r, ctx);
+                                self.analyze_receiver(r, ctx);
                                 return ty;
                             }
                         }
@@ -2164,7 +2195,7 @@ impl<'a> BodyTyper<'a> {
                 }
 
                 let recv_ty = match recv.as_mut() {
-                    Some(r) => Some(self.analyze_expr(r, ctx)),
+                    Some(r) => Some(self.analyze_receiver(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
                 // Not by name alone: an application `tap`/`each` may answer its block's value.
@@ -3048,6 +3079,26 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
+                // type_toolkit's `x.not_nil!` (a `T.must` spelling): Kernel's
+                // answers the receiver, NilClass's raises
+                // `TypeToolkit::UnexpectedNilError`, so the value is the
+                // receiver with nil removed. The CRuby overlay carries the
+                // gem's definition (`ruby_overlay/runtime/type_toolkit.rb`);
+                // `project` refuses it where no tree does. The assertion
+                // ingest synthesizes for `#: as !nil` keeps its own refusal.
+                if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
+                    && method.as_str() == "not_nil!" && args.is_empty() && block.is_none()
+                    && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
+                {
+                    if let Some(ty) = recv_ty.as_ref().filter(|_| recv.is_some()) {
+                        // An un-inferred arm stays gradual, as union
+                        // dispatch treats it, rather than a second error.
+                        return match ty.clone().strip_nil() {
+                            Ty::Var { .. } => Ty::Untyped,
+                            other => other,
+                        };
+                    }
+                }
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let gap = match super::singleton_of(recv_ty.as_ref()).or(recv_ty.as_ref()) {
@@ -3157,7 +3208,7 @@ impl<'a> BodyTyper<'a> {
                 self.propagate_match_bindings(cond, &mut base, true);
                 let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
                 let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &base);
-                let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member });
+                let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member, class_side: ctx.class_side });
                 let mut then_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),
@@ -3511,9 +3562,8 @@ impl<'a> BodyTyper<'a> {
                     // Per-position typing via `multiassign_target_ty`;
                     // targets with no usable RHS signal are left as-is.
                     if let ExprNode::MultiAssign { targets, value } = &*e.node {
-                        let rhs = value.ty.clone();
                         for (i, target) in targets.iter().enumerate() {
-                            let Some(ty) = multiassign_target_ty(&rhs, i) else {
+                            let Some(ty) = multiassign_target_ty(value, i) else {
                                 continue;
                             };
                             match target {
@@ -3670,6 +3720,31 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
+                    // `xs.flatten!` replaces the array's contents, so a
+                    // later read of `xs` sees the flattened element, not
+                    // the one it was bound with. A statement that is the
+                    // call itself certainly ran it, and the binding is
+                    // replaced: widening it instead would keep the nested
+                    // element, and a parameter fed back its own flattened
+                    // value would gain an Array level every round. A call
+                    // nested in a branch, loop or block may run never or
+                    // many times, so there the flattened element only
+                    // joins the old one.
+                    for (is_ivar, name, depth, certain) in collect_flatten_bangs(&exprs[i]) {
+                        let bindings = if is_ivar {
+                            &mut local_ctx.ivar_bindings
+                        } else {
+                            &mut local_ctx.local_bindings
+                        };
+                        if let Some(Ty::Array { elem }) = bindings.get(&name) {
+                            let new_elem = if certain {
+                                send::flatten_to(elem, depth)
+                            } else {
+                                union_of((**elem).clone(), send::flatten_to(elem, depth.repeated()))
+                            };
+                            bindings.insert(name, Ty::Array { elem: std::sync::Arc::new(new_elem) });
+                        }
+                    }
                     // Nil-seeded scalar refinement — the `size = nil` …
                     // `size = v` pair, where the write is usually nested
                     // in a block and so invisible to this statement walk.
@@ -3771,7 +3846,7 @@ impl<'a> BodyTyper<'a> {
                             _ => false,
                         };
                         if then_diverges && else_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe { class_side: ctx.class_side, ..narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx)) }) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
                             }
                         }
@@ -3786,7 +3861,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         let else_diverges = matches!(else_branch.ty.as_ref(), Some(Ty::Bottom));
                         if else_diverges && then_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe { class_side: ctx.class_side, ..narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx)) }) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, true);
                             }
                         }
@@ -3812,10 +3887,10 @@ impl<'a> BodyTyper<'a> {
                 }
                 let value_ty = self.analyze_expr(value, ctx);
                 if let LValue::Attr { recv, .. } = target {
-                    self.analyze_expr(recv, ctx);
+                    self.analyze_receiver(recv, ctx);
                 }
                 if let LValue::Index { recv, index } = target {
-                    self.analyze_expr(recv, ctx);
+                    self.analyze_receiver(recv, ctx);
                     self.analyze_expr(index, ctx);
                 }
                 value_ty
@@ -3830,10 +3905,10 @@ impl<'a> BodyTyper<'a> {
                 // expression's type, which matches naive desugar.
                 let value_ty = self.analyze_expr(value, ctx);
                 if let LValue::Attr { recv, .. } = target {
-                    self.analyze_expr(recv, ctx);
+                    self.analyze_receiver(recv, ctx);
                 }
                 if let LValue::Index { recv, index } = target {
-                    self.analyze_expr(recv, ctx);
+                    self.analyze_receiver(recv, ctx);
                     self.analyze_expr(index, ctx);
                 }
                 value_ty
@@ -3902,10 +3977,10 @@ impl<'a> BodyTyper<'a> {
                 self.analyze_expr(value, ctx);
                 for target in targets.iter_mut() {
                     if let LValue::Attr { recv, .. } = target {
-                        self.analyze_expr(recv, ctx);
+                        self.analyze_receiver(recv, ctx);
                     }
                     if let LValue::Index { recv, index } = target {
-                        self.analyze_expr(recv, ctx);
+                        self.analyze_receiver(recv, ctx);
                         self.analyze_expr(index, ctx);
                     }
                 }
@@ -4388,7 +4463,27 @@ fn empty_container_ty_uninformative(e: &Expr) -> bool {
 ///     `ivar_unresolved` error.
 /// Anything else yields `None` (no usable signal — leave the target
 /// unbound rather than guess).
-pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty> {
+pub(crate) fn multiassign_target_ty(rhs: &Expr, index: usize) -> Option<Ty> {
+    // Plain reads and literals have positional evidence that the Array union
+    // loses. Computed elements can rebind a later read, and splats move slots;
+    // both retain the conservative type-based fallback.
+    if let ExprNode::Array { elements, .. } = &*rhs.node {
+        if elements.iter().all(|e| matches!(&*e.node,
+            ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef | ExprNode::Const { .. } | ExprNode::Lit { .. }))
+        {
+            return Some(elements.get(index).map(|e| {
+                let ty = e.ty.clone().unwrap_or_else(unknown);
+                // A runtime class has a kind, but no proven named singleton.
+                if matches!(&ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "Class" | "Module"))
+                    && !matches!(&*e.node, ExprNode::Const { .. })
+                { ty } else { super::class_object_arg_ty(e, ty) }
+            }).unwrap_or(Ty::Nil));
+        }
+    }
+    multiassign_type_target_ty(&rhs.ty, index)
+}
+
+fn multiassign_type_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty> {
     match rhs {
         Some(Ty::Array { elem }) => Some((**elem).clone()),
         // Destructuring a relation materializes it — each scalar
@@ -4402,7 +4497,7 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         }
         Some(ty @ Ty::Class { id, .. }) if !splats(id.0.as_str()) => Some(if index == 0 { ty.clone() } else { Ty::Nil }),
         Some(ty @ Ty::Union { variants })
-            if variants.iter().all(|v| multiassign_target_ty(&Some(v.clone()), 1) == Some(Ty::Nil)) =>
+            if variants.iter().all(|v| multiassign_type_target_ty(&Some(v.clone()), 1) == Some(Ty::Nil)) =>
         {
             Some(if index == 0 { ty.clone() } else { Ty::Nil })
         }
@@ -4462,6 +4557,40 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
         }
     }
     expr.node.for_each_child(&mut |child| collect_array_pushes(child, out));
+}
+
+/// Every `flatten!` in statement `stmt` whose receiver is a plain local or
+/// ivar, as `(is_ivar, name, depth, certain)`, in the order they apply.
+/// `certain` only for the statement itself: a call nested in its subtree
+/// may sit in a branch, loop or block. Like [`collect_array_pushes`], a
+/// block parameter shadowing the name at worst widens the outer binding.
+fn collect_flatten_bangs(stmt: &Expr) -> Vec<(bool, Symbol, send::FlattenDepth, bool)> {
+    fn flatten_bang(expr: &Expr) -> Option<(bool, Symbol, send::FlattenDepth)> {
+        let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
+            return None;
+        };
+        if method.as_str() != "flatten!" {
+            return None;
+        }
+        let depth = send::FlattenDepth::of(args);
+        match &*recv.node {
+            ExprNode::Ivar { name } => Some((true, name.clone(), depth)),
+            ExprNode::Var { name, .. } => Some((false, name.clone(), depth)),
+            _ => None,
+        }
+    }
+    fn nested(expr: &Expr, out: &mut Vec<(bool, Symbol, send::FlattenDepth, bool)>) {
+        if let Some((is_ivar, name, depth)) = flatten_bang(expr) {
+            out.push((is_ivar, name, depth, false));
+        }
+        expr.node.for_each_child(&mut |child| nested(child, out));
+    }
+    let mut out = Vec::new();
+    stmt.node.for_each_child(&mut |child| nested(child, &mut out));
+    if let Some((is_ivar, name, depth)) = flatten_bang(stmt) {
+        out.push((is_ivar, name, depth, true));
+    }
+    out
 }
 
 /// Every container index-write in `expr`'s subtree whose receiver is a

@@ -48,7 +48,7 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
-use self::extra_params::{drop_closure_names, flash_params, rewritten_extras};
+use self::extra_params::{drop_closure_names, flash_params, local_reads, rewritten_extras};
 
 pub(crate) use self::extra_params::{flash_param_in_scope, flash_slot_of, local_key_of};
 use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
@@ -243,11 +243,13 @@ pub struct ViewLowerCtx<'a> {
     /// See [`request_context_views`].
     request_context: std::rc::Rc<crate::det::HashSet<String>>,
     locals_keys: crate::det::HashMap<(String, String), Vec<String>>,
+    /// See [`ivar_record_partials`].
+    ivar_records: std::rc::Rc<crate::det::HashSet<ViewKey>>,
     reference_reads: std::rc::Rc<crate::det::HashSet<String>>,
     reference_targets: std::rc::Rc<crate::det::HashMap<String, String>>,
     nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
     nilable_scalar_reads: std::rc::Rc<crate::det::HashSet<String>>,
-    html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
+    html_safe_methods: std::rc::Rc<HtmlSafeMarks>,
     model_singulars: std::rc::Rc<crate::det::HashSet<String>>,
     slug_models: std::rc::Rc<crate::det::HashSet<String>>,
     bool_readers: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
@@ -320,13 +322,16 @@ impl<'a> ViewLowerCtx<'a> {
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
             request_context: std::rc::Rc::new(request_context_views(&app.views)),
             locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
+            ivar_records: std::rc::Rc::new(ivar_record_partials(
+                &app.views,
+                &app.controllers,
+                &app.library_classes,
+            )),
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
             nested_record_classes: std::rc::Rc::new(nested_record_classes(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
-            html_safe_methods: std::rc::Rc::new(
-                app.html_safe_methods.iter().map(|m| m.as_str().to_string()).collect(),
-            ),
+            html_safe_methods: std::rc::Rc::new(HtmlSafeMarks::of(app)),
             model_singulars: std::rc::Rc::new(
                 app.models
                     .iter()
@@ -463,7 +468,10 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         .as_ref()
         .and_then(|k| lx.closures.get(k).cloned())
         .unwrap_or_default();
-    let ivar_locals = view_ivar_locals(view, &closure_raw);
+    let record_apart = view_key
+        .as_ref()
+        .and_then(|k| record_apart_from_ivar(view, k, &arg_name, &lx.ivar_records));
+    let ivar_locals = view_ivar_locals(view, &closure_raw, record_apart);
     let keys = view_key.as_ref().and_then(|k| lx.locals_keys.get(k));
     // Flash rename → ivar rewrite → extras collect, one pipeline shared
     // with the call-site contracts (see `extra_params::rewritten_extras`).
@@ -478,20 +486,21 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // present?") and downstream emitters don't need target-specific
     // `defined?` knowledge.
     let mut rewritten = rewritten;
-    // An app override owns pluralize, including nested ERB calls.
-    // Qualify it before the framework classifier consumes bare Sends.
-    if let Some(owner) = app.helper_method_index.get(&Symbol::from("pluralize")) {
-        fn qualify_pluralize(e: &mut Expr, owner: &ClassId) {
-            e.node.for_each_child_mut(&mut |c| qualify_pluralize(c, owner));
+    // An app override owns pluralize or content_tag, including nested ERB
+    // calls. Qualify it before the framework classifier consumes bare Sends.
+    for helper in ["pluralize", "content_tag"] {
+        let Some(owner) = app.helper_method_index.get(&Symbol::from(helper)) else { continue };
+        fn qualify_helper(e: &mut Expr, helper: &str, owner: &ClassId) {
+            e.node.for_each_child_mut(&mut |c| qualify_helper(c, helper, owner));
             if let ExprNode::Send { recv, method, .. } = &mut *e.node {
-                if recv.is_none() && method.as_str() == "pluralize" {
+                if recv.is_none() && method.as_str() == helper {
                     *recv = Some(Expr::new(e.span, ExprNode::Const {
                         path: owner.0.as_str().split("::").map(Symbol::from).collect(),
                     }));
                 }
             }
         }
-        qualify_pluralize(&mut rewritten, owner);
+        qualify_helper(&mut rewritten, helper, owner);
     }
     rewrite_defined_to_nil_check(&mut rewritten);
     // `local_assigns[:x]` → the bare local `x`. Same place and the same
@@ -678,6 +687,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
 
     let mut locals: Vec<String> = typed.iter().map(|(n, _)| n.clone()).collect();
     locals.extend(extra_params.iter().cloned());
+    let mut ivar_params: Vec<String> =
+        closure_ivars.iter().filter(|iv| is_action_view || **iv != arg_name).cloned().collect();
 
     // Nullable-for-predicates: the `nil`-default extras (notice/alert) PLUS
     // any Untyped param. `present?`/`blank?` are defined to handle nil
@@ -693,6 +704,15 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             nullable.insert(n.clone());
         }
     }
+
+    // The params that hold the rendering template's ivar of their name
+    // (`ViewCtx::held_ivars`): the closure params, a partial's record
+    // among them when it stands for its ivar (`ivar_record_partials`).
+    let mut held_ivars: Vec<String> = closure_ivars
+        .iter()
+        .filter(|iv| is_action_view || **iv != arg_name || (is_partial && record_apart.is_none()))
+        .cloned()
+        .collect();
 
     // ── Strict-locals override ───────────────────────────────────────
     // A partial with a `<%# locals: (…) -%>` header declares its locals
@@ -732,6 +752,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             .filter(|iv| !declared.contains(iv.as_str()))
             .cloned()
             .collect();
+        held_ivars = closure.clone();
 
         let mut new_params: Vec<Param> = Vec::new();
         let mut sig_params: Vec<TyParam> = Vec::new();
@@ -828,11 +849,13 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
                     .map(str::to_string),
             )
             .collect();
+        ivar_params = closure;
     }
 
     let (ivar_models, nilable_ivar_models) = view_ivar_models(app, &view.name, &ivar_locals);
     let mut ctx = ViewCtx {
         locals,
+        ivar_params,
         // Only layouts consult arg_name (emit_yield → the `body` local);
         // action views don't yield, so an empty name is fine for them.
         arg_name: if is_action_view { String::new() } else { arg_name.clone() },
@@ -860,6 +883,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
         partial_ivars: closures.clone(),
+        ivar_records: lx.ivar_records.clone(),
         formats: std::iter::once(view.format.as_str())
             .chain((view.format.as_str() != "html").then_some("html"))
             .map(str::to_string)
@@ -884,6 +908,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
         ivar_locals: std::rc::Rc::new(ivar_locals),
         own_flash,
+        held_ivars,
     };
 
     // A partial that receives a form builder as a local re-derives the
@@ -914,6 +939,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             record_var: record_var.clone(),
             form_method_var: form_method_var.clone(),
             id_prefix: binding.id_prefix.clone(),
+            recordless: false,
         });
         let record_ref = Expr::new(
             Span::synthetic(),
@@ -1584,6 +1610,7 @@ pub(crate) fn insert_framework_stubs(
         ("link_to", &[("text", &untyped), ("href", &Ty::Str), ("opts", &any_hash)]),
         ("button_to", &[("text", &untyped), ("href", &Ty::Str), ("opts", &any_hash)]),
         ("stylesheet_link_tag", &[("name", &Ty::Str), ("opts", &any_hash)]),
+        ("content_tag_html", &[("name", &Ty::Sym), ("html", &Ty::Str), ("opts", &any_hash)]),
     ];
     for (name, params) in opts_hash_helpers {
         let param_pairs: Vec<(Symbol, Ty)> = params
@@ -2698,6 +2725,125 @@ pub(crate) fn render_locals_keys(
     acc.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
 }
 
+/// The convention partials whose record param also stands for the ivar
+/// named like it (`post` for `@post` in `posts/_summary`). Rails keeps
+/// the two apart; here they share one param, which is right only while
+/// every render hands the partial no record, so the param can carry the
+/// caller's ivar (`caller_record_ivar`). Any other site that names the
+/// partial (`render "outer", post: other`, `object:`, `collection:`, a
+/// turbo stream's `partial:`, a controller's or a helper's render, a
+/// dynamic render's pooled entry whose `locals:` name the record) or
+/// an object render (`render @posts` into `posts/_post`) leaves it out,
+/// and such a partial takes the ivar as a param of its own
+/// (`view_ivar_locals`). Sites are matched by the partial's base name,
+/// so a doubtful one only ever leaves a partial out.
+pub(crate) fn ivar_record_partials(
+    views: &[View],
+    controllers: &[crate::dialect::Controller],
+    library_classes: &[crate::dialect::LibraryClass],
+) -> crate::det::HashSet<ViewKey> {
+    use crate::lower::view::RenderPartial;
+
+    fn scan(e: &Expr, own_dir: Option<&str>, out: &mut crate::det::HashSet<String>) {
+        e.node.for_each_child(&mut |c| scan(c, own_dir, out));
+        let ExprNode::Send { recv, method, args, block, .. } = &*e.node else { return };
+        let str_of = |e: &Expr| match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+            _ => None,
+        };
+        let mut named: Vec<String> = Vec::new();
+        if recv.is_none() && matches!(method.as_str(), "render" | "render_to_string") {
+            named.extend(args.first().and_then(str_of));
+        }
+        for arg in args {
+            if let ExprNode::Hash { entries, .. } = &*arg.node {
+                named.extend(entries.iter().filter_map(|(k, v)| match &*k.node {
+                    ExprNode::Lit { value: Literal::Sym { value } }
+                        if matches!(value.as_str(), "partial" | "layout") =>
+                    {
+                        str_of(v)
+                    }
+                    _ => None,
+                }));
+            }
+        }
+        if named.is_empty() {
+            return;
+        }
+        let hands_no_record = own_dir.is_some_and(|dir| {
+            match crate::lower::view::classify_render_partial(
+                recv.as_ref(),
+                method.as_str(),
+                args,
+                block.as_ref(),
+                &|_| true,
+                &|_| false,
+            ) {
+                // Bound as `named_partial_call_with_record` binds it.
+                Some(RenderPartial::Named { partial, arg, locals }) => {
+                    let target_dir = partial.rsplit_once('/').map_or(dir, |(d, _)| d);
+                    let module_camel = camelize_path(&snake_case(target_dir));
+                    let record = singularize(&snake_case(last_segment(&module_camel)));
+                    match locals {
+                        Some(entries) => !entries.iter().any(|(k, _)| {
+                            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                                if value.as_str() == record)
+                        }),
+                        None => arg.is_none(),
+                    }
+                }
+                _ => false,
+            }
+        });
+        if !hands_no_record {
+            out.extend(named.iter().map(|p| {
+                p.rsplit('/').next().unwrap_or(p).trim_start_matches('_').to_string()
+            }));
+        }
+    }
+
+    let mut bound = crate::det::HashSet::default();
+    for v in views {
+        let (dir, _) = split_view_name(v.name.as_str());
+        scan(&v.body, (!dir.is_empty()).then_some(dir), &mut bound);
+    }
+    for c in controllers {
+        for a in c.actions() {
+            scan(&a.body, None, &mut bound);
+        }
+    }
+    // A pooled entry (`@slot = {partial: "summary", locals: {post: x}}`)
+    // hands the record its `locals:` names, as a `render` would.
+    for ((dir, _), entries) in dynamic_partial_pools(controllers) {
+        for entry in entries {
+            let (target_dir, base) =
+                entry.name.rsplit_once('/').unwrap_or((dir.as_str(), entry.name.as_str()));
+            let record = singularize(&snake_case(last_segment(&camelize_path(&snake_case(target_dir)))));
+            if entry.locals.iter().any(|(k, _)| k.as_str() == record) {
+                bound.insert(base.trim_start_matches('_').to_string());
+            }
+        }
+    }
+    for lc in library_classes {
+        for m in &lc.methods {
+            scan(&m.body, None, &mut bound);
+        }
+    }
+    let stems = PartialStems::of(views);
+    let (collection_locals, _) = collection_element_locals_from_views(views, &stems);
+    views
+        .iter()
+        .filter(|v| v.strict_locals.is_none())
+        .filter_map(|v| {
+            let (dir, base) = split_view_name(v.name.as_str());
+            let name = base.strip_prefix('_').filter(|_| !dir.is_empty())?;
+            let record = effective_record_arg(v, &collection_locals, &[], &stems);
+            let key = stems.key(&camelize_path(&snake_case(dir)), base);
+            (name != record && !bound.contains(name)).then_some(key)
+        })
+        .collect()
+}
+
 /// Per-PARTIAL call contract for CONTROLLER-side partial renders
 /// (`render partial: "commentbox", locals: {comment: c}` inside an
 /// action). Mirrors the partial def-site parameter order exactly:
@@ -2712,7 +2858,15 @@ pub struct PartialCallContract {
     /// already answers to that (see [`PartialStems`]).
     pub method: Symbol,
     pub record: String,
+    /// The ivar the record param stands for, when the partial reads one
+    /// named like it (`@post` in `posts/_summary`). A render that hands
+    /// no record passes the caller's `@<ivar>` there, as Rails shares it.
+    pub record_ivar: Option<String>,
     pub closure: Vec<String>,
+    /// The closure ivars the partial also reads as a local of their name
+    /// (`local_assigns[:class]` beside `@class`). The two share one param
+    /// (`drop_closure_names`), which a caller's same-named local fills.
+    pub shared_locals: Vec<String>,
     pub extras: Vec<String>,
     /// A strict-locals partial (`<%# locals: (…) -%>`) takes its
     /// non-record locals as KEYWORD params (see the strict-locals
@@ -2792,6 +2946,7 @@ pub(crate) fn partial_call_contracts(
     // Same record derivation as `build_library_class` / `partial_extras_map`
     // so `flash_locals` sees one handed name across def and callers.
     let (collection_locals, _) = collection_element_locals_from_views(views, &stems);
+    let ivar_records = ivar_record_partials(views, controllers, library_classes);
     let request_context = request_context_views(views);
     let form_bindings = partial_form_bindings(views);
     let mut out = crate::det::HashMap::default();
@@ -2830,7 +2985,9 @@ pub(crate) fn partial_call_contracts(
                 PartialCallContract {
                     method,
                     record: declared[0].clone(),
+                    record_ivar: None,
                     closure,
+                    shared_locals: Vec::new(),
                     // The request-context keywords the def adds (`request_context_views`).
                     extras: declared[1..]
                         .iter()
@@ -2850,7 +3007,8 @@ pub(crate) fn partial_call_contracts(
         }
         let record = effective_record_arg(view, &collection_locals, &[], &stems);
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
-        let ivar_locals = view_ivar_locals(view, &closure_raw);
+        let ivar_locals =
+            view_ivar_locals(view, &closure_raw, record_apart_from_ivar(view, &key, &record, &ivar_records));
         let keys = keys_map.get(&key).map(Vec::as_slice);
         let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys, request_context.contains(view.name.as_str()));
         // The def side names each closure param by `ivar_locals` and
@@ -2862,6 +3020,18 @@ pub(crate) fn partial_call_contracts(
             .map(|s| (s.as_str().to_string(), ivar_local(&ivar_locals, s.as_str())))
             .filter(|(_, local)| local != &record)
             .unzip();
+        // What the body reads, not the extras: those also hold the flash pair every view takes, and a `notice:` a render hands keeps `notice` there beside an `@notice`.
+        let reads = local_reads(view, &ivar_locals, &record, keys);
+        let shared_locals: Vec<String> = closure
+            .iter()
+            .zip(&closure_locals)
+            .filter(|(_, local)| reads.iter().any(|k| crate::naming::safe_local(k) == **local))
+            .map(|(n, _)| n.clone())
+            .collect();
+        let record_ivar = closure_raw
+            .iter()
+            .find(|s| ivar_local(&ivar_locals, s.as_str()) == record)
+            .map(|s| s.as_str().to_string());
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
                 if k != &record && !extras.contains(k) {
@@ -2872,7 +3042,7 @@ pub(crate) fn partial_call_contracts(
         drop_closure_names(&mut extras, &closure_locals);
         out.insert(
             spelled,
-            PartialCallContract { method, record, closure, extras, keyword_extras: false, declared: Vec::new() },
+            PartialCallContract { method, record, record_ivar, closure, shared_locals, extras, keyword_extras: false, declared: Vec::new() },
         );
     }
     out
@@ -3232,6 +3402,7 @@ pub(super) fn partial_extras_map(
     let keys_map = render_locals_keys(&app.views, &app.controllers, &app.library_classes);
     let stems = PartialStems::of(&app.views);
     let collection_locals = collection_element_locals(&app.views, app);
+    let ivar_records = ivar_record_partials(&app.views, &app.controllers, &app.library_classes);
     let request_context = request_context_views(&app.views);
     let mut out: crate::det::HashMap<(String, String), Vec<String>> =
         crate::det::HashMap::default();
@@ -3243,7 +3414,8 @@ pub(super) fn partial_extras_map(
         let key = stems.key(&camelize_path(&snake_case(dir)), base);
         let arg_name = effective_record_arg(view, &collection_locals, &known_models, &stems);
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
-        let ivar_locals = view_ivar_locals(view, &closure_raw);
+        let ivar_locals =
+            view_ivar_locals(view, &closure_raw, record_apart_from_ivar(view, &key, &arg_name, &ivar_records));
         let keys = keys_map.get(&key).map(Vec::as_slice);
         let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys, request_context.contains(view.name.as_str()));
         // locals-key params — mirrors the def site's append exactly.
@@ -4345,7 +4517,12 @@ pub(crate) fn ivar_local(locals: &IvarLocals, ivar: &str) -> String {
 
 /// The rename map for `view`: its render-tree closure (the ivars its
 /// parameters carry) plus every ivar its own body reads or writes.
-fn view_ivar_locals(view: &View, closure: &[Symbol]) -> IvarLocals {
+///
+/// `record` is a partial's record param when it does not stand for the
+/// ivar named like it (`record_apart_from_ivar`). That ivar then reads
+/// as a local of its own (`post_` beside the record `post`), which the
+/// partial takes as a closure param like any other.
+fn view_ivar_locals(view: &View, closure: &[Symbol], record: Option<&str>) -> IvarLocals {
     fn collect<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
         match &*e.node {
             ExprNode::Ivar { name }
@@ -4357,7 +4534,30 @@ fn view_ivar_locals(view: &View, closure: &[Symbol]) -> IvarLocals {
     }
     let mut names: Vec<&str> = closure.iter().map(|s| s.as_str()).collect();
     collect(&view.body, &mut names);
-    ivar_local_names(names)
+    let mut locals = ivar_local_names(names);
+    if let Some(record) = record {
+        let taken: crate::det::HashSet<String> = locals.values().cloned().collect();
+        if let Some(local) = locals.values_mut().find(|l| l.as_str() == record) {
+            local.push('_');
+            while taken.contains(local.as_str()) {
+                local.push('_');
+            }
+        }
+    }
+    locals
+}
+
+/// The record param of `view` that its same-named ivar must not read as
+/// (`view_ivar_locals`): a convention partial's, unless that param
+/// stands for the ivar (`ivar_record_partials`).
+fn record_apart_from_ivar<'a>(
+    view: &View,
+    key: &ViewKey,
+    record: &'a str,
+    ivar_records: &crate::det::HashSet<ViewKey>,
+) -> Option<&'a str> {
+    let is_partial = split_view_name(view.name.as_str()).1.starts_with('_');
+    (is_partial && view.strict_locals.is_none() && !ivar_records.contains(key)).then_some(record)
 }
 
 /// Rewrite every `@ivar` read (and Ivar-LValue assign) under `expr`
@@ -4826,6 +5026,9 @@ pub(super) struct FormBuilderBinding {
     /// on one page don't collide. Field NAMES are untouched. Empty for
     /// the common un-namespaced form.
     pub(super) id_prefix: String,
+    /// A `scope:` form with no record (`form_for :filter, url: ...`): its
+    /// fields are named under the scope but read no attributes.
+    pub(super) recordless: bool,
 }
 
 impl FormBuilderBinding {
@@ -4893,6 +5096,10 @@ fn sanitize_object_name(name: &str) -> String {
 #[allow(dead_code)] // arg_name + resource_dir read in follow-on slices.
 pub(super) struct ViewCtx {
     pub(super) locals: Vec<String>,
+    /// The `locals` that are only a closure ivar under its local name
+    /// (`@post` threaded in as `post`), not a local Rails binds: the
+    /// bare name still calls the method it names (`ViewCtx::binds_local`).
+    pub(super) ivar_params: Vec<String>,
     pub(super) arg_name: String,
     pub(super) resource_dir: String,
     /// Name of the local that accumulates output via `<<`. The
@@ -4929,12 +5136,13 @@ pub(super) struct ViewCtx {
         std::rc::Rc<crate::det::HashMap<String, String>>,
     /// Proven singular association targets, keyed by owner class and reader.
     pub(super) nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
-    /// Method names whose result is html-safe by construction —
-    /// their body ends in `.html_safe` (`App::html_safe_methods`,
-    /// recorded by `lower::html_safe`). A bare interpolation of one
-    /// skips the auto-escape wrap; escaping it would ship literal
-    /// `&lt;span&gt;` markup, which is what `hat.to_html_label` does.
-    pub(super) html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
+    /// Definitions whose result is html-safe by construction — their
+    /// body ends in `.html_safe` (`App::html_safe_method_defs`, recorded
+    /// by `lower::html_safe`). A bare interpolation of a call that
+    /// resolves to one skips the auto-escape wrap; escaping it would ship
+    /// literal `&lt;span&gt;` markup, which is what `hat.to_html_label`
+    /// does.
+    pub(super) html_safe_methods: std::rc::Rc<HtmlSafeMarks>,
     /// Nilable-scalar reader names through a record: typed_store
     /// attributes with no default (nil when unset). Emptiness
     /// predicates on these get the nil-safe forms (see
@@ -5025,6 +5233,10 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Symbol>>>,
+    /// The partials whose record param stands for its ivar
+    /// ([`ivar_record_partials`]): a render passes that ivar in the
+    /// record slot. Every other partial takes it as a closure param.
+    pub(super) ivar_records: std::rc::Rc<crate::det::HashSet<ViewKey>>,
     /// The formats a render here looks a view up in, in order: this
     /// view's own, as Rails prepends the rendering template's format to
     /// the lookup, then html. `formats:` and the `turbo_stream` builder
@@ -5120,6 +5332,436 @@ pub(super) struct ViewCtx {
     /// or an assigned local of the same name clears it in its scope
     /// (`ViewCtx::shadow_flash`).
     pub(super) own_flash: [Option<String>; 2],
+    /// THIS view's locals that hold the rendering template's ivar of the
+    /// same name: its closure params, a partial's record among them when
+    /// it stands for its ivar ([`ivar_record_partials`]), less any a
+    /// block param shadows in its scope (`ViewCtx::with_locals`). Only
+    /// these may stand for the ivar a partial it renders reads
+    /// (`caller_record_ivar`).
+    pub(super) held_ivars: Vec<String>,
+}
+
+/// The app's html-safe-marked definitions (`App::html_safe_method_defs`)
+/// with what is needed to find which definition a call resolves to:
+/// each class's or module's parent, included modules and own methods,
+/// and the names it gets from anything other than a `def`.
+#[derive(Default)]
+pub(super) struct HtmlSafeMarks {
+    classes: crate::det::HashMap<String, MarkClass>,
+    marked: crate::det::HashSet<(String, String, bool)>,
+}
+
+#[derive(Default)]
+struct MarkClass {
+    parent: Option<String>,
+    includes: Vec<String>,
+    /// `(method, singleton)` for every method the class defines itself.
+    defines: crate::det::HashSet<(String, bool)>,
+    /// Names a class-body call defines on the class or on a module it
+    /// mixes in ahead of its parent: `attr_reader`, `delegate`,
+    /// `alias_method`, `define_method`, `store_accessor`, an association's
+    /// readers. Read from the call's literal arguments, on either side.
+    shadows: crate::det::HashSet<String>,
+    /// Modules the class `extend`s, in source order: their instance
+    /// methods are the class's singleton methods, ahead of its parent's.
+    extends: Vec<String>,
+    /// The class prepends a module, mixes in one it computes, evaluates
+    /// code into itself (`class_eval`), or defines a method under a name
+    /// that isn't a literal: which definition it answers with isn't known
+    /// here.
+    opaque: bool,
+}
+
+/// What a class-body call (`attr_reader :label`, `extend Helpers`) adds
+/// to `c`: its literal symbol or string arguments to `shadows`, with
+/// `delegate`'s `prefix:` applied and `store`'s `accessors:` read; an
+/// extended module to `extends`. A call whose effect can't be read
+/// (`prepend`, `include` of a computed module, `class_eval`, a
+/// `define_method` or `send` with a computed name) sets `opaque`. A
+/// call's block is read as class-body code too (`block_shadows`), with
+/// `with_options`' literal options merged into each call in it.
+fn macro_shadows(e: &crate::expr::Expr, c: &mut MarkClass) {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Send { recv, method, args, block, .. } = &*e.node else { return };
+    if recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
+        return;
+    }
+    if let Some(b) = block {
+        if method.as_str() == "with_options" {
+            let mut outer = Vec::new();
+            for a in args {
+                match &*a.node {
+                    ExprNode::Hash { entries, .. } => outer.extend(entries.iter().cloned()),
+                    _ => {
+                        c.opaque = true;
+                        return;
+                    }
+                }
+            }
+            block_shadows(b, Some(&outer), c);
+            return;
+        }
+        if is_callback(method.as_str()) {
+            callback_block_shadows(b, c);
+        } else {
+            block_shadows(b, None, c);
+        }
+    }
+    let name = |a: &crate::expr::Expr| match &*a.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let is_const = |a: &crate::expr::Expr| matches!(&*a.node, ExprNode::Const { .. });
+    match method.as_str() {
+        "send" | "public_send" | "__send__" => {
+            // `send(:attr_reader, :label)` is the call it names, with its
+            // block (`send(:with_options, …) { |o| … }`).
+            match args.split_first() {
+                Some((m, rest)) if name(m).is_some() => {
+                    let node = ExprNode::Send {
+                        recv: None,
+                        method: crate::ident::Symbol::from(name(m).unwrap().as_str()),
+                        args: rest.to_vec(),
+                        block: block.clone(),
+                        parenthesized: true,
+                    };
+                    macro_shadows(&crate::expr::Expr::new(e.span, node), c);
+                }
+                _ => c.opaque = true,
+            }
+            return;
+        }
+        "prepend" | "class_eval" | "class_exec" | "module_eval" | "module_exec" | "instance_eval" | "instance_exec" => {
+            c.opaque = true;
+            return;
+        }
+        "include" => {
+            c.opaque |= !args.iter().all(is_const);
+            return;
+        }
+        "extend" => {
+            for a in args {
+                match &*a.node {
+                    ExprNode::Const { path } => c.extends.push(path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::")),
+                    ExprNode::SelfRef => {}
+                    _ => c.opaque = true,
+                }
+            }
+            return;
+        }
+        "define_method" | "define_singleton_method" if args.first().and_then(name).is_none() => {
+            c.opaque = true;
+            return;
+        }
+        "has_secure_password" => {
+            let attr = args.first().and_then(name).unwrap_or_else(|| "password".to_string());
+            if attr == "password" {
+                c.shadows.insert("authenticate".to_string());
+            }
+            c.shadows.extend([format!("authenticate_{attr}"), format!("{attr}_confirmation"), format!("{attr}_challenge")]);
+        }
+        _ => {}
+    }
+    let mut prefix = None;
+    for a in args {
+        let ExprNode::Hash { entries, .. } = &*a.node else { continue };
+        for (k, v) in entries {
+            match name(k).as_deref() {
+                Some("accessors") => {
+                    if let ExprNode::Array { elements, .. } = &*v.node {
+                        c.shadows.extend(elements.iter().filter_map(name));
+                    }
+                }
+                Some("prefix") => match &*v.node {
+                    ExprNode::Lit { value: Literal::Bool { value: false } } => {}
+                    ExprNode::Lit { value: Literal::Bool { value: true } } => {
+                        let to = entries.iter().find(|(k, _)| name(k).as_deref() == Some("to")).and_then(|(_, v)| name(v));
+                        match to {
+                            Some(to) => prefix = Some(to),
+                            None => {
+                                c.opaque = true;
+                                return;
+                            }
+                        }
+                    }
+                    _ => match name(v) {
+                        Some(p) => prefix = Some(p),
+                        None => {
+                            c.opaque = true;
+                            return;
+                        }
+                    },
+                },
+                _ => {}
+            }
+        }
+    }
+    for n in args.iter().filter_map(name) {
+        if let Some(p) = &prefix {
+            c.shadows.insert(format!("{p}_{n}"));
+        }
+        c.shadows.insert(n);
+    }
+}
+
+/// A callback or validation macro (`after_create_commit { … }`, `before_save
+/// do … end`, `validate do … end`): its block runs on a record, not in the
+/// class body.
+fn is_callback(method: &str) -> bool {
+    ["before_", "after_", "around_"].iter().any(|p| method.starts_with(p)) || matches!(method, "validate" | "validates_each")
+}
+
+/// A callback's block is the record's code, run later: a `def` in it
+/// defines its name on the class when it runs, so the name shadows; the
+/// block's other calls aren't class-body calls.
+fn callback_block_shadows(e: &crate::expr::Expr, c: &mut MarkClass) {
+    if let Some(d) = e.nested_def() {
+        c.shadows.insert(d.name.as_str().to_string());
+    }
+    e.node.for_each_child(&mut |ch| callback_block_shadows(ch, c));
+}
+
+/// What a class-body call's block adds to `c`. Each statement is a call
+/// on the block's param, on `self` or on no receiver, read as a
+/// class-body call (with `with_options`' entries merged into its options,
+/// its own keys winning, as Rails' `OptionMerger` merges them), or a
+/// `def`, whose name shadows. Anything else, a block that isn't a literal
+/// one among them, sets `opaque`: what it defines isn't read here.
+fn block_shadows(
+    b: &crate::expr::Expr,
+    merge: Option<&[(crate::expr::Expr, crate::expr::Expr)]>,
+    c: &mut MarkClass,
+) {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Lambda { params, body, .. } = &*b.node else {
+        c.opaque = true;
+        return;
+    };
+    let key = |k: &crate::expr::Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let stmts = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect::<Vec<_>>(),
+        _ => vec![body],
+    };
+    for st in stmts {
+        if let Some(d) = st.nested_def() {
+            c.shadows.insert(d.name.as_str().to_string());
+            continue;
+        }
+        match &*st.node {
+            ExprNode::Lit { value: Literal::Nil } => {}
+            ExprNode::Send { recv, method, args, block, parenthesized }
+                if recv.as_ref().is_none_or(|r| match &*r.node {
+                    ExprNode::SelfRef => true,
+                    ExprNode::Var { name, .. } => params.first() == Some(name),
+                    _ => false,
+                }) =>
+            {
+                let mut args = args.clone();
+                if let Some(outer) = merge {
+                    let own = args.iter().rposition(|a| matches!(&*a.node, ExprNode::Hash { .. }));
+                    let inner: Vec<_> = match own.map(|i| &*args[i].node) {
+                        Some(ExprNode::Hash { entries, .. }) => entries.clone(),
+                        _ => Vec::new(),
+                    };
+                    if outer.iter().chain(&inner).any(|(k, _)| key(k).is_none()) {
+                        c.opaque = true;
+                        return;
+                    }
+                    let mut entries: Vec<_> = outer.iter().filter(|(k, _)| !inner.iter().any(|(ik, _)| key(ik) == key(k))).cloned().collect();
+                    entries.extend(inner);
+                    let hash = crate::expr::Expr::new(st.span, ExprNode::Hash { entries, kwargs: true });
+                    match own {
+                        Some(i) => args[i] = hash,
+                        None => args.push(hash),
+                    }
+                }
+                let call = ExprNode::Send { recv: None, method: method.clone(), args, block: block.clone(), parenthesized: *parenthesized };
+                macro_shadows(&crate::expr::Expr::new(st.span, call), c);
+            }
+            _ => {
+                c.opaque = true;
+                return;
+            }
+        }
+    }
+}
+
+/// The readers an association declares on its model: Rails defines them
+/// in a module the model includes, so they come before its parent's
+/// methods.
+fn association_shadows(a: &crate::dialect::Association, shadows: &mut crate::det::HashSet<String>) {
+    use crate::dialect::Association;
+    let n = a.name().as_str();
+    shadows.insert(n.to_string());
+    match a {
+        Association::HasMany { .. } | Association::HasAndBelongsToMany { .. } => {
+            shadows.insert(format!("{}_ids", crate::naming::singularize(n)));
+        }
+        Association::BelongsTo { .. } | Association::HasOne { .. } => {
+            for f in ["build_{}", "create_{}", "create_{}!", "reload_{}", "reset_{}", "{}_changed?", "{}_previously_changed?"] {
+                shadows.insert(f.replace("{}", n));
+            }
+        }
+    }
+}
+
+impl HtmlSafeMarks {
+    fn of(app: &App) -> Self {
+        let mut classes: crate::det::HashMap<String, MarkClass> = crate::det::HashMap::default();
+        let singleton = |m: &crate::dialect::MethodDef| m.receiver == crate::dialect::MethodReceiver::Class;
+        for m in &app.models {
+            let c = classes.entry(m.name.0.as_str().to_string()).or_default();
+            c.parent = m.parent.as_ref().map(|p| p.0.as_str().to_string());
+            c.includes.extend(crate::analyze::model_includes(m).iter().map(|i| i.0.as_str().to_string()));
+            c.defines.extend(m.methods().map(|d| (d.name.as_str().to_string(), singleton(d))));
+            // A column's reader: the emitted model defines it on the class,
+            // so it comes before an inherited `def` of the same name.
+            c.shadows.extend(m.attributes.fields.keys().map(|k| k.as_str().to_string()));
+            for item in &m.body {
+                match item {
+                    crate::dialect::ModelBodyItem::Unknown { expr, .. } => macro_shadows(expr, c),
+                    crate::dialect::ModelBodyItem::Association { assoc, .. } => association_shadows(assoc, &mut c.shadows),
+                    crate::dialect::ModelBodyItem::Alias { new, .. } => {
+                        c.shadows.insert(new.as_str().to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for lc in &app.library_classes {
+            let c = classes.entry(lc.name.0.as_str().to_string()).or_default();
+            if c.parent.is_none() {
+                c.parent = lc.parent.as_ref().map(|p| p.0.as_str().to_string());
+            }
+            c.includes.extend(lc.includes.iter().map(|i| i.0.as_str().to_string()));
+            c.defines.extend(lc.methods.iter().map(|d| (d.name.as_str().to_string(), singleton(d))));
+            for e in &lc.unknown_calls {
+                macro_shadows(e, c);
+            }
+        }
+        // A concern's `included do` block defines its methods on each
+        // class whose includes reach it, ahead of or after the class's own
+        // `def` by source position: they shadow on the includer.
+        let redefs: crate::det::HashMap<String, Vec<String>> = app
+            .concern_included_redefs
+            .iter()
+            .map(|(m, names)| (m.0.as_str().to_string(), names.iter().map(|n| n.as_str().to_string()).collect()))
+            .collect();
+        if !redefs.is_empty() {
+            let includers: Vec<String> = classes.keys().cloned().collect();
+            for includer in includers {
+                let mut queue = classes[&includer].includes.clone();
+                let mut seen: crate::det::HashSet<String> = queue.iter().cloned().collect();
+                let mut names = Vec::new();
+                let mut i = 0;
+                while i < queue.len() {
+                    let m = queue[i].clone();
+                    i += 1;
+                    names.extend(redefs.get(&m).into_iter().flatten().cloned());
+                    let nested = classes.get(&m).map(|k| k.includes.clone()).unwrap_or_default();
+                    let spliced = app
+                        .concern_model_items
+                        .get(&ClassId(Symbol::from(m.as_str())))
+                        .map(|items| crate::analyze::body_includes(items).into_iter().map(|c| c.0.as_str().to_string()).collect())
+                        .unwrap_or_else(Vec::new);
+                    for n in nested.into_iter().chain(spliced) {
+                        if seen.insert(n.clone()) {
+                            queue.push(n);
+                        }
+                    }
+                }
+                if let Some(c) = classes.get_mut(&includer) {
+                    c.shadows.extend(names);
+                }
+            }
+        }
+        HtmlSafeMarks { classes, marked: app.html_safe_method_defs.iter().cloned().collect() }
+    }
+
+    /// Whether any definition of `method` is marked: the cheap test
+    /// before a receiver is resolved.
+    pub(super) fn names(&self, method: &str) -> bool {
+        self.marked.iter().any(|(_, m, _)| m == method)
+    }
+
+    /// Whether `method` on an instance of `class` (or, with `singleton`,
+    /// on the constant `class`) resolves to a marked definition. The
+    /// lookup takes Ruby's order, and the first class or module that
+    /// defines the method decides: an instance call looks in the class,
+    /// then its included modules, last included first, then its parent;
+    /// a singleton call looks in the class, then the modules it extends,
+    /// last extended first, then its parent. A method no known class
+    /// defines isn't trusted, and neither is one that a class on the way
+    /// gets from a call rather than a `def` (`attr_reader :label`), that
+    /// a class answers through a prepended module, or that an included
+    /// or extended module this app doesn't have could define. An
+    /// extended module's own method isn't trusted either.
+    pub(super) fn resolves_marked(&self, class: &str, method: &str, singleton: bool) -> bool {
+        let mut order = Vec::new();
+        self.lookup_order(class, singleton, Via::Class, &mut order);
+        for (c, via) in &order {
+            let Some(k) = self.classes.get(c) else {
+                if *via == Via::Class {
+                    // A parent this app doesn't have (`ActiveRecord::Base`)
+                    // ends the chain.
+                    continue;
+                }
+                return false;
+            };
+            if k.opaque || k.shadows.contains(method) {
+                return false;
+            }
+            if *via == Via::Extend {
+                if k.defines.contains(&(method.to_string(), false)) {
+                    return false;
+                }
+                continue;
+            }
+            if k.defines.contains(&(method.to_string(), singleton)) {
+                return self.marked.contains(&(c.clone(), method.to_string(), singleton));
+            }
+        }
+        false
+    }
+
+    fn lookup_order(&self, class: &str, singleton: bool, via: Via, out: &mut Vec<(String, Via)>) {
+        if out.iter().any(|(c, v)| c == class && *v == via) {
+            return;
+        }
+        out.push((class.to_string(), via));
+        let Some(k) = self.classes.get(class) else { return };
+        if via == Via::Extend || !singleton {
+            for inc in k.includes.iter().rev() {
+                self.lookup_order(inc, false, if via == Via::Extend { Via::Extend } else { Via::Include }, out);
+            }
+        }
+        if via != Via::Class {
+            return;
+        }
+        if singleton {
+            for ext in k.extends.iter().rev() {
+                self.lookup_order(ext, false, Via::Extend, out);
+            }
+        }
+        if let Some(p) = &k.parent {
+            self.lookup_order(p, singleton, Via::Class, out);
+        }
+    }
+}
+
+/// How the lookup reached a class or module: as the receiver's class or
+/// one of its parents, as an included module, or as an extended one
+/// (whose instance methods answer singleton calls).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Via {
+    Class,
+    Include,
+    Extend,
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models
@@ -5170,7 +5812,7 @@ fn bool_reader_names(
             }
         }
         for (name, ty) in crate::lower::model_to_library::attribute_api_decls(&m.body) {
-            if ty.as_str() == "boolean" {
+            if ty.as_ref().is_some_and(|ty| ty.as_str() == "boolean") {
                 set.insert(name.as_str().to_string());
             }
         }
@@ -5371,6 +6013,12 @@ impl ViewCtx {
     pub(super) fn is_local(&self, n: &str) -> bool {
         self.locals.iter().any(|x| x == n)
     }
+    /// True when `n` is a local Rails binds here (a declared or handed
+    /// partial local, the record, a block param), not a closure ivar
+    /// that only took the name.
+    pub(super) fn binds_local(&self, n: &str) -> bool {
+        self.is_local(n) && !self.ivar_params.iter().any(|x| x == n)
+    }
     /// True when `@<n>` is assigned a partial-options value in some
     /// controller action (a bare partial-name string or a `{partial: …}`
     /// hash), so a bare `render @<n>` should dispatch over the pool
@@ -5383,6 +6031,8 @@ impl ViewCtx {
         let mut next = self.clone();
         for n in more {
             next.shadow_flash(&n);
+            next.ivar_params.retain(|x| x != &n);
+            next.held_ivars.retain(|held| held != &n);
             if !next.locals.iter().any(|x| x == &n) {
                 next.locals.push(n);
             }
@@ -5744,6 +6394,110 @@ pub(super) fn noop_io_append() -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn class_call(method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: None, method: Symbol::from(method), args, block: None, parenthesized: true })
+    }
+
+    fn read_class_call(e: Expr) -> MarkClass {
+        let mut c = MarkClass::default();
+        macro_shadows(&e, &mut c);
+        c
+    }
+
+    #[test]
+    fn a_class_body_call_whose_effect_cant_be_read_makes_the_class_opaque() {
+        let computed = || class_call("computed_name", vec![]);
+        assert!(read_class_call(class_call("send", vec![lit_sym(Symbol::from("define_method")), computed()])).opaque);
+        assert!(read_class_call(class_call("send", vec![computed(), lit_sym(Symbol::from("label"))])).opaque);
+        for m in ["class_eval", "class_exec", "module_eval", "module_exec", "instance_eval", "instance_exec"] {
+            assert!(read_class_call(class_call(m, vec![])).opaque, "{m}");
+        }
+        assert!(read_class_call(class_call("include", vec![computed()])).opaque);
+        assert!(read_class_call(class_call("extend", vec![computed()])).opaque);
+    }
+
+    #[test]
+    fn a_class_body_call_with_literal_names_shadows_them() {
+        let c = read_class_call(class_call("send", vec![lit_sym(Symbol::from("attr_reader")), lit_sym(Symbol::from("label"))]));
+        assert!(!c.opaque && c.shadows.contains("label"));
+        let c = read_class_call(class_call("send", vec![lit_sym(Symbol::from("define_method")), lit_sym(Symbol::from("label"))]));
+        assert!(!c.opaque && c.shadows.contains("label"));
+        let helpers = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("Helpers")] });
+        let c = read_class_call(class_call("extend", vec![helpers.clone()]));
+        assert!(!c.opaque && c.extends == vec!["Helpers".to_string()]);
+        let c = read_class_call(class_call("include", vec![helpers]));
+        assert!(!c.opaque && c.shadows.is_empty());
+    }
+
+    fn block_call(method: &str, args: Vec<Expr>, params: &[&str], stmts: Vec<Expr>) -> Expr {
+        let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
+        let block = Expr::new(Span::synthetic(), ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: params.iter().map(|p| Symbol::from(*p)).collect(),
+            block_param: None,
+            body,
+            block_style: crate::expr::BlockStyle::Do,
+        });
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: None, method: Symbol::from(method), args, block: Some(block), parenthesized: false })
+    }
+
+    fn opts(pairs: &[(&str, Expr)]) -> Expr {
+        let entries = pairs.iter().map(|(k, v)| (lit_sym(Symbol::from(*k)), v.clone())).collect();
+        Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true })
+    }
+
+    fn on(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false })
+    }
+
+    fn var(name: &str) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(name) })
+    }
+
+    #[test]
+    fn a_with_options_block_shadows_the_names_its_calls_define() {
+        let label = || lit_sym(Symbol::from("label"));
+        let to = || opts(&[("to", lit_sym(Symbol::from("inner")))]);
+        let c = read_class_call(block_call("with_options", vec![to()], &["o"], vec![on(var("o"), "delegate", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("label"), "through the param");
+        let c = read_class_call(block_call("with_options", vec![to()], &[], vec![class_call("delegate", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("label"), "implicit receiver");
+        // The outer `prefix: true` merges into the inner `delegate`, with the outer `to:`.
+        let outer = opts(&[("prefix", Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Bool { value: true } })), ("to", lit_sym(Symbol::from("inner")))]);
+        let c = read_class_call(block_call("with_options", vec![outer], &[], vec![class_call("delegate", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("inner_label"), "{:?}", c.shadows);
+        let c = read_class_call(block_call("concerning", vec![lit_sym(Symbol::from("Labels"))], &[], vec![class_call("attr_reader", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("label"));
+    }
+
+    #[test]
+    fn a_sent_call_keeps_its_block() {
+        let prefix = opts(&[("prefix", lit_sym(Symbol::from("inner")))]);
+        let inner = on(var("o"), "delegate", vec![lit_sym(Symbol::from("label")), opts(&[("to", lit_sym(Symbol::from("x")))])]);
+        for m in ["send", "public_send", "__send__"] {
+            let c = read_class_call(block_call(m, vec![lit_sym(Symbol::from("with_options")), prefix.clone()], &["o"], vec![inner.clone()]));
+            assert!(!c.opaque && c.shadows.contains("inner_label"), "{m}: {:?}", c.shadows);
+        }
+    }
+
+    #[test]
+    fn a_block_whose_statements_cant_be_read_makes_the_class_opaque() {
+        let other = on(var("x"), "delegate", vec![lit_sym(Symbol::from("label"))]);
+        assert!(read_class_call(block_call("with_options", vec![], &["o"], vec![other.clone()])).opaque);
+        assert!(read_class_call(block_call("with_options", vec![var("computed")], &["o"], vec![])).opaque);
+        assert!(read_class_call(block_call("concerning", vec![], &[], vec![other])).opaque);
+    }
+
+    #[test]
+    fn a_callback_block_is_the_records_code_not_the_class_body() {
+        let body = on(var("article"), "touch", vec![]);
+        for m in ["after_create_commit", "before_save", "around_update", "validate"] {
+            let c = read_class_call(block_call(m, vec![], &[], vec![body.clone()]));
+            assert!(!c.opaque && c.shadows.is_empty(), "{m}");
+        }
+    }
 
     #[test]
     fn module_id_for_articles_dir() {

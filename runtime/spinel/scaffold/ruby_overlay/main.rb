@@ -82,6 +82,7 @@ module Main
   end
 
   def self.dispatch_core(env, stdin)
+    env["action_dispatch.request_id"] = ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
     # Rails wraps every request in the AR query cache: identical
     # SELECTs within one request replay the first result; any write
     # invalidates. The CRuby Db shim implements the same discipline
@@ -259,8 +260,9 @@ module Main
       cookies.each do |cname, cvalue|
         name = cname.to_s
         next unless name.start_with?("flash_")
-        value = ActionDispatch::SignedCookie.verified(cvalue.to_s, name)
-        inbound_flash[name.delete_prefix("flash_")] = value unless value.empty?
+        ActionDispatch::Flash.cookie_flashes(cvalue.to_s, name).each do |key, value|
+          inbound_flash[key] = value
+        end
       end
     else
       host_flash.each { |k, v| inbound_flash[k.to_s] = v }
@@ -347,7 +349,7 @@ module Main
     else
       persisted.each do |kind, value|
         name = "flash_#{kind}"
-        out_cookies[name.to_sym] = ActionDispatch::SignedCookie.sign(value, name)
+        out_cookies[name.to_sym] = ActionDispatch::Flash.signed_cookie(value, name)
       end
       cookies.each_key do |cname|
         name = cname.to_s
@@ -394,7 +396,7 @@ module Main
     # (action_controller/conditional_get.rb): the body ETag, the default
     # Cache-Control, and a 304 for a matching If-None-Match, on the
     # controller's status, body and headers before they are read below.
-    controller.commit_conditional_get!(env["REQUEST_METHOD"].to_s, env["HTTP_IF_NONE_MATCH"].to_s)
+    controller.commit_conditional_get!(env["REQUEST_METHOD"].to_s, env["HTTP_IF_NONE_MATCH"].to_s, env["HTTP_IF_MODIFIED_SINCE"].to_s)
     controller.commit_default_headers!
     # Headers the action set beyond Content-Type/Location — a
     # `Content-Disposition` on a download, the Cache-Control a blob
@@ -497,7 +499,7 @@ module Main
     # request (runtime/action_dispatch/request_id.rb), as the spinel
     # dispatcher stamps them: X-Request-Id always, X-Runtime unless the
     # app set one. config.ru serves static and public files before this.
-    headers["x-request-id"] = ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
+    headers["x-request-id"] = env["action_dispatch.request_id"].to_s
     headers["x-runtime"] = ActionDispatch::Runtime.header_value(started) unless headers.key?("x-runtime")
     [status, headers, [body]]
   end

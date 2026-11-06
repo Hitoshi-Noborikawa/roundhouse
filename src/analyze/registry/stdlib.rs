@@ -643,6 +643,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let args = classes.entry(ClassId(Symbol::from("ActiveJob::Arguments"))).or_default();
         args.is_module = true;
         args.class_methods.entry(Symbol::from("deserialize")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        args.class_methods.entry(Symbol::from("serialize")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
     }
     // `ActiveJob::Base.execute(job_data)`, the job a claimed solid_queue execution runs (runtime/spinel/solid_queue_runner.rb).
     classes.entry(ClassId(Symbol::from("ActiveJob::Base"))).or_default().class_methods.entry(Symbol::from("execute")).or_insert(Ty::Nil);
@@ -768,6 +769,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("encode", Ty::Str),
         ("encode_without_escape", Ty::Str),
         ("decode", Ty::Untyped),
+        ("load", Ty::Untyped),
+        ("dump", Ty::Str),
         ("time_json", Ty::Str),
         ("time_fragment", Ty::Str),
         ("written", Ty::Str),
@@ -1357,6 +1360,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("join", Ty::Str), ("shelljoin", Ty::Str),
         ("split", str_arr()), ("shellsplit", str_arr()), ("shellwords", str_arr()),
     ], &[]);
+    // CRuby's default gem; Spinel ships the same SpellChecker in its
+    // did_you_mean package. The dictionary can contain Strings or Symbols.
+    register_stdlib_class(classes, "DidYouMean::SpellChecker", &[
+        ("new", class("DidYouMean::SpellChecker")),
+    ], &[("correct", untyped_arr())]);
     register_stdlib_class(classes, "Process", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_MONOTONIC", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_REALTIME", &[], &[]);

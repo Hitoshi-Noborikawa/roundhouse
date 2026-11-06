@@ -1170,6 +1170,19 @@ impl<'a> BodyTyper<'a> {
         ClassInfo::source_class_method(self.classes(), of, method)
     }
 
+    /// Whether `of` is a program subclass of `Time` (tzinfo's `TimeWithOffset`).
+    fn time_subclass(&self, of: &ClassId) -> bool {
+        let mut current = self.classes().get(of).and_then(|c| c.parent.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return false };
+            if id.0.as_str() == "Time" {
+                return true;
+            }
+            current = self.classes().get(&id).and_then(|c| c.parent.clone());
+        }
+        false
+    }
+
     fn source_ancestor(&self, of: &ClassId, method: &Symbol) -> Option<ClassId> {
         let mut current = self.classes().get(of)?.parent.clone();
         for _ in 0..32 {
@@ -2125,6 +2138,10 @@ impl<'a> BodyTyper<'a> {
                         {
                             return unwrap_fn_ret(&subst(ancestor_ty));
                         }
+                        // Not Time: `TimeWithOffset.at` builds the subclass, which a seed of Time contradicts on Spinel.
+                        if cid.0.as_str() == "Time" && cid != id && matches!(ty, Ty::Time) && time_subclass_constructor(method) {
+                            return Ty::Class { id: id.clone(), args: args.clone() };
+                        }
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if !class_dynamic_finder && let Some(ty) = cls.instance_methods.get(method) {
@@ -2266,7 +2283,18 @@ impl<'a> BodyTyper<'a> {
                     // Not the block's unresolved Var: that would report `use_zone` itself as the failure.
                     return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::Untyped);
                 }
-                if id.0.as_str() == "Time" {
+                if id.0.as_str() != "Time" && self.time_subclass(id) {
+                    // Not Time: these answer the receiver's own class, as CRuby's do for a subclass.
+                    let keeps_class = if instance_receiver {
+                        matches!(method.as_str(), "utc" | "gmtime" | "localtime" | "getlocal" | "getutc" | "getgm" | "to_time")
+                    } else {
+                        time_subclass_constructor(method)
+                    };
+                    if keeps_class {
+                        return Ty::Class { id: id.clone(), args: args.clone() };
+                    }
+                }
+                if id.0.as_str() == "Time" || (instance_receiver && self.time_subclass(id)) {
                     let ty = if instance_receiver && matches!(method.as_str(), "now" | "at") {
                         Some(Ty::Time)
                     } else if instance_receiver {
@@ -2582,6 +2610,14 @@ impl<'a> BodyTyper<'a> {
                     if let Some(t) = indexed_pluck(method, elem, args) {
                         return t;
                     }
+                }
+                // `flatten(depth)` unwraps `depth` levels, not all of them,
+                // and `flatten!` answers nil when nothing was nested.
+                if matches!(method.as_str(), "flatten" | "flatten!") && block_ret.is_none() {
+                    let flat = Ty::Array {
+                        elem: std::sync::Arc::new(flatten_to(elem, FlattenDepth::of(args))),
+                    };
+                    return if method.as_str() == "flatten!" { union_of(flat, Ty::Nil) } else { flat };
                 }
                 // `a[start, length]` and `a[range]` answer a slice (nil past the end), not an element
                 if matches!(method.as_str(), "[]" | "slice")
@@ -3044,6 +3080,12 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
     Some(ty)
 }
 
+/// A class-side `Time` method a subclass answers with its own instance;
+/// not `current`, which Rails builds from `::Time` whatever the receiver.
+fn time_subclass_constructor(method: &Symbol) -> bool {
+    method.as_str() != "current" && time_class_method(method).is_some()
+}
+
 fn time_class_method(method: &Symbol) -> Option<Ty> {
     match method.as_str() {
         "now" | "current" | "at" | "utc" | "gm" | "local" | "mktime"
@@ -3337,6 +3379,15 @@ pub(crate) fn indexed_pluck(method: &Symbol, elem: &Ty, args: &[crate::expr::Exp
         Ty::Hash { value, .. } if **value == Ty::Untyped => Ty::Untyped,
         Ty::Hash { value, .. } => super::union_of((**value).clone(), Ty::Nil),
         Ty::Untyped | Ty::Var { .. } => Ty::Untyped,
+        Ty::Union { variants } => variants
+            .iter()
+            .map(|variant| match indexed_pluck(method, variant, args)? {
+                Ty::Array { elem } => Some((*elem).clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .reduce(super::union_of)?,
         _ => return None,
     };
     Some(Ty::Array { elem: std::sync::Arc::new(value) })
@@ -3387,10 +3438,6 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
         },
         // Not declared by any Relation-context entry today; kept
         // total so a future entry can't panic this instantiation.
-        ReturnKind::HashSymStr => Ty::Hash {
-            key: std::sync::Arc::new(Ty::Sym),
-            value: std::sync::Arc::new(Ty::Str),
-        },
         ReturnKind::HashStrUntyped => Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
             value: std::sync::Arc::new(Ty::Untyped),
@@ -4468,6 +4515,87 @@ fn flatten_elem(t: &Ty) -> Ty {
             .map(flatten_elem)
             .fold(Ty::Bottom, union_of),
         other => other.clone(),
+    }
+}
+
+/// How many levels a `flatten` / `flatten!` call unwraps, read off its
+/// argument.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum FlattenDepth {
+    /// No argument, `nil`, or a negative literal: every level.
+    All,
+    /// A non-negative literal. `0` leaves the array as it is.
+    Levels(usize),
+    /// A depth only known at run time: any of the above.
+    Unknown,
+}
+
+impl FlattenDepth {
+    pub(super) fn of(args: &[Expr]) -> FlattenDepth {
+        match args {
+            [] => FlattenDepth::All,
+            [depth] => match &*depth.node {
+                ExprNode::Lit { value: crate::expr::Literal::Nil } => FlattenDepth::All,
+                ExprNode::Lit { value: crate::expr::Literal::Int { value } } => {
+                    usize::try_from(*value).map_or(FlattenDepth::All, FlattenDepth::Levels)
+                }
+                _ => FlattenDepth::Unknown,
+            },
+            _ => FlattenDepth::Unknown,
+        }
+    }
+
+    /// The depth after the same call runs any number of times, as it can
+    /// in a loop or a block: unwrapping every level or none is the same
+    /// however often it repeats, any other fixed number of levels is not.
+    pub(super) fn repeated(self) -> FlattenDepth {
+        match self {
+            FlattenDepth::All => FlattenDepth::All,
+            FlattenDepth::Levels(0) => FlattenDepth::Levels(0),
+            FlattenDepth::Levels(_) | FlattenDepth::Unknown => FlattenDepth::Unknown,
+        }
+    }
+}
+
+/// The element type of an Array of `elem` flattened to `depth`.
+pub(super) fn flatten_to(elem: &Ty, depth: FlattenDepth) -> Ty {
+    match depth {
+        FlattenDepth::All => flatten_elem(elem),
+        FlattenDepth::Levels(n) => flatten_levels(elem, n),
+        // Every level Ruby could stop at, from none to all.
+        FlattenDepth::Unknown => {
+            let mut all = elem.clone();
+            let mut level = elem.clone();
+            while splices(&level) {
+                level = flatten_levels(&level, 1);
+                all = union_of(all, level.clone());
+            }
+            all
+        }
+    }
+}
+
+fn flatten_levels(t: &Ty, n: usize) -> Ty {
+    if n == 0 {
+        return t.clone();
+    }
+    match t {
+        Ty::Array { elem } => flatten_levels(elem, n - 1),
+        Ty::Relation { of } => Ty::Class { id: of.clone(), args: vec![].into() },
+        Ty::Union { variants } => variants
+            .iter()
+            .map(|v| flatten_levels(v, n))
+            .fold(Ty::Bottom, union_of),
+        other => other.clone(),
+    }
+}
+
+/// Whether flattening an element of type `t` one level changes it.
+fn splices(t: &Ty) -> bool {
+    match t {
+        Ty::Array { .. } | Ty::Relation { .. } => true,
+        Ty::Union { variants } => variants.iter().any(splices),
+        _ => false,
     }
 }
 

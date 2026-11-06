@@ -392,7 +392,7 @@ fn emit_node(n: &ExprNode) -> String {
             }
         }
         ExprNode::Case { scrutinee, arms } => {
-            let mut s = format!("case {}\n", emit_expr(scrutinee));
+            let mut s = format!("case {}\n", emit_arg(scrutinee));
             for arm in arms {
                 s.push_str(&emit_arm(arm));
             }
@@ -404,7 +404,7 @@ fn emit_node(n: &ExprNode) -> String {
         // scrutinee when there's no `else` clause, which is exactly
         // the semantics `else_body: None` means in this IR.
         ExprNode::CaseMatch { scrutinee, arms, else_body } => {
-            let mut s = format!("case {}\n", emit_expr(scrutinee));
+            let mut s = format!("case {}\n", emit_arg(scrutinee));
             for arm in arms {
                 s.push_str(&emit_match_arm(arm));
             }
@@ -1090,8 +1090,9 @@ fn is_simple_ident(s: &str) -> bool {
 /// carrying a `do` block also wraps: CRuby parses
 /// `f(g a: 1 do ... end)` but JRuby (through at least 10.1) rejects it,
 /// and `f((g a: 1 do ... end))` parses identically everywhere.
+/// Case subjects and parameter defaults need the same grouping.
 /// Everything else passes through unchanged.
-fn emit_arg(e: &Expr) -> String {
+pub(super) fn emit_arg(e: &Expr) -> String {
     // A multiple assignment is a statement unless parenthesized: `if a, b
     // = pair` does not parse, and as an argument its comma splits it.
     let multi_assign = matches!(&*e.node, ExprNode::MultiAssign { .. });
@@ -1460,7 +1461,9 @@ pub(super) fn emit_send_base(
         // A method whose name is a Ruby keyword (`self.class`, `self.then`)
         // can't drop to the implicit form — bare `class` parses as the
         // keyword. Keep the explicit `self.class` (falls to the Some(r) arm).
+        // Not only the keyword itself: prism reads a bare `and?(x)` as `and`.
         && !is_ruby_keyword(m)
+        && !is_ruby_keyword(m.trim_end_matches(['?', '!']))
         // A ZERO-ARG bare name is the one form Ruby resolves lexically:
         // after `comments = self.comments.x`, a bare `comments` on the
         // RHS is the just-declared (nil) local, not the method. Args or
@@ -1710,7 +1713,7 @@ fn lambda_params(params: &[Symbol], extra_params: &[crate::dialect::Param], rest
     let mut ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
     for p in extra_params.iter().filter(|p| !p.keyword) {
         match &p.default {
-            Some(d) => ps.push(format!("{} = {}", p.name, emit_expr(d))),
+            Some(d) => ps.push(format!("{} = {}", p.name, emit_arg(d))),
             None => ps.push(p.name.to_string()),
         }
     }
@@ -1719,7 +1722,7 @@ fn lambda_params(params: &[Symbol], extra_params: &[crate::dialect::Param], rest
     }
     for p in extra_params.iter().filter(|p| p.keyword && !p.rest) {
         match &p.default {
-            Some(d) => ps.push(format!("{}: {}", p.name, emit_expr(d))),
+            Some(d) => ps.push(format!("{}: {}", p.name, emit_arg(d))),
             None => ps.push(format!("{}:", p.name)),
         }
     }

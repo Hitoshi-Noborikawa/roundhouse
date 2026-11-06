@@ -30,21 +30,6 @@ module ActiveRecord
   # stamping) survive to the render. A chain method answers a relation
   # without the receiver's cache (or, for `order`, a sorted copy of it),
   # and the receiver keeps its own.
-  # Not a Range: Spinel keeps a Range's bounds in integer slots, so a `where` value's non-numeric range (`7.days.ago..`) is lowered to these ends
-  class Bounds
-    attr_reader :lower, :upper
-
-    def initialize(lower, upper, exclusive)
-      @lower = lower
-      @upper = upper
-      @exclusive = exclusive
-    end
-
-    def exclusive?
-      @exclusive
-    end
-  end
-
   # What an eager-loaded association keeps: Rails loads `includes(:tags)
   # .where(tags: …).order(tags: …)` in one JOIN, so each record's `tags`
   # holds only the matching rows, in that order. The preload arm reads
@@ -367,7 +352,7 @@ module ActiveRecord
     def merge_seedable_scope(hash)
       own_lists
       hash.each do |key, val|
-        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range) || val.is_a?(Bounds)
+        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range)
         name = key.is_a?(Symbol) ? key.to_s : key.to_s
         next if name.include?(".")
         # Not the record itself: the key was renamed to the foreign key at lower time (`where(story: s)` → `story_id`), so the column wants its id.
@@ -1839,6 +1824,7 @@ module ActiveRecord
     # answer. Loop duplicated from `each`: a nested `{ |x| yield x }`
     # left `x` as TyVar under Bar A.
     def find_each
+      return self unless block_given?
       records = loaded_records
       i = 0
       n = records.length
@@ -1870,6 +1856,25 @@ module ActiveRecord
     # mutate the returned array.
     def map
       loaded_records.map { |x| yield x }
+    end
+
+    def filter_map
+      loaded_records.filter_map { |x| yield x }
+    end
+
+    def flat_map
+      loaded_records.flat_map { |x| yield x }
+    end
+
+    def each_with_index
+      return to_a.each_with_index unless block_given?
+      records = loaded_records
+      i = 0
+      while i < records.length
+        yield(records[i], i)
+        i += 1
+      end
+      self
     end
 
     # Enumerable's `to_h { |rec| [k, v] }` over the materialized rows
@@ -1928,6 +1933,7 @@ module ActiveRecord
     # value the block computes in Ruby, which is why campfire reaches
     # for it to sort direct rooms by their room's `updated_at`.
     def sort_by
+      return to_a.sort_by unless block_given?
       to_a.sort_by { |x| yield x }
     end
 
@@ -1935,6 +1941,12 @@ module ActiveRecord
     # corpus uses (vote-hash batchers). The no-initial and Symbol forms
     # aren't modeled; callers pass an explicit seed.
     def inject(initial)
+      acc = initial
+      to_a.each { |x| acc = yield(acc, x) }
+      acc
+    end
+
+    def reduce(initial)
       acc = initial
       to_a.each { |x| acc = yield(acc, x) }
       acc
@@ -2920,6 +2932,18 @@ module ActiveRecord
       created
     end
 
+    def create(conditions = {})
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save
+      created
+    end
+
+    def create!(conditions = {})
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save!
+      created
+    end
+
     # Rails' `find_or_create_by!`: `find_by(attributes) ||
     # create!(attributes)`. A block is the lowering's statement form
     # (`lower::first_or_create`); the runtime method takes none.
@@ -3195,15 +3219,13 @@ module ActiveRecord
         ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
         if ids.empty?
           "1=0"
-        elsif ids.any? { |x| x.nil? || x.is_a?(Range) || x.is_a?(Bounds) }
+        elsif ids.any? { |x| x.nil? || x.is_a?(Range) }
           array_with_ranges_predicate(qcol, ids)
         else
           "#{qcol} IN (#{escape_list(ids)})"
         end
       elsif val.is_a?(Range)
         range_predicate(qcol, val)
-      elsif val.is_a?(Bounds)
-        bounds_predicate(qcol, val.lower, val.upper, val.exclusive?)
       elsif val.nil?
         "#{qcol} IS NULL"
       elsif val.is_a?(Base)
@@ -3280,8 +3302,6 @@ module ActiveRecord
           has_nil = true
         elsif x.is_a?(Range)
           range_arms << range_predicate(qcol, x)
-        elsif x.is_a?(Bounds)
-          range_arms << bounds_predicate(qcol, x.lower, x.upper, x.exclusive?)
         else
           scalars << x
         end

@@ -5,6 +5,8 @@
 //! disagree: `check` is clean and the emitted program fails. Each is a
 //! complete statement of the fix: make it pass and drop the `#[ignore]`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 #[path = "emit_and_run/controller_content_type_writer.rs"]
@@ -45,6 +47,8 @@ mod stylesheet_source;
 mod time_tag;
 #[path = "emit_and_run/nested_record_form.rs"]
 mod nested_record_form;
+#[path = "emit_and_run/attribute_name_escape.rs"]
+mod attribute_name_escape;
 #[path = "emit_and_run/multiparameter_params.rs"]
 mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]
@@ -121,6 +125,16 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "emit_and_run/source_gem_load_order.rs"]
+mod source_gem_load_order;
+#[path = "emit_and_run/unresolved_param_rbs.rs"]
+mod unresolved_param_rbs;
+#[path = "emit_and_run/declared_sig_rbs.rs"]
+mod declared_sig_rbs;
+#[path = "emit_and_run/unknown_receiver_param_rbs.rs"]
+mod unknown_receiver_param_rbs;
+#[path = "emit_and_run/is_a_self_narrowing.rs"]
+mod is_a_self_narrowing;
 #[path = "emit_and_run/source_gem_facade.rs"]
 mod source_gem_facade;
 #[path = "support/for_loops.rs"]
@@ -362,6 +376,8 @@ mod constructor_unrelated_mutations;
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/active_support_extensions.rs"]
 mod active_support_extensions;
+#[path = "emit_and_run/array_pluck_union.rs"]
+mod array_pluck_union;
 #[path = "emit_and_run/routing_redirect_host.rs"]
 mod routing_redirect_host;
 #[path = "emit_and_run/time_find_zone.rs"]
@@ -410,6 +426,8 @@ mod conditional_get;
 mod nil_body_length;
 #[path = "emit_and_run/inline_filter_guard.rs"]
 mod inline_filter_guard;
+#[path = "emit_and_run/concern_guarded_filter.rs"]
+mod concern_guarded_filter;
 #[path = "emit_and_run/before_action_return.rs"]
 mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]
@@ -4016,8 +4034,7 @@ fn oj_overlay(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
 /// would raise.
 #[test]
 fn oj_stand_in_is_ruby_only() {
-    let dir = std::env::temp_dir().join(format!("rh-oj-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-oj-targets");
     for (path, text) in [
         ("config/initializers/oj.rb", "Oj.mimic_JSON\nOj.optimize_rails\n"),
         (
@@ -4293,8 +4310,7 @@ fn faraday_holder_name_does_not_declare_the_gem_on_ruby() {
 /// off the shipping targets — `gem_refusal` used to see only emit bodies.
 #[test]
 fn faraday_superclass_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-super-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-super");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4355,8 +4371,7 @@ fn faraday_superclass_is_refused_off_ruby_and_jruby() {
 /// those parents live on `Controller`, not on a LibraryClass yet.
 #[test]
 fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-ctrl-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-ctrl");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4408,8 +4423,7 @@ fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
 /// LibraryClasses.
 #[test]
 fn faraday_test_module_superclass_is_refused_on_spinel() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-tm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-tm");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4492,8 +4506,7 @@ raise r.inspect unless r == [:gave_up, 3]"#,
 /// Off Ruby and JRuby, each Retryable reference is refused.
 #[test]
 fn retryable_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-retryable-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-retryable-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4601,8 +4614,7 @@ raise "malformed" unless Token.read("not-a-token") == :malformed"#,
 /// Off Ruby and JRuby, each JWT reference is refused.
 #[test]
 fn jwt_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-jwt-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-jwt-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4764,8 +4776,7 @@ end
 /// include are refused.
 #[test]
 fn elastic_apm_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-elastic-apm-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-elastic-apm-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4922,8 +4933,7 @@ raise "block 404" unless Remote.status_of(base, "/missing") == 404
 /// Off Ruby and JRuby, each RestClient reference is refused.
 #[test]
 fn rest_client_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-rest-client-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-rest-client-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4994,8 +5004,7 @@ fn rest_client_is_refused_off_ruby_and_jruby() {
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]
 fn faraday_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -20407,6 +20416,10 @@ mod format_once;
 mod condition_lambda_record;
 #[path = "emit_and_run/where_time_range.rs"]
 mod where_time_range;
+#[path = "support/untyped_calendar.rs"]
+mod untyped_calendar_contract;
+#[path = "emit_and_run/untyped_calendar.rs"]
+mod untyped_calendar;
 #[path = "emit_and_run/route_record_to_param.rs"]
 mod route_record_to_param;
 #[path = "emit_and_run/module_factory.rs"]
@@ -20527,6 +20540,12 @@ mod i18n_config;
 mod computed_class_constants;
 #[path = "emit_and_run/guarded_absent_constant.rs"]
 mod guarded_absent_constant;
+#[path = "emit_and_run/concurrent_map_default.rs"]
+mod concurrent_map_default;
+#[path = "emit_and_run/time_subclass_constructor.rs"]
+mod time_subclass_constructor;
+#[path = "emit_and_run/included_instance_eval_extend.rs"]
+mod included_instance_eval_extend;
 #[path = "emit_and_run/settled_conditional_definition.rs"]
 mod settled_conditional_definition;
 #[path = "emit_and_run/append_features_bridge.rs"]
@@ -20625,6 +20644,10 @@ mod concern_define_loop;
 mod mutated_loop_constant;
 #[path = "support/solid_queue_worker.rs"]
 mod solid_queue_worker_contract;
+#[path = "emit_and_run/solid_queue_surface.rs"]
+mod solid_queue_surface;
+#[path = "emit_and_run/controller_surface.rs"]
+mod controller_surface;
 #[path = "emit_and_run/solid_queue_worker.rs"]
 mod solid_queue_worker;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
@@ -20651,14 +20674,23 @@ mod record_slice;
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
 
+#[path = "emit_and_run/namespaced_model_paths.rs"]
+mod namespaced_model_paths;
+
 #[path = "emit_and_run/link_to_blob.rs"]
 mod link_to_blob;
+#[path = "emit_and_run/validates_rule_gaps.rs"]
+mod validates_rule_gaps;
 
 #[path = "emit_and_run/render_partial_block.rs"]
 mod render_partial_block;
 
 #[path = "emit_and_run/python_route_format.rs"]
 mod python_route_format;
+#[path = "emit_and_run/partial_local_shadows_helper.rs"]
+mod partial_local_shadows_helper;
+#[path = "emit_and_run/partial_reads_caller_ivar.rs"]
+mod partial_reads_caller_ivar;
 
 #[path = "emit_and_run/python_nested_modifier_if.rs"]
 mod python_nested_modifier_if;
@@ -20668,6 +20700,253 @@ mod namespaced_class_consts;
 
 #[path = "emit_and_run/boolop_precedence.rs"]
 mod boolop_precedence;
+#[path = "emit_and_run/concern_with_options.rs"]
+mod concern_with_options;
+
+#[path = "emit_and_run/content_tag_block.rs"]
+mod content_tag_block;
+
+#[path = "support/html_safe_method_owner.rs"]
+mod html_safe_method_owner;
+
+/// A marked method is written unescaped only on a receiver that has the
+/// marked definition; another class's method of that name is escaped.
+#[test]
+fn an_html_safe_method_is_trusted_by_its_owner() {
+    html_safe_method_owner::app()
+        .write("test/controllers/probes_controller_test.rb", &html_safe_method_owner::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_html_safe_method_is_trusted_by_its_owner_on_spinel() {
+    html_safe_method_owner::app().run_spinel(&html_safe_method_owner::render_script()).assert_passes();
+}
+
+#[path = "support/content_tag_options.rs"]
+mod content_tag_options;
+
+#[test]
+fn a_content_tag_with_options_renders() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_content_tag_with_options_renders_on_spinel() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_spinel(&content_tag_options::render_script())
+        .assert_passes();
+}
+
+#[path = "support/link_to_if_escape.rs"]
+#[allow(dead_code)]
+mod link_to_if_escape;
+
+#[test]
+fn link_to_if_escapes_its_label() {
+    link_to_if_escape::app_with_app_escape()
+        .write("test/controllers/probes_controller_test.rb", &link_to_if_escape::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_if_escapes_its_label_on_spinel() {
+    link_to_if_escape::app_with_app_escape()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"link_to_if escaped\"\n",
+            link_to_if_escape::body_checks()
+        ))
+        .assert_passes();
+}
+
+#[test]
+fn link_to_if_shows_an_html_safe_app_label_once() {
+    link_to_if_escape::app_with_safe_escape()
+        .write("test/controllers/probes_controller_test.rb", &link_to_if_escape::safe_integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_if_shows_an_html_safe_app_label_once_on_spinel() {
+    link_to_if_escape::app_with_safe_escape()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"safe label once\"\n",
+            link_to_if_escape::safe_body_checks()
+        ))
+        .assert_passes();
+}
+
+#[path = "support/go_view_predicate.rs"]
+mod go_view_predicate;
+
+/// #1802's view on the ruby target: `F:true` is what it renders.
+#[test]
+fn a_views_model_predicate_call_renders_on_ruby() {
+    go_view_predicate::app().run_test("test/controllers/articles_featured_controller_test.rb").assert_passes();
+}
+
+/// The shapes' answers on the ruby target: the ones the Go run checks.
+#[test]
+fn a_views_model_method_shapes_render_on_ruby() {
+    go_view_predicate::shapes_app().run_test("test/controllers/articles_featured_controller_test.rb").assert_passes();
+}
+
+/// The Go view reads a trivial `attr_accessor` reader as its field, over
+/// the parent's method of that name (also when an intermediate parent
+/// model defines that reader), and calls a nilable or namespaced
+/// receiver's own method and a parent model's method.
+#[test]
+fn a_views_model_method_shapes_are_go_calls_or_fields() {
+    let (emitted, errors) = go_view_predicate::shapes_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let view = std::fs::read_to_string(emitted.join("app/v2/views_articles.go")).unwrap();
+    let missing: Vec<_> = ["a.FeaturedPred()", "a.Pinned)", "last.FeaturedPred()", "n.HotPred()", "a.SharedFlagPred()", "n.Pinned)"].into_iter().filter(|w| !view.contains(w)).collect();
+    let wrong: Vec<_> = ["a.PinnedPred()", "n.PinnedPred()"].into_iter().filter(|w| view.contains(w)).collect();
+    assert!(missing.is_empty() && wrong.is_empty(), "missing {missing:?}, wrong {wrong:?} in {view}");
+}
+
+/// The Go view calls the model's own predicate as its method.
+#[test]
+fn a_views_model_predicate_call_is_a_go_method_call() {
+    let (emitted, errors) = go_view_predicate::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let view = std::fs::read_to_string(emitted.join("app/v2/views_articles.go")).unwrap();
+    assert!(view.contains("a.FeaturedPred()") && !view.contains("a.Featured)"), "{view}");
+}
+
+#[path = "support/go_test_literal_receiver.rs"]
+mod go_test_literal_receiver;
+
+/// #1803's model test on the ruby target: the answers it asserts are Ruby's.
+#[test]
+fn an_assertion_on_a_new_records_method_passes_on_ruby() {
+    go_test_literal_receiver::app().run_test("test/models/featured_test.rb").assert_passes();
+}
+
+#[path = "support/go_action_controller_api.rs"]
+mod go_action_controller_api;
+
+/// #1804's API controller on the ruby target.
+#[test]
+fn an_api_controller_answers_on_ruby() {
+    go_action_controller_api::app().run_test("test/controllers/ping_controller_test.rb").assert_passes();
+}
+
+#[path = "support/block_control_flow.rs"]
+mod block_control_flow;
+
+#[test]
+fn a_block_starting_with_control_flow_renders() {
+    block_control_flow::app()
+        .write("test/controllers/probes_controller_test.rb", &block_control_flow::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_block_starting_with_control_flow_renders_on_spinel() {
+    block_control_flow::app()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"rendered\"\n",
+            block_control_flow::body_checks()
+        ))
+        .assert_passes();
+}
+
+#[path = "support/go_conditional_operand.rs"]
+mod go_conditional_operand;
+
+/// #1696's `Note#headline?` on the ruby target: the answers the Go probe
+/// checks are Ruby's.
+#[test]
+fn a_conditional_operand_of_and_answers_as_ruby() {
+    go_conditional_operand::note_app().run_test("test/models/note_headline_test.rb").assert_passes();
+}
+
+/// The Go emit writes the conditional operand as a func literal, not an
+/// `if` statement in expression position.
+#[test]
+fn a_conditional_operand_of_and_is_a_go_value() {
+    let (emitted, errors) = go_conditional_operand::issue_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let model = std::fs::read_to_string(emitted.join("app/v2/article.go")).unwrap();
+    let body = model.split("func (self *Article) HeadlinePred() bool {").nth(1).expect("HeadlinePred").split("\n}\n").next().unwrap();
+    assert!(!body.contains("return if ") && body.contains("func() bool {"), "{body}");
+}
+
+#[path = "support/rust_bare_model.rs"]
+mod rust_bare_model;
+
+/// #1711: the Rust model's `save` and `_insert_row` call `validate` and
+/// `fill_timestamps` only when the model has them.
+#[test]
+fn a_rust_model_calls_only_the_validate_and_fill_timestamps_it_has() {
+    for (validated, timestamped) in rust_bare_model::VARIANTS {
+        let (emitted, errors) = rust_bare_model::app(validated, timestamped).emit(roundhouse::project::BuildTarget::Rust);
+        assert!(errors.is_empty(), "{errors:?}");
+        let model = std::fs::read_to_string(emitted.join("src/models/account.rs")).unwrap();
+        assert_eq!(model.contains("self.validate()"), validated, "validated: {validated}\n{model}");
+        assert_eq!(model.contains("self.fill_timestamps(true)"), timestamped, "timestamped: {timestamped}\n{model}");
+    }
+}
+
+#[path = "support/pluralize_escape.rs"]
+mod pluralize_escape;
+
+#[test]
+fn pluralize_in_a_template_is_escaped() {
+    pluralize_escape::app_with_app_escape()
+        .write("test/controllers/probes_controller_test.rb", &pluralize_escape::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn pluralize_in_a_template_is_escaped_on_spinel() {
+    pluralize_escape::app_with_app_escape()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"pluralize escaped\"\n",
+            pluralize_escape::body_checks()
+        ))
+        .assert_passes();
+}
+
+#[path = "support/helper_escape_at_output.rs"]
+mod helper_escape_at_output;
+
+/// #1796: a helper inside a larger template expression is escaped as
+/// Rails 8.1.4 escapes it.
+#[test]
+fn a_nested_helper_is_escaped_as_rails() {
+    let run = helper_escape_at_output::app(helper_escape_at_output::VIEW)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(helper_escape_at_output::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb");
+    eprintln!("{}", run.stdout);
+    run.assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_nested_helper_is_escaped_as_rails_on_spinel() {
+    let run = helper_escape_at_output::app(helper_escape_at_output::VIEW)
+        .run_spinel(&helper_escape_at_output::render_script(helper_escape_at_output::RENDERS));
+    eprintln!("{}", run.stdout);
+    run.assert_passes();
+}
+
+#[path = "emit_and_run/unknown_class_association.rs"]
+mod unknown_class_association;
 
 #[path = "support/full_forwarding.rs"]
 mod full_forwarding;

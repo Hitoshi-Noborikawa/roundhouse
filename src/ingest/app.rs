@@ -611,6 +611,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             .collect();
         if more.is_empty() || auto.len() >= 32 {
             app.auto_source_gems = auto.into_iter().filter(|g| app.gem_lock.as_ref().is_some_and(|l| l.source.contains(g))).collect();
+            super::recurring_commands::apply(&mut app, vfs, dir)?;
             return Ok(app);
         }
         // Not the superseded pass's parse errors and survey gaps as well: the next pass reports them again.
@@ -645,11 +646,11 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let mut source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
         .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
     // The queue's records: on solid_queue the compiler runs the jobs, but the records Rails keeps of them are
-    // solid_queue's own models, read from its installed source over the app's `db/queue_schema.rb`.
+    // solid_queue's own models, read from its installed source over a separate or primary queue schema.
     // Not every app on solid_queue: only one whose code (or a gem it carries) names solid_queue's classes reads its records.
     let solid_queue_models = (effective_queue_adapter(vfs, dir).as_deref() == Some("solid_queue")
-        && vfs.exists(&dir.join("db/queue_schema.rb"))
-        && names_solid_queue(vfs, dir, &source_gems))
+        && names_solid_queue(vfs, dir, &source_gems)
+        && (vfs.exists(&dir.join("db/queue_schema.rb")) || primary_schema_has_queue(vfs, dir)))
         .then(|| super::source_gems::framework_models(vfs, dir, lock.as_ref(), "solid_queue"))
         .flatten();
     let solid_queue_root = solid_queue_models.as_ref().and_then(|gem| gem.mount.strip_prefix(dir).ok().map(|m| m.join("app")));
@@ -820,7 +821,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
         }
     }
     // Not its own database: the runtime opens only the primary, so solid_queue's tables join it.
-    if solid_queue_root.is_some() {
+    if solid_queue_root.is_some() && vfs.exists(&dir.join("db/queue_schema.rb")) {
         let queue_schema = dir.join("db/queue_schema.rb");
         if let Some(source) = read_or_ledger(vfs, &queue_schema)? {
             if let Some(queue) = unwrap_or_record(ingest_schema(&source, &queue_schema.display().to_string()))? {
@@ -992,7 +993,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     // just PORO classes. The singular path uses
                     // find_first_class and would drop a module.
                     if let Some(classes) =
-                        unwrap_or_record(ingest_library_classes(&source, &path_str))?
+                        unwrap_or_record(super::library_class::ingest_app_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
                         // After the file is registered, so the spans name it.
@@ -1122,11 +1123,20 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             // validations and scopes — replayed by the ruby emitter,
             // dropped by a strict target.
             //
+            // So is a gem's own ActiveModel class (`include
+            // ActiveModel::Validations` with no superclass): no runtime
+            // port defines the module to include, and the gem's
+            // validations compile as a model's do. An app `lib/` class
+            // keeps `lower::active_model_model`'s treatment (it may reopen
+            // a framework class).
+            //
             // Only an explicit `Model` classification routes this way.
             // `None` — a file with no class, a bare module — stays a
             // library class here, unlike under `app/models` where the
             // directory itself is the app saying what the file is.
-            if super::library_class::has_active_record_base(&source, &model_bases) {
+            if super::library_class::has_active_record_base(&source, &model_bases)
+                || (gem_libs.iter().any(|lib| entry.starts_with(lib)) && super::library_class::is_tableless_active_model(&source))
+            {
                 match ingest_model_with_enum_constants(
                     &source, &path_str, &app.schema, &table_prefixes, &base_prefixes, &enum_constants,
                     &model_bases,
@@ -1134,6 +1144,64 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     Ok(Some(model)) => {
                         let outer = model.name.clone();
                         app.models.push(model);
+                        let mut beside_names: Vec<crate::ident::ClassId> = Vec::new();
+                        // A gem's file runs more than its declaration when
+                        // it loads: a require written below the class runs
+                        // after it (`file_program`), a model's file as any.
+                        if gem_libs.iter().any(|lib| entry.starts_with(lib)) {
+                            let mut carried: crate::det::HashSet<String> = Default::default();
+                            carried.insert(outer.0.as_str().to_string());
+                            if let Ok(nested) = ingest_nested_library_classes(&source, &path_str, outer.0.as_str()) {
+                                carried.extend(nested_under(&outer, nested).iter().map(|c| c.name.0.as_str().to_string()));
+                            }
+                            // A declaration beside the model (`Helpers`
+                            // beside `Node` in `module Tessera`) is the
+                            // file's too, a library class as it was
+                            // before the file became a model's, held and
+                            // registered as one. A refused alias in it
+                            // takes the file's program out with it, as
+                            // the program would name the refused class.
+                            let (beside, aliases) = super::inherited_alias::capturing(|| {
+                                super::library_class::ingest_library_classes_beside(&source, &path_str, outer.0.as_str())
+                            });
+                            match beside {
+                                Ok(beside) if !beside.is_empty() => {
+                                    carried.extend(beside.iter().map(|c| c.name.0.as_str().to_string()));
+                                    beside_names = beside.iter().map(|c| c.name.clone()).collect();
+                                    let conditional: crate::det::HashSet<&crate::ident::ClassId> = beside
+                                        .iter()
+                                        .flat_map(|c| c.conditional_definitions.iter().flat_map(|d| d.declared_names()))
+                                        .collect();
+                                    let unconditional =
+                                        beside_names.iter().filter(|name| !conditional.contains(name)).cloned().collect();
+                                    app.library_class_files.push((path_str.clone(), unconditional));
+                                    let start = app.library_classes.len();
+                                    app.library_classes.extend(beside);
+                                    if !aliases.is_empty() {
+                                        held_aliases.push(super::inherited_alias::Held {
+                                            path: path_str.clone(),
+                                            classes: start..app.library_classes.len(),
+                                            spans: aliases,
+                                        });
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(err) => record_library_ingest_failure(&mut app, &path_str, &err),
+                            }
+                            let list_dir = |dir: &Path| -> Vec<(String, bool)> {
+                                vfs.read_dir(dir)
+                                    .map(|entries| {
+                                        entries
+                                            .into_iter()
+                                            .filter_map(|e| Some((e.file_name()?.to_str()?.to_string(), vfs.is_dir(&e))))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            if let Some(program) = super::file_program::file_program(&source, &path_str, &carried, &list_dir) {
+                                app.file_programs.push(program);
+                            }
+                        }
                         // Classes nested in the model's body are classes
                         // of their own, exactly as under `app/models` —
                         // and, same as there, the plain (non-nested)
@@ -1151,12 +1219,11 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
                                 app.concern_included_redefs.entry(id).or_default().push(name);
                             }
-                            append_concern_items(&mut app, concern_items, concern_guarded, |id| {
-                                nested.iter().any(|class| class.name == *id)
-                            });
-                            concern_enums.extend(concern_enum_decls.into_iter().filter(
-                                |(id, _)| nested.iter().any(|class| class.name == *id),
-                            ));
+                            let own = |id: &crate::ident::ClassId| {
+                                nested.iter().any(|class| class.name == *id) || beside_names.contains(id)
+                            };
+                            append_concern_items(&mut app, concern_items, concern_guarded, |id| own(id));
+                            concern_enums.extend(concern_enum_decls.into_iter().filter(|(id, _)| own(id)));
                             app.library_classes.extend(nested);
                         }
                         super::on_load_reopen::ingest_on_load_reopens(&source, &path_str, &mut app);
@@ -1170,8 +1237,20 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     }
                 }
             }
-            let (ingested, mut aliases) =
-                super::inherited_alias::capturing(|| ingest_library_classes(&source, &path_str));
+            // A file of constants alone is carried only where Rails'
+            // autoloader maps it to its constant: an app root's
+            // directory, not `lib/`, a gem's lib or a boot-required file.
+            let autoloaded = !sub.is_empty()
+                && sub != "lib"
+                && sub != "extras"
+                && !gem_libs.iter().any(|lib| support_dir.starts_with(lib));
+            let (ingested, mut aliases) = super::inherited_alias::capturing(|| {
+                if autoloaded {
+                    super::library_class::ingest_app_library_classes(&source, &path_str)
+                } else {
+                    ingest_library_classes(&source, &path_str)
+                }
+            });
             match ingested {
                 Ok(mut classes) => {
                     // A gem's file runs more than its declarations when it
@@ -1249,20 +1328,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     append_concern_items(&mut app, concern_items, concern_guarded, |_| true);
                     concern_enums.extend(concern_enum_decls);
                 }
-                Err(err) => {
-                    if survey::is_active() {
-                        survey::record(&err);
-                    }
-                    // Left out of the IR, and named at what failed it.
-                    if let IngestError::Unsupported { message, .. } = &err {
-                        let (start, end) = super::error_site::of(&err).unwrap_or((0, 0));
-                        let file = super::sources::file_id(&path_str);
-                        app.ingest_drops.push(crate::app::IngestDrop {
-                            span: crate::span::Span { file, start: start as u32, end: end as u32 },
-                            message: message.clone(),
-                        });
-                    }
-                }
+                Err(err) => record_library_ingest_failure(&mut app, &path_str, &err),
             }
             // A reopen deferred behind `ActiveSupport.on_load` is
             // invisible to the class finder above (it skips blocks);
@@ -2607,6 +2673,25 @@ end
     let vite_digest = app.vite_manifest.as_ref().map(|m| m.digest.clone());
     app.inertia = super::inertia::load_inertia_config(vfs, dir, vite_digest.as_deref())?;
 
+    // An engine's initializers run at boot as the host's do, and the boot
+    // program takes their top-level constant writes
+    // (`boot_program::is_engine_initializer_constant`): the source index
+    // has to see the files for a read of such a constant to resolve.
+    for engine_dir in &path_gems {
+        if !declares_rails_engine(vfs, &engine_dir.join("lib")) {
+            continue;
+        }
+        let initializers = engine_dir.join("config/initializers");
+        if !vfs.is_dir(&initializers) || path_has_symlink_component(vfs, engine_dir, &initializers) {
+            continue;
+        }
+        for entry in read_rb_files(vfs, &initializers).unwrap_or_default() {
+            if let Ok(text) = vfs.read_to_string(&entry) {
+                super::sources::register(&entry.display().to_string(), &text);
+            }
+        }
+    }
+
     // Every app source is registered by here. Rubydex resolves a
     // SNAPSHOT on another thread while the passes below run, and those
     // passes read the same snapshot. It is not the real `drain`: the
@@ -2869,7 +2954,7 @@ end
         .map(|n| n.split("::").next().unwrap_or(n).to_string())
         .collect();
     let gem_lock = app.gem_lock.clone();
-    let mut boot_taken = super::boot_program::build(vfs, dir, &mut app, gem_lock.as_ref(), &app_namespaces, &rate_limit_store_values)?;
+    let mut boot_taken = super::boot_program::build(vfs, dir, &path_gems, &mut app, gem_lock.as_ref(), &app_namespaces, &rate_limit_store_values)?;
     boot_taken.extend(super::engine_config::carry(&mut app, dir));
     super::boot_program::apply_call_sites(&mut app);
     super::initializer_ledger::record(
@@ -3070,6 +3155,8 @@ end
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
     super::extend_splice::splice_sole_extended_modules(&mut app);
+    super::included_extend::splice_included_extends(&mut app);
+    super::absence_guards::raise_undefined_capitalized_calls(&mut app);
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
@@ -3594,7 +3681,7 @@ fn gap_acceptance_on_undeclared(app: &mut App) {
 }
 
 /// Drop every Validation item of each refused `validates` call, as an
-/// ingest refusal (`ParsedValidates::Gap`) does: every item a call
+/// ingest refusal of the call (`ParsedValidates::Gap`) does: every item a call
 /// produced shares its span (one per attribute, and per-rule `if:` /
 /// `unless:` splits), so a `presence:` beside the refused rule is not kept.
 fn refuse_validates_calls(
@@ -8751,6 +8838,22 @@ fn append_concern_items(
     }
 }
 
+/// A support file's library classes that failed to ingest: surveyed, and
+/// left out of the IR named at what failed them.
+fn record_library_ingest_failure(app: &mut App, path: &str, err: &IngestError) {
+    if survey::is_active() {
+        survey::record(err);
+    }
+    if let IngestError::Unsupported { message, .. } = err {
+        let (start, end) = super::error_site::of(err).unwrap_or((0, 0));
+        let file = super::sources::file_id(path);
+        app.ingest_drops.push(crate::app::IngestDrop {
+            span: crate::span::Span { file, start: start as u32, end: end as u32 },
+            message: message.clone(),
+        });
+    }
+}
+
 fn nested_under(
     outer: &crate::ident::ClassId,
     classes: Vec<crate::dialect::LibraryClass>,
@@ -12627,11 +12730,25 @@ pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
     Some(literal.then(|| name.to_string()))
 }
 
-/// `App::queue_adapter`: `config/application.rb`, then
-/// `config/environments/production.rb`, then `config/initializers`, by
-/// line scan as `read_forgery_verification_strategy` reads them. The
-/// last setting wins, and a last setting that isn't a literal leaves the
-/// adapter unknown (`None`) rather than falling back to an earlier one.
+/// Use the ordinary schema readers for selection too. The normal primary schema
+/// pass remains the owner of its facts and diagnostics, including survey gaps.
+fn primary_schema_has_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
+    let Some(path) = ["db/schema.rb", "db/structure.sql"].iter()
+        .map(|name| dir.join(name)).find(|path| vfs.exists(path)) else { return false };
+    let Ok(source) = vfs.read(&path) else { return false };
+    let marks = (super::survey::mark(), super::prism::mark());
+    let file = path.display().to_string();
+    let schema = if path.extension().is_some_and(|ext| ext == "rb") {
+        ingest_schema(&source, &file)
+    } else {
+        ingest_structure_sql(&source, &file)
+    };
+    let has_queue = schema.is_ok_and(|schema| schema.tables.contains_key(&Symbol::from("solid_queue_jobs")));
+    super::survey::rewind(marks.0);
+    super::prism::rewind(marks.1);
+    has_queue
+}
+
 /// Whether the app's own code, or a source gem's, writes `SolidQueue::`.
 fn names_solid_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path, source_gems: &[super::source_gems::SourceGem]) -> bool {
     let mut dirs: Vec<PathBuf> = ["app", "lib", "config"].iter().map(|d| dir.join(d)).collect();
@@ -12644,6 +12761,11 @@ fn names_solid_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path, source_gems: &[super:
     })
 }
 
+/// `App::queue_adapter`: `config/application.rb`, then
+/// `config/environments/production.rb`, then `config/initializers`, by
+/// line scan as `read_forgery_verification_strategy` reads them. The
+/// last setting wins, and a last setting that isn't a literal leaves the
+/// adapter unknown (`None`) rather than falling back to an earlier one.
 fn read_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
     let mut adapter: Option<String> = None;
     for sub in ["config/application.rb", "config/environments/production.rb", "config/initializers"] {

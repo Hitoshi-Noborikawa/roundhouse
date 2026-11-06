@@ -127,6 +127,34 @@ class PublicationBoundary(unittest.TestCase):
 
 
 class Routing(unittest.TestCase):
+    def test_class_object_return_analysis_runs_generated_sidecars_natively(self):
+        for path in ["src/analyze/mod.rs", "tests/class_object_return_rbs.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("class_object_return_rbs", plan["spinel_tests"])
+
+    def test_stream_error_sources_select_the_native_suite(self):
+        for path in [
+            "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
+            "runtime/spinel/tep/server_scheduled.rb", "runtime/spinel/tep/streamer.rb",
+            "tests/spinel_stream_error.rs", "tests/spinel_stream_error.rb",
+            "tests/spinel_stream_error_native.rb", "tests/spinel_stream_error_native_check.rb",
+            "tests/spinel_stream_error_puma.rb",
+            "tests/spinel_stream_error_io.rb", "tests/support/server_check_io.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel_stream_error", plan["spinel_tests"])
+
+    def test_module_self_value_analysis_runs_generated_sidecars_natively(self):
+        for path in ["src/analyze/mod.rs", "src/analyze/body/mod.rs", "tests/module_self_argument_rbs.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("module_self_argument_rbs", plan["spinel_tests"])
+
     def test_shared_controller_base_runs_every_extra_language(self):
         for suffix in ("rb", "rbs"):
             with self.subTest(suffix=suffix):
@@ -230,6 +258,18 @@ class Routing(unittest.TestCase):
             any("campfire" in job for job in plan["jobs"] if job not in ci.BASE)
         )
 
+    def test_solid_queue_schema_selection_keeps_its_ruby_execution_coverage(self):
+        for path in [
+            "src/ingest/app.rs",
+            "tests/solid_queue_schema.rs",
+            "tests/emit_and_run/solid_queue_worker.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit-build", plan["jobs"])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("compare-ruby", plan["jobs"])
+
     def test_sidekiq_live_runs_only_when_the_push_or_its_client_changes(self):
         for path in [
             "runtime/spinel/sidekiq_push.rb",
@@ -310,6 +350,23 @@ class Routing(unittest.TestCase):
         self.assertNotIn("compare-jruby", plan["jobs"])
         self.assertNotIn("build-wasm", plan["jobs"])
         self.assertIn("generated_columns_spinel", plan["spinel_tests"])
+
+    def test_did_you_mean_inputs_select_the_native_contract(self):
+        for path in [
+            "src/ingest/settled_conditionals.rs",
+            "src/lower/defined_const_fold.rs",
+            "src/analyze/body/const_resolution/mod.rs",
+            "src/analyze/body/mod.rs",
+            "src/analyze/registry/stdlib.rs",
+            "src/gems.rs",
+            "src/project.rs",
+            "tests/did_you_mean.rs",
+            "tests/stdlib_gem_fates.rs",
+            "tests/did_you_mean/suggest_message.rb",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("did_you_mean", ci.select([path])["spinel_tests"])
+        self.assertIn("did_you_mean", ci.select([], full=True)["spinel_tests"])
 
     def test_campfire_latest_is_not_planned(self):
         # Dropped: tip drift against once-campfire main is not a standing job.
@@ -664,6 +721,26 @@ class Routing(unittest.TestCase):
                     | ({"compare-jruby"} if binary in {"param_binds_values", "param_binds_cleanup"} else set()),
                 )
 
+    def test_object_blank_owns_its_runtime_lowering_and_native_suite(self):
+        for path in [
+            "runtime/ruby/active_support_ext.rb",
+            "src/lower/blank.rs",
+            "src/lower/mod.rs",
+            "src/lower/jbuilder_to_library/mod.rs",
+            "tests/object_blank.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("object_blank", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
+    def test_conditional_value_grouping_keeps_native_coverage(self):
+        for path in ["src/emit/ruby.rs", "src/emit/ruby/expr.rs", "tests/conditional_expression_parens.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("conditional_expression_parens", plan["spinel_tests"])
+
     def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
         for path in [
             "src/lower/arel/visitor.rs",
@@ -909,6 +986,18 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["spinel_tests"], [binary])
 
+    def test_sqlite_date_quote_inputs_select_the_native_regression(self):
+        for path in [
+            "runtime/spinel/sqlite_adapter.rb",
+            "tests/date_columns_spinel.rs",
+            "tests/date_columns_spinel.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("date_columns_spinel", plan["spinel_tests"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_interpreter_only_files_do_not_start_native_work(self):
         for path, targets in {
             "runtime/spinel/db_jruby.rb": ["jruby"],
@@ -1098,7 +1187,6 @@ class Routing(unittest.TestCase):
 
     def test_packaging_and_unknown_target_changes_keep_the_ruby_floor(self):
         for path in [
-            "src/project.rs",
             "src/emit/newlang.rs",
             "tests/framework_tests_newlang.rs",
             "scripts/ci-plan.py",
@@ -1142,7 +1230,7 @@ class Routing(unittest.TestCase):
             self.assertTrue(plan["extras_advisory"])
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope="unknown")["jobs"],
-            ci.BASE,
+            [*ci.BASE, "spinel-build", "spinel-framework", "spinel-toolchain", "spinel-compare"],
         )
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope="unknown")["smoke"],
@@ -1400,6 +1488,15 @@ class Results(unittest.TestCase):
         loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
         self.assertLess(max(loads) - min(loads), max(ci.SPINEL_TOOLCHAIN_SECONDS.values()))
 
+    def test_spinel_toolchain_shards_keep_a_shared_build_on_one_shard(self):
+        tests = [f"t{i:02}" for i in range(40)]
+        units = [["t01", "t07", "t13", "t19", "t25"], ["t02", "t30"], ["t03", "missing"]]
+        shards = [ci.spinel_toolchain_shard(tests, k, units=units) for k in range(ci.SPINEL_TOOLCHAIN_SHARDS)]
+        self.assertEqual(sorted(t for s in shards for t in s), sorted(tests))
+        for unit in units:
+            present = [t for t in unit if t in tests]
+            self.assertEqual(sum(all(t in s for t in present) for s in shards), 1, unit)
+
     def test_toolchain_shard_prints_nothing_for_an_empty_selection(self):
         out = subprocess.run(
             ["python3", spec.origin, "toolchain-shard", "--shard", "0"],
@@ -1433,6 +1530,55 @@ class Results(unittest.TestCase):
                     ci.spinel_toolchain_shard(tests, 0, timings=ci.load_spinel_timings(raw)),
                     ci.spinel_toolchain_shard(tests, 0),
                 )
+
+    def test_bundled_tests_recorded_with_their_compile_share_spread_across_shards(self):
+        # #1781: a test whose contract runs from a shared bundle finishes in well under a second, and
+        # recording only that put every bundled test on one shard, which then paid all their compiles.
+        heavy = {"heavy0": 600, "heavy1": 500, "heavy2": 400}
+        bundled = [f"bundled{i:02}" for i in range(16)]
+        share = 60
+        true_cost = {**heavy, **{t: 1 + share for t in bundled}}
+        tests = sorted(true_cost)
+
+        def plan(recorded):
+            timings = {"toolchain": {**heavy, **{t: recorded for t in bundled}}}
+            shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(4)]
+            self.assertEqual(sorted(t for s in shards for t in s), tests)
+            loads = [sum(true_cost[t] for t in s) for s in shards]
+            loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
+            return shards, loads
+
+        shards, loads = plan(recorded=1)
+        self.assertEqual(max(sum(t in bundled for t in s) for s in shards), len(bundled))
+        self.assertGreater(max(loads) - min(loads), len(bundled) * share // 2)
+        shards, loads = plan(recorded=1 + share)
+        self.assertLessEqual(max(sum(t in bundled for t in s) for s in shards), len(bundled) // 2)
+        self.assertLess(max(loads) - min(loads), max(heavy.values()))
+
+    def test_run_tests_charges_each_bundled_test_its_share_of_the_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "records.jsonl"
+            bundle = Path(tmp) / "bundle"
+            bundle.mkdir()
+            for raw, expected in [
+                ('{"a": 120.4, "c": 50, "b": "slow", "d": -1}', {"a": 120, "b": 1}),
+                ("not json", {"a": 1, "b": 1}),
+                ("[]", {"a": 1, "b": 1}),
+                (None, {"a": 1, "b": 1}),
+            ]:
+                with self.subTest(raw=raw):
+                    out.unlink(missing_ok=True)
+                    (bundle / "seconds.json").unlink(missing_ok=True)
+                    if raw is not None:
+                        (bundle / "seconds.json").write_text(raw)
+                    env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": str(out), "RH_SPINEL_BUNDLE": str(bundle)}
+                    subprocess.run(
+                        ["python3", spec.origin, "run-tests", "--kind", "toolchain", "--parallel", "2",
+                         "--", "true"],
+                        input="a\nb\n", capture_output=True, text=True, env=env, check=True,
+                    )
+                    records = [json.loads(line) for line in out.read_text().splitlines()]
+                    self.assertEqual({r["name"]: r["seconds"] for r in records}, expected)
 
     def test_merge_averages_passing_records_into_the_last_seconds(self):
         merged = ci.merge_timings(
@@ -1791,7 +1937,7 @@ class ProjectScope(unittest.TestCase):
         )
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope=None)["jobs"],
-            ci.BASE,
+            [*ci.BASE, "spinel-build", "spinel-framework", "spinel-toolchain", "spinel-compare"],
         )
 
     def test_builder_text_inside_strings_or_comments_is_not_a_rust_item(self):

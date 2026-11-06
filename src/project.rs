@@ -131,7 +131,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              Roda/Sequel; everything else is a `ROUNDHOUSE-TODO` comment \
              carrying the original Rails source for manual conversion.\n\n\
              ## Prerequisites\n\
-             - Ruby 3.4+ (with bundler)\n\
+             - Ruby 4.0.9+ (with bundler)\n\
              - SQLite (system library)\n\n\
              ## Install dependencies\n\
              ```sh\n\
@@ -159,7 +159,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              specimen — see `SPECIMEN.md` for the full architecture \
              document (layout, runtime, ruleset, limitations).\n\n\
              ## Prerequisites\n\
-             - Ruby 3.4+ (with bundler)\n\
+             - Ruby 4.0.9+ (with bundler)\n\
              - Node.js + npm — Tailwind/Turbo asset build (only when the \
              source app ships stylesheets/JS; a JS-less app skips this)\n\
              - SQLite (system library)\n\n\
@@ -553,6 +553,38 @@ fn controller_state_ivars(files: &mut [(String, String)]) -> Result<(), String> 
 /// (roundhouse#90). Integer-only apps ship the sidecar byte-for-byte.
 /// The three lines are matched exactly so a drift in the sidecar is a
 /// build error here, not a silent narrowing.
+/// `ActiveModel::UnknownAttributeError.new(self, key)` from a tableless
+/// model's attribute assignment (a gem's `include ActiveModel::Model`
+/// class, MissionControl::Jobs::RecurringTask): Rails takes any record,
+/// and the shared sidecar's `ActiveRecord::Base` refused it on Spinel.
+/// Widened in the Spinel tree alone; the strict targets keep the record
+/// type their own fields need.
+fn widen_unknown_attribute_record(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
+    if !app.models.iter().any(|m| m.parent.is_none()) {
+        return Ok(());
+    }
+    let Some((_, text)) = files.iter_mut().find(|(p, _)| p == "sig/runtime/active_record/errors.rbs") else {
+        return Ok(());
+    };
+    for (narrow, wide) in [
+        ("    def record: () -> ActiveRecord::Base
+", "    def record: () -> untyped
+"),
+        (
+            "    def initialize: (ActiveRecord::Base record, String attribute, ?String message) -> void
+",
+            "    def initialize: (untyped record, String attribute, ?String message) -> void
+",
+        ),
+    ] {
+        if !text.contains(narrow) {
+            return Err(format!("widen_unknown_attribute_record: errors.rbs no longer declares {narrow:?}"));
+        }
+        *text = text.replace(narrow, wide);
+    }
+    Ok(())
+}
+
 fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
     let string_key = |col: &crate::schema::Column| {
         !matches!(
@@ -748,17 +780,16 @@ pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<()
     resolve_runtime_sig_conflicts(files)
 }
 
-/// Two runtime RBS files can declare one method with different
-/// signatures: the shared runtime declares a class's methods for every
+/// Two runtime RBS files can declare one method or ivar with different
+/// types: the shared runtime declares a class's members for every
 /// target, and a ruby-family reopen or a Spinel-specific file re-declares
 /// the ones it overrides (`ActiveRecord::Base.where` as a `Relation` in
 /// connection.rbs, not an `Array[Base]`; `ActiveStorage::Service#upload`
-/// returning `nil` in Spinel's active_storage_disk.rbs). Spinel used to let
-/// whichever seed `readdir` visited later replace the other, which is
-/// filesystem order; since spinel e6b845d1f ("Two declarations of one
-/// method that disagree are an error") it refuses the build.
+/// returning `nil` in Spinel's active_storage_disk.rbs). Spinel refuses
+/// conflicting method declarations since e6b845d1f; ivar seeds still take
+/// whichever declaration `readdir` visits later.
 ///
-/// So the Spinel tree keeps one declaration per method, chosen the way the
+/// So the Spinel tree keeps one declaration per member, chosen the way the
 /// Ruby definitions override each other: a file from runtime/spinel beats
 /// one from runtime/ruby, and within one runtime a reopen beats the
 /// class's primary file (active_record/base.rbs for ActiveRecord::Base).
@@ -771,19 +802,19 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         span: std::ops::Range<usize>,
         sig: String,
     }
-    // (qualified class, receiver, method) -> declarations from every runtime .rbs.
-    let mut decls: HashMap<(String, &'static str, String), Vec<Decl>> = HashMap::default();
+    // (qualified class, ivar, receiver, name) -> declarations from every runtime .rbs.
+    let mut decls: HashMap<(String, bool, &'static str, String), Vec<Decl>> = HashMap::default();
     for (fi, (path, text)) in files.iter().enumerate() {
         if !path.ends_with(".rbs")
             || !(path.starts_with("runtime/") || path.starts_with("sig/runtime/"))
         {
             continue;
         }
-        let found = rbs_method_declarations(text)
+        let found = rbs_member_declarations(text)
             .map_err(|e| format!("resolve_runtime_sig_conflicts: {path}: {e}"))?;
         for d in found {
             decls
-                .entry((d.owner, d.receiver, d.name))
+                .entry((d.owner, d.ivar, d.receiver, d.name))
                 .or_default()
                 .push(Decl { file: fi, span: d.span, sig: d.sig });
         }
@@ -803,7 +834,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
     };
     let mut drop: HashMap<usize, Vec<std::ops::Range<usize>>> = HashMap::default();
     let mut undecided = Vec::new();
-    for ((class, receiver, method), ds) in &decls {
+    for ((class, ivar, receiver, member), ds) in &decls {
         let first = &ds[0].sig;
         if ds.iter().all(|d| &d.sig == first) {
             continue;
@@ -811,8 +842,9 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         let best = ds.iter().map(|d| rank(d.file, class)).max().unwrap_or(0);
         let winners: Vec<&Decl> = ds.iter().filter(|d| rank(d.file, class) == best).collect();
         if winners.iter().any(|d| d.sig != winners[0].sig) {
+            let separator = if *ivar { " " } else { "#" };
             undecided.push(format!(
-                "{class}#{receiver}{method}: {}",
+                "{class}{separator}{receiver}{member}: {}",
                 ds.iter()
                     .map(|d| format!("{} `{}`", files[d.file].0, d.sig))
                     .collect::<Vec<_>>()
@@ -827,7 +859,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
     if !undecided.is_empty() {
         undecided.sort();
         return Err(format!(
-            "resolve_runtime_sig_conflicts: runtime RBS declares a method twice and no file overrides the other:\n  {}",
+            "resolve_runtime_sig_conflicts: runtime RBS declares a member twice and no file overrides the other:\n  {}",
             undecided.join("\n  ")
         ));
     }
@@ -837,14 +869,13 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
     Ok(())
 }
 
-/// One method declaration in an RBS file, as the passes that drop one
-/// see it: `resolve_runtime_sig_conflicts`, and `emit::ruby::reopen` for
-/// a method an app's reopen redefines.
-pub(crate) struct RbsMethodDecl {
+/// One method or ivar declaration in an RBS file.
+pub(crate) struct RbsMemberDecl {
     /// The qualified class, module or interface that declares it.
     pub(crate) owner: String,
     /// `""`, `"self."` or `"self?."`.
     pub(crate) receiver: &'static str,
+    ivar: bool,
     pub(crate) name: String,
     /// What removing it takes: every overload and annotation, plus the
     /// indentation and line end when no neighbor shares that line.
@@ -854,10 +885,14 @@ pub(crate) struct RbsMethodDecl {
 }
 
 /// Every method declaration in `text`, nested owners included.
-pub(crate) fn rbs_method_declarations(text: &str) -> Result<Vec<RbsMethodDecl>, String> {
+pub(crate) fn rbs_method_declarations(text: &str) -> Result<Vec<RbsMemberDecl>, String> {
+    Ok(rbs_member_declarations(text)?.into_iter().filter(|decl| !decl.ivar).collect())
+}
+
+fn rbs_member_declarations(text: &str) -> Result<Vec<RbsMemberDecl>, String> {
     let signature = ruby_rbs::node::parse(text).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    collect_rbs_methods(signature.declarations().iter(), "", text, &mut out)?;
+    collect_rbs_members(signature.declarations().iter(), "", text, &mut out)?;
     Ok(out)
 }
 
@@ -903,11 +938,11 @@ fn signature_key(source: &str) -> String {
     tokens.join(" ")
 }
 
-fn collect_rbs_methods<'a>(
+fn collect_rbs_members<'a>(
     nodes: impl Iterator<Item = ruby_rbs::node::Node<'a>>,
     parent: &str,
     text: &str,
-    out: &mut Vec<RbsMethodDecl>,
+    out: &mut Vec<RbsMemberDecl>,
 ) -> Result<(), String> {
     use ruby_rbs::node::{MethodDefinitionKind, Node};
     for node in nodes {
@@ -923,7 +958,7 @@ fn collect_rbs_methods<'a>(
                 };
                 let loc = method.location();
                 let mut start = loc.start() as usize;
-                let mut end = loc.end() as usize;
+                let end = loc.end() as usize;
                 // ruby-rbs 0.3 leaves name_location unset for a backtick
                 // identifier. The name symbol's own location is populated
                 // for every spelling, including quoted names and operators.
@@ -942,26 +977,36 @@ fn collect_rbs_methods<'a>(
                 for annotation in method.annotations().iter() {
                     start = start.min(annotation.location().start() as usize);
                 }
-                // Remove indentation/newline only when the declaration owns
-                // that part of the line; same-line neighbors must survive.
-                let before = text.get(..start).ok_or_else(invalid_location)?;
-                let line_start = before.rfind('\n').map_or(0, |n| n + 1);
-                if text[line_start..start].trim().is_empty() {
-                    start = line_start;
-                }
-                let line_end = text[end..].find('\n').map_or(text.len(), |n| end + n + 1);
-                let suffix = text[end..line_end].trim();
-                if suffix.is_empty() || suffix.starts_with('#') {
-                    end = line_end;
-                }
                 // A quoted instance name can itself start with `self.`.
                 // Keep the receiver separate from the decoded name.
-                out.push(RbsMethodDecl {
+                out.push(RbsMemberDecl {
                     owner: parent.to_string(),
                     receiver: prefix,
+                    ivar: false,
                     name: method.name().as_str().to_string(),
-                    span: start..end,
+                    span: rbs_member_span(text, start..end)?,
                     sig,
+                });
+                continue;
+            }
+            Node::InstanceVariable(_) | Node::ClassInstanceVariable(_) => {
+                let (name, loc, prefix) = match node {
+                    Node::InstanceVariable(ivar) => (ivar.name(), ivar.location(), ""),
+                    Node::ClassInstanceVariable(ivar) => (ivar.name(), ivar.location(), "self."),
+                    _ => unreachable!(),
+                };
+                let start = loc.start() as usize;
+                let end = loc.end() as usize;
+                let sig_start = name.location().end() as usize;
+                let source = text.get(sig_start..end)
+                    .ok_or_else(|| format!("invalid source location for {parent} {prefix}{name}"))?;
+                out.push(RbsMemberDecl {
+                    owner: parent.to_string(),
+                    receiver: prefix,
+                    ivar: true,
+                    name: name.as_str().to_string(),
+                    span: rbs_member_span(text, start..end)?,
+                    sig: signature_key(source),
                 });
                 continue;
             }
@@ -977,9 +1022,28 @@ fn collect_rbs_methods<'a>(
             _ => None,
         }));
         parts.push(name.name().as_str().to_string());
-        collect_rbs_methods(members.iter(), &parts.join("::"), text, out)?;
+        collect_rbs_members(members.iter(), &parts.join("::"), text, out)?;
     }
     Ok(())
+}
+
+// Remove indentation/newline only when the declaration owns that part of
+// the line; same-line neighbors must survive.
+fn rbs_member_span(text: &str, span: std::ops::Range<usize>) -> Result<std::ops::Range<usize>, String> {
+    let mut start = span.start;
+    let mut end = span.end;
+    let before = text.get(..start).ok_or("invalid RBS member start")?;
+    let after = text.get(end..).ok_or("invalid RBS member end")?;
+    let line_start = before.rfind('\n').map_or(0, |n| n + 1);
+    if text[line_start..start].trim().is_empty() {
+        start = line_start;
+    }
+    let line_end = after.find('\n').map_or(text.len(), |n| end + n + 1);
+    let suffix = text[end..line_end].trim();
+    if suffix.is_empty() || suffix.starts_with('#') {
+        end = line_end;
+    }
+    Ok(start..end)
 }
 
 /// `text` without `spans`, overlapping ones included.
@@ -1280,6 +1344,63 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
         }
     }
     true
+}
+
+/// Rust re-exports each model from `src/models/mod.rs` by its struct name
+/// (the last segment of the class name) from a module named by its
+/// flattened stem (`Admin::Note` → `admin_note::Note`). The synthesized
+/// `<Model>Row` and `<Resource>Params` classes are declared there too.
+/// Two of them with one struct name (`Note` and `Admin::Note`, or
+/// `Admin::ArticleRow` and `Article`'s row `ArticleRow`) or one stem
+/// (`AdminNote` and `Admin::Note`) would be declared twice; so would a
+/// model and a synthesized class of the same name (a model `ArticleRow`
+/// and `Article`'s row), whose one file keeps only the last written.
+/// Refused, naming both, rather than renamed. An `Err`, so a caller with
+/// no diagnostic scope (`build_archives`) stops too.
+fn reject_rust_model_name_collisions(app: &App, target: BuildTarget) -> Result<(), String> {
+    if target != BuildTarget::Rust {
+        return Ok(());
+    }
+    // (class name, the span to report it at, what declares it), models first.
+    let mut names: Vec<(String, crate::span::Span, String)> = app
+        .models
+        .iter()
+        .map(|m| (m.name.0.as_str().to_string(), m.parent_span, "the model".to_string()))
+        .collect();
+    for model in app.models.iter().filter(|m| app.schema.tables.contains_key(&m.table.0)) {
+        let row = crate::lower::model_to_library::row::row_class_id(&model.name);
+        names.push((row.0.as_str().to_string(), model.parent_span, format!("`{}`'s row", model.name.0.as_str())));
+    }
+    for spec in crate::lower::controller_to_library::params::collect_specs(&app.controllers).iter() {
+        names.push((spec.class_id.0.as_str().to_string(), spec.span, "the params class".to_string()));
+    }
+    let mut seen: Vec<(String, String, &str, crate::span::Span, &str)> = Vec::new();
+    let mut messages: Vec<String> = Vec::new();
+    for (name, span, origin) in &names {
+        let stem = crate::emit::rust::rust_model_stem(name);
+        let strukt = crate::emit::rust::rust_struct_name(name).to_string();
+        if let Some((_, _, other, other_span, other_origin)) = seen
+            .iter()
+            .find(|(s, n, o, _, oo)| (*o != name.as_str() || *oo != origin.as_str()) && (*s == stem || *n == strukt))
+        {
+            let span = if span.is_synthetic() { *other_span } else { *span };
+            let pair = if *other == name.as_str() {
+                format!("`{name}` ({other_origin}) and `{name}` ({origin})")
+            } else {
+                format!("`{other}` and `{name}`")
+            };
+            let diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "model name",
+                format!("{pair} would both be declared as `src/models/{stem}.rs` or as struct `{strukt}`"),
+            );
+            messages.push(diagnostic.message.clone());
+            emit::diagnostics::push(diagnostic);
+        }
+        seen.push((stem, strukt, name.as_str(), *span, origin.as_str()));
+    }
+    if messages.is_empty() { Ok(()) } else { Err(messages.join("\n")) }
 }
 
 /// Roda converts views from their ERB, and its translator writes plain
@@ -1708,6 +1829,7 @@ fn inject_date_package_into_boot(boot: &mut String) -> Result<(), String> {
         "# Date package — only when the app uses Date or DateTime.\n",
         "require \"date\"\n",
         "require_relative \"runtime/active_support_date_parsing\"\n",
+        "require_relative \"runtime/active_support_date_calendar\"\n",
         "require_relative \"runtime/active_record_date_serialization\"\n",
     );
     if boot.contains("require_relative \"runtime/active_support_date_parsing\"") {
@@ -1735,6 +1857,7 @@ fn inject_cruby_date_calendar_helpers(boot: &mut String) -> Result<(), String> {
     let inject = concat!(
         "# Date calendar helpers — shared with Spinel (invariant 2).\n",
         "require_relative \"runtime/active_support_date_parsing\"\n",
+        "require_relative \"runtime/active_support_date_calendar\"\n",
     );
     if boot.contains("require_relative \"runtime/active_support_date_parsing\"") {
         return Ok(());
@@ -1817,6 +1940,26 @@ fn reject_file_blob_fixtures(app: &App, target: BuildTarget) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+/// A file of top-level constants with no class or module
+/// (`LibraryClassOrigin::FileConstants`) is written as those constants,
+/// which only the CRuby and JRuby trees do; another target would have
+/// to invent a class for it.
+fn refuse_file_constants(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Futamura) {
+        return Ok(());
+    }
+    let Some(holder) = app.library_classes.iter().find(|lc| lc.is_file_constants()) else {
+        return Ok(());
+    };
+    let span = holder.constants.first().map(|(_, value)| value.span).unwrap_or_default();
+    let message = format!(
+        "{} is a file of top-level constants with no class or module, which this target has no representation for; use Ruby or JRuby",
+        holder.name.0.as_str()
+    );
+    emit::diagnostics::report_unsupported(span, target.as_str(), "file constants", &message);
+    Err(format!("{}: {message}", target.as_str()))
 }
 
 /// Keep admitted Data factories outside unverified target emitters.
@@ -3244,14 +3387,6 @@ fn target_files_inner(
         }
         None => app,
     };
-    let with_where_bounds;
-    let app = match crate::lower::where_bounds::lower_for_target(app, target) {
-        Some(lowered) => {
-            with_where_bounds = lowered;
-            &with_where_bounds
-        }
-        None => app,
-    };
     let with_eager_loads;
     let app = match crate::lower::eager_load::lower_for_target(app, target) {
         Some(lowered) => {
@@ -3306,9 +3441,11 @@ fn target_files_inner(
     reject_unsupported_pattern_matches(app, target)?;
     reject_file_blob_fixtures(app, target)?;
     reject_unsupported_data_factories(app, target)?;
+    refuse_file_constants(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    reject_rust_model_name_collisions(app, target)?;
     report_datetime_local_reads(app, target);
     report_roda_form_fields(app, target);
     report_tzinfo_reads(app, target);
@@ -5359,24 +5496,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         .iter()
         .filter_map(|(p, _)| p.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")).map(str::to_string))
         .collect();
-    // `require "x"` from a gem file: the file of that feature under the
-    // requiring gem's lib/, then any gem's.
-    let resolve = |from: &str, feature: &str, relative: bool| -> Option<String> {
-        let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
-        if relative {
-            let dir = std::path::Path::new(from).parent()?;
-            return Some(normalize_source(&dir.join(&file).display().to_string()));
-        }
-        let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
-        let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
-        if let Some(own) = own.filter(|p| known.contains(p)) {
-            return Some(own);
-        }
-        let suffix = format!("/lib/{file}");
-        let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
-        found.sort();
-        found.first().map(|p| p.to_string())
-    };
+    let resolve = |from: &str, feature: &str, relative: bool| resolve_gem_require(&known, from, feature, relative);
     let site = |span: crate::span::Span| -> String {
         let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) else {
             return "(unknown)".to_string();
@@ -5787,6 +5907,76 @@ fn program_steps<'a>(items: &'a [crate::app::ProgramItem], depth: usize, out: &m
             other => out.push((depth, ProgramStep::Item(other))),
         }
     }
+}
+
+/// `require "x"` from a gem file: the file of that feature under the
+/// requiring gem's lib/, then any gem's.
+fn resolve_gem_require(known: &crate::det::HashSet<String>, from: &str, feature: &str, relative: bool) -> Option<String> {
+    let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
+    if relative {
+        let dir = std::path::Path::new(from).parent()?;
+        return Some(normalize_source(&dir.join(&file).display().to_string()));
+    }
+    let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
+    let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
+    if let Some(own) = own.filter(|p| known.contains(p)) {
+        return Some(own);
+    }
+    let suffix = format!("/lib/{file}");
+    let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
+    found.sort();
+    found.first().map(|p| p.to_string())
+}
+
+/// The model-tree anchors (`models/x`) of the classes the gem programs
+/// declare, in the order Ruby loads them: each boot gem entry as Bundler
+/// requires it, a required file's declarations ahead of the lines after
+/// its `require`. Both branches of a file-level `if` count; an autoload
+/// loads on first read, so it orders nothing.
+fn gem_declaration_order(app: &App) -> Vec<String> {
+    let programs: crate::det::HashMap<String, &crate::app::FileProgram> =
+        app.file_programs.iter().map(|p| (normalize_source(&p.source), p)).collect();
+    if programs.is_empty() {
+        return Vec::new();
+    }
+    let known: crate::det::HashSet<String> = app.sources.iter().map(|f| normalize_source(&f.path)).collect();
+    fn walk(
+        source: &str,
+        programs: &crate::det::HashMap<String, &crate::app::FileProgram>,
+        known: &crate::det::HashSet<String>,
+        app: &App,
+        seen: &mut crate::det::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if !seen.insert(source.to_string()) {
+            return;
+        }
+        let Some(program) = programs.get(source) else { return };
+        for item in all_program_items(&program.items) {
+            match item {
+                crate::app::ProgramItem::Require { feature, relative, .. } => {
+                    if let Some(target) = resolve_gem_require(known, source, feature, *relative) {
+                        walk(&target, programs, known, app, seen, out);
+                    }
+                }
+                crate::app::ProgramItem::Declared(names) => {
+                    for name in names {
+                        let anchor = crate::emit::ruby::library_file_anchor(name.0.as_str(), app);
+                        if !out.contains(&anchor) {
+                            out.push(anchor);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seen = Default::default();
+    let mut out = Vec::new();
+    for entry in &app.boot_gem_entries {
+        walk(&normalize_source(entry), &programs, &known, app, &mut seen, &mut out);
+    }
+    out
 }
 
 /// Every item of a program, those in its branches too.
@@ -7074,7 +7264,13 @@ fn apply_job_registry_locate(files: &mut [(String, String)], app: &App) {
         return;
     }
     let mut generated = format!("{HEAD}  def self.locate(model_name, id)\n    case model_name\n");
-    for model in app.models.iter().filter(|m| !crate::lower::model_to_library::markers::is_abstract_class(m)) {
+    // Not a model with neither a table nor its own `self.find` (MissionControl::Jobs::RecurringTask): Rails' locator raises for it too.
+    let finds = |m: &crate::dialect::Model| {
+        !m.attributes.fields.is_empty()
+            || m.body.iter().any(|item| matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+                if method.name.as_str() == "find" && method.receiver == crate::dialect::MethodReceiver::Class))
+    };
+    for model in app.models.iter().filter(|m| finds(m) && !crate::lower::model_to_library::markers::is_abstract_class(m)) {
         let name = model.name.0.as_str();
         generated.push_str(&format!(
             "    when \"{name}\"\n      {name}.find(GlobalID::Locator.cast_id(id))\n"
@@ -7501,7 +7697,7 @@ const SPINEL_LACKS: &[&str] = &[
 fn apply_app_requires(files: &mut [(String, String)], app: &App, target: RequireTarget) {
     let provided_by_tree = |lib: &str| {
         let require_line = format!("require {lib:?}");
-        BUNDLED.iter().filter(|(_, feature)| *feature == lib).any(|(konst, _)| {
+        bundled_libraries().filter(|(konst, feature)| *feature == lib && !crate::gems::preloaded_constant(konst)).any(|(konst, _)| {
             files.iter().any(|(p, c)| {
                 p.ends_with(".rb") && defines_constant(c, konst) && !requires_feature(c, &require_line)
             })
@@ -7823,7 +8019,7 @@ fn apply_route_helpers_demand(files: &mut Vec<(String, String)>) {
     ));
 }
 
-fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
+fn apply_models_aggregator(files: &mut Vec<(String, String)>, app: &App) {
     use std::fmt::Write;
 
     let mut models: Vec<String> = files
@@ -7833,12 +8029,23 @@ fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
         .map(str::to_string)
         .collect();
     models.sort();
+    // Not alphabetical for a gem's files: a class body that runs one of its
+    // methods at load (et-orbi's `ZONES_OLSON = TZInfo::Timezone.all...`)
+    // needs what the gem's own requires loaded first, as Bundler loads it.
+    let gem_first: Vec<String> = gem_declaration_order(app)
+        .into_iter()
+        .map(|anchor| format!("app/{anchor}.rb"))
+        .filter(|path| models.contains(path))
+        .collect();
+    models.retain(|path| !gem_first.contains(path));
+    let models: Vec<String> = gem_first.into_iter().chain(models).collect();
 
     let mut body = String::from(
         "# Loads every model/support class under app/models/. Generated\n\
          # from the emitted tree (see apply_models_aggregator). Each file\n\
          # requires its own LOAD-time deps (superclass, includes, class-body\n\
-         # constants), so the order here is only for legibility; method-body\n\
+         # constants). A gem's files come first, in the order the gem's own\n\
+         # requires load them; the rest are alphabetical. Method-body\n\
          # references between these files rely on this aggregator having\n\
          # run by dispatch time.\n",
     );
@@ -8463,7 +8670,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "UNIXServer" | "UNIXSocket" | "Open3" | "Find")
         // The rexml gem on the ruby family, spinel's `packages/rexml`.
         || name == "REXML"
-        || name.starts_with("REXML::");
+        || name.starts_with("REXML::")
+        || crate::gems::preloaded_constant(name);
     if !bundled {
         return None;
     }
@@ -8520,6 +8728,8 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport", "error_template"),
     ("ActiveSupport", "errors_import"),
     ("ActiveSupport", "errors_merge"),
+    ("ActiveJob::Arguments", "serialize"),
+    ("ActiveJob::Arguments", "ruby2_keywords_hash"),
 ];
 
 /// Instance methods only the ruby family and spinel can answer: a model's
@@ -8627,6 +8837,49 @@ fn unrolled_define(app: &App, name: crate::span::Span) -> bool {
     app.models.iter().flat_map(|m| m.methods()).chain(app.library_classes.iter().flat_map(|lc| lc.methods.iter())).any(|m| m.name_span == name)
 }
 
+/// A call of `not_nil!` with no arguments, no block and no diagnostic
+/// already on it: its receiver, `None` for a call with none.
+fn not_nil_call(expr: &crate::expr::Expr) -> Option<Option<&crate::expr::Expr>> {
+    match &*expr.node {
+        crate::expr::ExprNode::Send { recv, method, args, block: None, .. }
+            if method.as_str() == "not_nil!"
+                && args.is_empty()
+                && crate::expr::ExprCold::diagnostic(&expr.cold).is_none() =>
+        {
+            Some(recv.as_ref())
+        }
+        _ => None,
+    }
+}
+
+/// type_toolkit's `not_nil!` is a Kernel/NilClass reopen only the CRuby
+/// overlay carries (`ruby_overlay/runtime/type_toolkit.rb`), so `target`
+/// refuses a call of it.
+fn refuse_not_nil(expr: &crate::expr::Expr, target: &str) {
+    emit::diagnostics::report_unsupported(
+        expr.span,
+        target,
+        "not_nil!",
+        format!("`not_nil!` is type_toolkit's Kernel/NilClass extension, which only the CRuby tree carries, not {target}"),
+    );
+}
+
+/// Refuse a typed `x.not_nil!`, unless `x` is an instance of a class that
+/// defines its own, which every tree carries; a class object does not
+/// answer an instance method. A union of such classes stays refused: the
+/// TypeScript emit reads a no-argument call on a union as a property. A
+/// call with no receiver is analysis's to refuse. The assertion ingest
+/// synthesizes for `#: as !nil` already carries its own refusal.
+fn report_not_nil(expr: &crate::expr::Expr, app: &App, target: &str) {
+    if let Some(Some(recv)) = not_nil_call(expr)
+        && !(recv.decisions & crate::expr::CLASS_OBJECT_VALUE == 0
+            && matches!(&recv.ty, Some(crate::ty::Ty::Class { id, .. })
+                if crate::analyze::source_instance_method(app, id, "not_nil!")))
+    {
+        refuse_not_nil(expr, target);
+    }
+}
+
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // Column readers are synthesized inside the emitter, after this walk,
     // so a Send match never sees them. The schema column is the fact.
@@ -8668,6 +8921,42 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             }
         }
     }
+    if target == BuildTarget::Roda {
+        // Roda copies model methods, plain action statements and views
+        // over verbatim but carries no CRuby overlay, so nothing in its
+        // tree defines `not_nil!` either. It runs no analysis, so no
+        // receiver is typed: only a call on `self` (or with no receiver)
+        // in an instance method of a model whose own body defines
+        // `not_nil!` is known to reach that one. Roda emits each model
+        // directly under `Sequel::Model`, without its ancestors, so an
+        // inherited definition is not in its tree.
+        fn not_nil_calls(expr: &crate::expr::Expr, owns: bool) {
+            if let Some(recv) = not_nil_call(expr)
+                && !(owns && recv.is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef)))
+            {
+                refuse_not_nil(expr, "roda");
+            }
+            expr.node.for_each_child(&mut |child| not_nil_calls(child, owns));
+        }
+        for model in &app.models {
+            let owns = model.methods().any(|method| {
+                method.name.as_str() == "not_nil!" && method.receiver == crate::dialect::MethodReceiver::Instance
+            });
+            for method in model.methods() {
+                let owns = owns && method.receiver == crate::dialect::MethodReceiver::Instance;
+                not_nil_calls(&method.body, owns);
+                for default in method.params.iter().filter_map(|param| param.default.as_ref()) {
+                    not_nil_calls(default, owns);
+                }
+            }
+        }
+        for action in app.controllers.iter().flat_map(|controller| controller.actions()) {
+            not_nil_calls(&action.body, false);
+        }
+        for view in &app.views {
+            not_nil_calls(&view.body, false);
+        }
+    }
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;
     }
@@ -8695,6 +8984,9 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        if target != "jruby" {
+            report_not_nil(expr, app, target);
+        }
         // Not the whole constant: spinel answers `Method` as a value, and refuses only a class test against it.
         if target == "spinel" {
             let names_method = |e: &crate::expr::Expr| matches!(&*e.node, crate::expr::ExprNode::Const { path }
@@ -9412,6 +9704,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // serialization.
     const DATE_PACKAGE_FILES: &[&str] = &[
         "runtime/active_support_date_parsing.rb",
+        "runtime/active_support_date_calendar.rb",
         "runtime/active_record_date_serialization.rb",
         "sig/runtime/active_support_date_parsing.rbs",
         "sig/runtime/active_record_date_serialization.rbs",
@@ -9744,6 +10037,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         }
     }
     widen_key_contract(app, &mut files)?;
+    widen_unknown_attribute_record(app, &mut files)?;
     controller_state_ivars(&mut files)?;
     // Relation Base→untyped rewrite is Spinel-only (see
     // `spinel_relation_model_handle` call sites). `ruby_family_runtime_files`
@@ -10060,7 +10354,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_job_registry(&mut files, app);
     apply_job_registry_locate(&mut files, app);
     apply_views_aggregator(&mut files);
-    apply_models_aggregator(&mut files);
+    apply_models_aggregator(&mut files, app);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
     apply_boot_program(&mut files, app);
@@ -11819,7 +12113,8 @@ fn names_constant(src: &str, konst: &str) -> bool {
                     && matches!(after, None | Some(b')' | b',' | b']')))
                     || (before.ends_with("#{") && after == Some(&b'}'))
             };
-            let tail_ok = value
+            let tail_ok = (crate::gems::PRELOADED.iter().any(|(_, namespace, _)| *namespace == konst)
+                && b.get(tail).is_none_or(|c| !ident(*c))) || value
                 || matches!(b.get(tail), Some(b'.' | b'[' | b'('))
                 || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'))
                 // Only right after the keyword or a rescue-list comma: `raise "Timeout waiting"` names no constant.
@@ -12094,6 +12389,10 @@ const BUNDLED: [(&str, &str); 30] = [
     ("Psych", "psych"),
 ];
 
+fn bundled_libraries() -> impl Iterator<Item = (&'static str, &'static str)> {
+    BUNDLED.into_iter().chain(crate::gems::PRELOADED.iter().map(|(feature, namespace, _)| (*namespace, *feature)))
+}
+
 /// Every gap in a tree, as `(file index, require line)`. One walk,
 /// read by both the pass that writes the requires and the gate that
 /// checks a tree for missing ones — a second copy is how the rule
@@ -12108,8 +12407,11 @@ const BUNDLED: [(&str, &str); 30] = [
 /// `require "stringio"` mask a missing one in `app/models/story.rb`.)
 fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
     let mut gaps = Vec::new();
-    for (konst, feature) in BUNDLED {
+    for (konst, feature) in bundled_libraries() {
         let require_line = format!("require {feature:?}");
+        // CRuby preloads these libraries, so an app's declaration reopens
+        // them. Load each package before that declaration on Spinel too.
+        let preloaded = crate::gems::preloaded_constant(konst);
         // The program defines the constant itself, so the bundled
         // library is not what the name refers to. A file that REQUIRES
         // the library and then opens the constant is not that: it is a
@@ -12117,14 +12419,14 @@ fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
         // stub table and the socket seam in front of spinel's
         // `packages/net`, keeping the package's classes), and every
         // other file naming the constant still needs the require.
-        if files.iter().any(|(p, c)| {
+        if !preloaded && files.iter().any(|(p, c)| {
             p.ends_with(".rb") && defines_constant(c, konst) && !requires_feature(c, &require_line)
         }) {
             continue;
         }
         for (i, (path, content)) in files.iter().enumerate() {
             if path.ends_with(".rb")
-                && names_constant(content, konst)
+                && (names_constant(content, konst) || (preloaded && defines_constant(content, konst)))
                 && !requires_feature(content, &require_line)
                 && !gaps.contains(&(i, require_line.clone()))
             {
@@ -12161,10 +12463,9 @@ pub fn missing_bundled_requires(files: &[(String, String)]) -> Vec<String> {
 /// **Not spinel-only, though it lived inside `spin_shape` until now.**
 /// The two CRuby autoloads are the ones a dev box hides: `Pathname()`
 /// (campfire's `app/helpers/cable_helper.rb` calls the Kernel
-/// conversion method) resolves bare on Ruby 4.0 and raises on 3.4, and
-/// 3.4 is what the scaffold README claims and what
-/// `campfire-conformance` pins — two test files died on a clean runner
-/// that passed on a laptop. The other eight raise on every CRuby, so
+/// conversion method) resolved bare on Ruby 4.0 and raised on 3.4, the minimum this was
+/// written against — two test files died on a clean runner that passed
+/// on a laptop. The other eight raise on every CRuby, so
 /// the ruby family needs this table at least as much as spinel does.
 ///
 /// The three conditions mirror spinel's own check: the constant is
@@ -13335,14 +13636,24 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
         // single-target driver, with the target's own pre-analysis
         // choices (`session::analyze_and_lower_for`). What it refused or
         // left behind is printed per target, as the CLI prints it.
+        // What `target_files`' own checks report (the `report_*` passes)
+        // is printed the same way: they push into a diagnostics scope,
+        // and without one each finding was dropped.
+        let emit_files = |target_app: &App| {
+            let (files, diags) = emit::diagnostics::scope(|| target_files(target_app, fixture, *target));
+            for d in diags {
+                eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
+            }
+            files
+        };
         let files = match (target, &analyzed) {
-            (BuildTarget::Futamura, Some(analyzed)) => target_files(analyzed, fixture, *target)?,
+            (BuildTarget::Futamura, Some(analyzed)) => emit_files(analyzed)?,
             _ => {
                 let mut target_app = app.clone();
                 for d in crate::session::analyze_and_lower_for(&mut target_app, *target) {
                     eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
                 }
-                target_files(&target_app, fixture, *target)?
+                emit_files(&target_app)?
             }
         };
         let name = target.as_str();
@@ -14538,6 +14849,38 @@ mod tests {
             assert!(files[0].1.contains("def untouched: () -> Integer"));
             ruby_rbs::node::parse(&files[0].1).expect("same-line neighbors survive");
         }
+    }
+
+    #[test]
+    fn spinel_runtime_sig_conflicts_prefer_overlay_ivars() {
+        for reverse in [false, true] {
+            let mut files = vec![
+                ("runtime/action_dispatch/flash.rbs".into(),
+                 "module ActionDispatch\n  class Flash\n    @notice: String?\n    @untouched: Integer\n    self.@notice: String\n    def notice: () -> String?\n  end\nend\n".into()),
+                ("runtime/flash_any_key.rbs".into(),
+                 "class ::ActionDispatch::Flash\n  @notice: untyped\nend\n".into()),
+            ];
+            if reverse {
+                files.reverse();
+            }
+            resolve_runtime_sig_conflicts(&mut files).unwrap();
+            let primary = &files.iter().find(|(p, _)| p == "runtime/action_dispatch/flash.rbs").unwrap().1;
+            assert!(!primary.contains("@notice: String?"), "{primary}");
+            assert!(primary.contains("@untouched: Integer"));
+            assert!(primary.contains("self.@notice: String"));
+            assert!(primary.contains("def notice: () -> String?"));
+            for (_, text) in &files {
+                ruby_rbs::node::parse(text).expect("resolved ivars parse");
+            }
+        }
+        let mut ambiguous = vec![
+            ("runtime/action_dispatch/flash.rbs".into(),
+             "class ActionDispatch::Flash\n  @notice: String?\nend\n".into()),
+            ("sig/runtime/action_dispatch/flash.rbs".into(),
+             "class ActionDispatch::Flash\n  @notice: untyped\nend\n".into()),
+        ];
+        let error = resolve_runtime_sig_conflicts(&mut ambiguous).unwrap_err();
+        assert!(error.contains("ActionDispatch::Flash @notice"), "{error}");
     }
 
     #[test]

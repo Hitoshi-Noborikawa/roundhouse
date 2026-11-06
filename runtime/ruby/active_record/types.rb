@@ -15,11 +15,10 @@ module ActiveRecord
         @json_coder = json_coder
       end
 
-      # Not ActiveSupport's encoder as Rails' coder: the text asked for is what RoundhouseJsonColumn.dump stores here.
       def serialize(value)
         return value unless @json_coder
         return nil if value.nil?
-        ::JSON.generate(value)
+        ActiveSupport::JSON.encode_without_escape(value)
       end
     end
 
