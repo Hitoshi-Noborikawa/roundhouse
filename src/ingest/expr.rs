@@ -30,6 +30,18 @@ pub(super) fn with_anonymous_rest<T>(name: Option<Symbol>, f: impl FnOnce() -> T
     out
 }
 
+thread_local! {
+    static BLOCK_PARAM: std::cell::RefCell<Option<Symbol>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Ingests a `def` body whose `&name` parameter is `name`: a block handed on from it is the block the method was given.
+pub(super) fn with_block_param<T>(name: Option<Symbol>, f: impl FnOnce() -> T) -> T {
+    let saved = BLOCK_PARAM.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), name));
+    let out = f();
+    BLOCK_PARAM.with(|slot| *slot.borrow_mut() = saved);
+    out
+}
+
 use crate::ingest::prism_api::PrismLocation;
 pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Survey-mode gate: when active, intercept Err returns and
@@ -1198,8 +1210,15 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             }
             if let Some(body) = writing_connection_block(&c) {
                 return match body {
-                    Some(body) => ingest_expr(&body, file),
-                    None => Ok(Expr::new(span, ExprNode::Lit { value: Literal::Nil })),
+                    WritingBlock::Body(Some(body)) => ingest_expr(&body, file),
+                    WritingBlock::Body(None) => Ok(Expr::new(span, ExprNode::Lit { value: Literal::Nil })),
+                    WritingBlock::Forwarded(name) => Ok(Expr::new(span, ExprNode::Send {
+                        recv: Some(Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name })),
+                        method: Symbol::from("call"),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    })),
                 };
             }
             let args: Vec<Expr> = if let Some(a) = c.arguments() {
@@ -1814,7 +1833,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let extra_params = block_extra_params(l.parameters(), file)?;
             let params = block_param_names(l.parameters());
             let mut rest_param = lambda_rest_param(l.parameters());
-            let body = ingest_block_body(|| l.parameters(), l.body(), &mut rest_param, file)?;
+            let body = unless_shadowed(l.parameters(), || ingest_block_body(|| l.parameters(), l.body(), &mut rest_param, file))?;
             // `->(x) { body }` literals always use brace form (Prism's
             // opening_loc is `{`); `->(x) do body end` exists but isn't
             // idiomatic and doesn't appear in any fixture yet.
@@ -3765,7 +3784,7 @@ fn ingest_call_block(
                 {
                     if let Some(blk) = call.block() {
                         if let Some(b) = blk.as_block_node() {
-                            return Ok(Some(ingest_block_node_as_lambda(&b, file)?));
+                            return Ok(Some(ingest_block_node_as_lambda(&b, file, false)?));
                         }
                     }
                 }
@@ -3780,7 +3799,7 @@ fn ingest_call_block(
                 let extra_params = block_extra_params(lam.parameters(), file)?;
                 let params = block_param_names(lam.parameters());
                 let mut rest_param = lambda_rest_param(lam.parameters());
-                let body = ingest_block_body(|| lam.parameters(), lam.body(), &mut rest_param, file)?;
+                let body = unless_shadowed(lam.parameters(), || ingest_block_body(|| lam.parameters(), lam.body(), &mut rest_param, file))?;
                 let block_style = block_style_from_opening(lam.opening_loc().as_slice());
                 return Ok(Some(Expr::new(
                     Span::synthetic(),
@@ -3831,7 +3850,9 @@ fn ingest_call_block(
             message: "scoped find-or-create cannot be lowered safely: block locals and optional, post, keyword, block or anonymous-rest parameters are not represented in initialization-block IR".into(),
         });
     }
-    Ok(Some(ingest_block_node_as_lambda(&b, file)?))
+    // `define_method(name) { |*args, &block| … }`: the block becomes a method's own block parameter, which a `def` carries.
+    let keeps_block = matches!(enclosing_method, "define_method" | "define_singleton_method");
+    Ok(Some(ingest_block_node_as_lambda(&b, file, keeps_block)?))
 }
 
 /// Ingest a literal block's params/body into a `Lambda` `Expr`. Shared
@@ -3839,17 +3860,66 @@ fn ingest_call_block(
 /// `&proc { ... }`/`&lambda { ... }` block-argument desugar, which
 /// hands this the same `BlockNode` shape one level deeper (inside the
 /// `proc`/`lambda` call's own block).
-fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> IngestResult<Expr> {
-    refuse_block_capture(b.parameters(), file)?;
+fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str, keeps_block: bool) -> IngestResult<Expr> {
+    let block_param = if keeps_block { named_block_param(b.parameters()) } else { None };
+    if block_param.is_none() {
+        refuse_block_capture(b.parameters(), file)?;
+    }
     let extra_params = block_extra_params(b.parameters(), file)?;
     let params = block_param_names(b.parameters());
     let mut rest_param = block_rest_param(b.parameters());
-    let body = ingest_block_body(|| b.parameters(), b.body(), &mut rest_param, file)?;
+    let body = unless_shadowed(b.parameters(), || ingest_block_body(|| b.parameters(), b.body(), &mut rest_param, file))?;
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { extra_params, rest_param, params, block_param: None, body, block_style },
+        ExprNode::Lambda { extra_params, rest_param, params, block_param, body, block_style },
     ))
+}
+
+/// Ingests a block or lambda body, outside the method's block when its parameters bind that name.
+// Not by the parsed parameter lists: a block-local (`|a; block|`) and a destructured one are in neither, and the written list names them all.
+fn unless_shadowed<T>(params_node: Option<Node<'_>>, f: impl FnOnce() -> T) -> T {
+    let text = params_node.map(|node| String::from_utf8_lossy(node.location().as_slice()).into_owned()).unwrap_or_default();
+    let shadows = BLOCK_PARAM.with(|slot| {
+        slot.borrow().as_ref().is_some_and(|name| text.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|word| word == name.as_str()))
+    });
+    if shadows { with_block_param(None, f) } else { f() }
+}
+
+/// The `&name` parameter a `def` is given, unless its body assigns the name: then `&name` may hand on another value.
+pub(super) fn def_block_param(name: Option<Symbol>, body: Option<&Node<'_>>) -> Option<Symbol> {
+    struct Writes<'n>(&'n str, bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Writes<'_> {
+        fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+            ruby_prism::visit_local_variable_write_node(self, node);
+        }
+        fn visit_local_variable_or_write_node(&mut self, node: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+            ruby_prism::visit_local_variable_or_write_node(self, node);
+        }
+        fn visit_local_variable_and_write_node(&mut self, node: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+            ruby_prism::visit_local_variable_and_write_node(self, node);
+        }
+        fn visit_local_variable_operator_write_node(&mut self, node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+            ruby_prism::visit_local_variable_operator_write_node(self, node);
+        }
+        fn visit_local_variable_target_node(&mut self, node: &ruby_prism::LocalVariableTargetNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+        }
+    }
+    let name = name?;
+    let Some(body) = body else { return Some(name) };
+    let mut writes = Writes(name.as_str(), false);
+    ruby_prism::Visit::visit(&mut writes, body);
+    (!writes.1).then_some(name)
+}
+
+fn named_block_param(params_node: Option<Node<'_>>) -> Option<Symbol> {
+    let block = params_node?.as_block_parameters_node()?.parameters()?.block()?;
+    block.as_block_parameter_node()?.name().map(|n| Symbol::from(constant_id_str(&n).as_ref()))
 }
 
 /// `method(:name)` / `recv.method(:name)` → `ExprNode::MethodRef`.
@@ -4834,7 +4904,14 @@ fn binary_string(s: &ruby_prism::StringNode<'_>, span: Span, file: &str) -> Inge
 /// unsupported `connected_to`.
 /// ponytail: a local first assigned in the block outlives it once inlined;
 /// a later bare call of that name would read it.
-fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option<Node<'pr>>> {
+/// A block handed on from a local (`connected_to(role: :writing, &block)`, doorkeeper's
+/// `with_primary_role`) is that block, called.
+enum WritingBlock<'pr> {
+    Body(Option<Node<'pr>>),
+    Forwarded(Symbol),
+}
+
+fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<WritingBlock<'pr>> {
     if constant_id_str(&c.name()) != "connected_to"
         || c.receiver().and_then(|r| super::util::constant_path_of(&r)).as_deref() != Some(&["ActiveRecord".to_string(), "Base".to_string()])
     {
@@ -4847,6 +4924,15 @@ fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option
     let assoc = element.as_assoc_node()?;
     if symbol_value(&assoc.key()).as_deref() != Some("role") || symbol_value(&assoc.value()).as_deref() != Some("writing") {
         return None;
+    }
+    if let Some(forwarded) = c.block()?.as_block_argument_node() {
+        let local = forwarded.expression()?.as_local_variable_read_node()?;
+        let name = Symbol::from(constant_id_str(&local.name()).as_ref());
+        // Not any local: `&callback` converts through `to_proc`, which only the method's own block needs no call for.
+        if BLOCK_PARAM.with(|slot| slot.borrow().as_ref() != Some(&name)) {
+            return None;
+        }
+        return Some(WritingBlock::Forwarded(name));
     }
     let block = c.block()?.as_block_node()?;
     if block.parameters().is_some() {
@@ -4878,7 +4964,7 @@ fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option
             return None;
         }
     }
-    Some(body)
+    Some(WritingBlock::Body(body))
 }
 
 fn wide_integer(value: &ruby_prism::Integer<'_>, span: Span) -> Expr {

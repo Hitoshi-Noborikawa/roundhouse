@@ -64,3 +64,32 @@ fn a_refusal_whose_reason_ends_in_a_newline_is_still_reported() {
     // A block scalar keeps its trailing newline, and so does the diagnostic.
     assert_refused(&refused_run("|\n      requires the Rails framework\n"));
 }
+
+// A script reports a failed check by raising, so exit status 0 alone would
+// also pass a script that stopped before its checks. The harness appends a
+// completion line and requires it.
+
+#[test]
+#[should_panic(expected = "without reaching the end of its script")]
+fn a_script_that_exits_before_its_checks_does_not_pass() {
+    app().run_ruby("exit 0\nraise \"the check that never ran\"").assert_passes();
+}
+
+#[test]
+#[should_panic(expected = "without reaching the end of its script")]
+fn a_script_that_returns_before_its_checks_does_not_pass() {
+    app().run_ruby("return\nraise \"the check that never ran\"").assert_passes();
+}
+
+#[test]
+fn a_script_that_stops_early_is_not_a_success_either() {
+    let run = app().run_ruby("exit 0");
+    assert!(!run.success, "a caller reading `success` gets the same verdict as `assert_passes`");
+}
+
+#[test]
+fn output_after_the_script_ends_is_kept_and_the_completion_line_is_not() {
+    let run = app().run_ruby("at_exit { print \"after\" }\nputs \"during\"");
+    run.assert_passes();
+    assert_eq!(run.stdout, "during\nafter");
+}

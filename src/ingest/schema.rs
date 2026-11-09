@@ -13,6 +13,8 @@
 //! materialized into explicit datetime columns.
 
 use ruby_prism::Node;
+use sha2::{Digest, Sha256};
+use super::prism_api::PrismLocation;
 
 use indexmap::IndexMap;
 
@@ -97,6 +99,9 @@ pub fn ingest_schema_with_generated_expression_dialect(
                     .map(|a| a.arguments().iter().collect())
                     .unwrap_or_default();
                 apply_add_foreign_key(&args, &mut schema);
+            }
+            verb @ ("add_check_constraint" | "add_index") => {
+                if let Err(gap) = apply_table_verb(verb, &call_arguments(call), file, &mut schema, dialect) { gaps.push(gap); }
             }
             _ => {}
         }
@@ -465,17 +470,19 @@ fn apply_table_verb(
     // `remove_column(:idx, :"col_#{n}")` in an `each` loop
     // kept the dropped columns.
     let named = match verb {
-        "drop_table" | "add_timestamps" | "remove_timestamps" => 1,
+        "drop_table" | "add_timestamps" | "remove_timestamps"
+        | "add_index" | "add_check_constraint" | "remove_check_constraint" => 1,
         "rename_table" | "remove_column" | "change_column_null" | "change_column_default"
         | "add_reference" | "add_belongs_to" | "remove_reference" | "remove_belongs_to" => 2,
         "add_column" | "change_column" | "rename_column" | "rename_index" => 3,
         _ => 0,
     };
     if let Some(i) = (0..named).find(|&i| arg_name(i).is_none()) {
+        let line = args.get(i).and_then(|n| super::sources::line_at(file, n.location().start_offset())).unwrap_or(1);
         return Err(IngestError::Unsupported {
             file: file.into(),
             message: format!(
-                "migration `{verb}` argument {} is not a literal name; the schema fold cannot apply it",
+                "line {line}: migration `{verb}` argument {} is not a literal name; the schema fold cannot apply it",
                 i + 1
             ),
         });
@@ -568,6 +575,16 @@ fn apply_table_verb(
             if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
                 let to_kwarg = kwarg_value(args.iter().skip(2), "to");
                 let value = to_kwarg.as_ref().or_else(|| args.get(2));
+                let expression = value.filter(|n| sql_default_candidate(n))
+                    .map(sql_default_expression).transpose().map_err(|message| IngestError::Unsupported { file: file.into(), message }).and_then(|expression| {
+                        if let Some(sql) = expression.as_deref() {
+                            if let Some(col) = schema.tables.get(&Symbol::from(t.as_str())).and_then(|table| table.columns.iter().find(|col| col.name.as_str() == c)) {
+                                validate_sql_default_type(sql, col.col_type == ColumnType::Boolean, !col.array && col.col_type.stores_sql_literal_default_as_text())
+                                    .map_err(|message| IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{c}: {message}") })?;
+                            }
+                        }
+                        Ok(expression)
+                    }).or_else(|gap| super::survey::continue_or_fail(gap).map(|()| None))?;
                 let default_for = |col: &Column| {
                     value.and_then(|value| {
                         if !col.array && matches!(col.col_type, ColumnType::Json | ColumnType::Jsonb) {
@@ -583,6 +600,7 @@ fn apply_table_verb(
                         for col in &mut candidate.columns {
                             if col.name.as_str() == c {
                                 col.default = default_for(col);
+                                col.default_expression = expression.clone();
                             }
                         }
                         validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
@@ -592,6 +610,7 @@ fn apply_table_verb(
                     for col in &mut table.columns {
                         if col.name.as_str() == c {
                             col.default = default_for(col);
+                            col.default_expression = expression.clone();
                         }
                     }
                 }
@@ -653,11 +672,21 @@ fn apply_table_verb(
             }
         }
         "add_index" => {
-            if let (Some(t), Some(columns)) = (arg_name(0), args.get(1).map(column_name_list)) {
-                if !columns.is_empty() {
+            if let (Some(t), Some(keys)) = (arg_name(0), args.get(1)) {
+                let (columns, expression) = index_keys(keys, file)?;
+                if expression.is_some() || !columns.is_empty() {
                     if let Some(table) = schema.tables.get_mut(&Symbol::from(t.clone())) {
-                        if columns.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
-                            table.indexes.push(build_index(&t, columns, args.iter().skip(2), file)?);
+                        if expression.is_some() || columns.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
+                            if expression.as_ref().is_some_and(|e| !crate::emit::shared::schema_sql::schema_expression_supported(e, Some(table), dialect)) {
+                                return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported index expression on {t}") });
+                            }
+                            let index = build_index(&t, columns, expression, args.iter().skip(2), file)?;
+                            if index.expression.is_some()
+                                && index.predicate.as_ref().is_some_and(|p| !crate::emit::shared::schema_sql::schema_expression_supported(p, Some(table), dialect)) {
+                                let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
+                                return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") });
+                            }
+                            table.indexes.push(index);
                         }
                     }
                 }
@@ -666,20 +695,27 @@ fn apply_table_verb(
         "remove_index" => {
             if let Some(t) = arg_name(0) {
                 // `remove_index :t, :col`, or the `column:` / `name:` options.
-                let mut columns = args.get(1).map(column_name_list).unwrap_or_default();
-                if columns.is_empty() {
-                    columns = kwarg_value(args.iter().skip(1), "column")
-                        .map(|v| column_name_list(&v))
-                        .unwrap_or_default();
+                let keys = args.get(1).filter(|n| n.as_keyword_hash_node().is_none());
+                let (mut columns, mut expression) = keys.map(|n| index_keys(n, file)).transpose()?.unwrap_or_default();
+                if columns.is_empty() && expression.is_none() {
+                    if let Some(value) = kwarg_value(args.iter().skip(1), "column") {
+                        (columns, expression) = index_keys(&value, file)?;
+                    }
+                }
+                if expression.is_some() && (has_column_option_splats(&args[1..])
+                    || kwarg_value(args.iter().skip(1), "name").is_some_and(|v| name_value(&v).is_none())) {
+                    let line = super::sources::line_at(file, args[1].location().start_offset()).unwrap_or(1);
+                    return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: expression index removal options must be literal") });
                 }
                 let by_name =
                     kwarg_value(args.iter().skip(1), "name").and_then(|v| string_value(&v).or_else(|| symbol_value(&v)));
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
                     table.indexes.retain(|idx| {
-                        let col_match = !columns.is_empty() && idx.columns == columns;
+                        let col_match = expression.as_ref().is_some_and(|e| idx.expression.as_ref() == Some(e))
+                            || expression.is_none() && !columns.is_empty() && idx.expression.is_none() && idx.columns == columns;
                         let name_match =
                             by_name.as_deref().is_some_and(|n| idx.name.as_str() == n);
-                        !(col_match || name_match)
+                        !(if expression.is_some() && by_name.is_some() { name_match } else { col_match || name_match })
                     });
                 }
             }
@@ -703,6 +739,28 @@ fn apply_table_verb(
         // ordinary integer column from `create_table`.
         "add_foreign_key" => apply_add_foreign_key(args, schema),
         "remove_foreign_key" => apply_remove_foreign_key(args, file, schema)?,
+        "add_check_constraint" | "remove_check_constraint" => {
+            if let Some(table) = arg_name(0).and_then(|n| schema.tables.get_mut(&Symbol::from(n))) {
+                if verb == "add_check_constraint" {
+                    let check = check_constraint(&args[1..], file, table.name.as_str())?;
+                    if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect) {
+                        return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) });
+                    }
+                    table.check_constraints.push(check);
+                } else {
+                    let name = kwarg_value(args.iter().skip(1), "name").map(|n| name_value(&n).ok_or_else(|| IngestError::Unsupported { file: file.into(), message: "CHECK name must be literal".into() })).transpose()?;
+                    let expression = args.get(1).and_then(string_value);
+                    if has_column_option_splats(&args[1..]) || name.is_none() && expression.is_none()
+                        || args.get(1).is_some_and(|n| n.as_keyword_hash_node().is_none() && n.as_nil_node().is_none() && string_value(n).is_none()) {
+                        return Err(IngestError::Unsupported { file: file.into(), message: "remove_check_constraint requires a literal name or expression".into() });
+                    }
+                    table.check_constraints.retain(|c| !match &name {
+                        Some(name) => c.name.as_ref() == Some(name),
+                        None => expression.as_ref().is_some_and(|e| &c.expression == e),
+                    });
+                }
+            }
+        }
         // Extensions don't affect column typing; skipped like before.
         "enable_extension" | "disable_extension" => {}
         // Anything else receiver-less is arbitrary migration Ruby
@@ -780,8 +838,16 @@ fn fold_column(
                 }
                 if !opts.default_given {
                     col.default = existing.default.clone();
+                    col.default_expression = existing.default_expression.clone();
                 }
                 col.primary_key = existing.primary_key;
+            }
+        }
+        if let Some(sql) = col.default_expression.as_deref() {
+            if let Err(message) = validate_sql_default_type(sql, col.col_type == ColumnType::Boolean, !col.array && col.col_type.stores_sql_literal_default_as_text()) {
+                super::survey::continue_or_fail(IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{}: {message}", col.name) })?;
+                col.default = None;
+                col.default_expression = None;
             }
         }
         col
@@ -1009,6 +1075,8 @@ fn apply_table_method<'pr>(
         "remove_timestamps" => delegate("remove_timestamps", schema),
         "foreign_key" => delegate("add_foreign_key", schema),
         "remove_foreign_key" => delegate("remove_foreign_key", schema),
+        "check_constraint" => delegate("add_check_constraint", schema),
+        "remove_check_constraint" => delegate("remove_check_constraint", schema),
         "column" => {
             delegate("add_column", schema)?;
             let args = call_arguments(inner);
@@ -1030,11 +1098,9 @@ fn apply_table_method<'pr>(
             }
             Ok(())
         }
-        // Questions about the table, and constraints the fold does not
-        // model (a constraint costs the DDL nothing).
+        // Questions about the table, and other unmodeled constraint kinds.
         "name" | "column_exists?" | "index_exists?" | "foreign_key_exists?"
-        | "check_constraint_exists?" | "check_constraint"
-        | "remove_check_constraint" | "validate_check_constraint" | "validate_constraint"
+        | "check_constraint_exists?" | "validate_check_constraint" | "validate_constraint"
         | "unique_constraint" | "remove_unique_constraint" | "exclusion_constraint"
         | "remove_exclusion_constraint" => Ok(()),
         // Everything else is a column type: `t.string :title, null:
@@ -1078,7 +1144,7 @@ fn add_column_index(
     if value.as_nil_node().is_some() || bool_value(&value) == Some(false) {
         return Ok(());
     }
-    let index = build_index(table, vec![Symbol::from(column)], std::iter::once(&value), file)?;
+    let index = build_index(table, vec![Symbol::from(column)], None, std::iter::once(&value), file)?;
     if let Some(table) = schema.tables.get_mut(&Symbol::from(table)) {
         if table.columns.iter().any(|col| col.name.as_str() == column) {
             table.indexes.push(index);
@@ -1098,6 +1164,11 @@ fn refuse_predicate_column(
     column: &str,
     file: &str,
 ) -> Result<(), IngestError> {
+    if table.check_constraints.iter().any(|c| predicate_names(&c.expression, column))
+        || table.indexes.iter().any(|i| i.expression.as_deref().is_some_and(|e| predicate_names(e, column)))
+    {
+        return Err(IngestError::Unsupported { file: file.into(), message: format!("migration `{verb}` on {}.{column} would change a CHECK or index expression; materialize db/schema.rb with Rails", table.name) });
+    }
     let Some(index) = table
         .indexes
         .iter()
@@ -1380,6 +1451,7 @@ fn column_name_list(node: &Node<'_>) -> Vec<Symbol> {
 fn build_index<'pr>(
     table_name: &str,
     columns: Vec<Symbol>,
+    expression: Option<String>,
     kwarg_nodes: impl Iterator<Item = &'pr Node<'pr>>,
     file: &str,
 ) -> IngestResult<Index> {
@@ -1397,26 +1469,62 @@ fn build_index<'pr>(
             continue;
         };
         for el in elements.iter() {
-            let Some(assoc) = el.as_assoc_node() else { continue };
+            let Some(assoc) = el.as_assoc_node() else {
+                return Err(IngestError::Unsupported { file: file.into(), message: format!("index options on {table_name} must be literal") });
+            };
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             let value = &assoc.value();
             match key.as_str() {
-                "name" => explicit_name = string_value(value),
-                "unique" => unique = bool_value(value).unwrap_or(false),
+                "name" => explicit_name = Some(name_value(value).ok_or_else(|| IngestError::Unsupported { file: file.into(), message: format!("index name on {table_name} must be literal") })?),
+                "unique" => unique = bool_value(value).ok_or_else(|| IngestError::Unsupported { file: file.into(), message: format!("index unique: on {table_name} must be literal") })?,
                 // `where: "(archived_at IS NULL)"`: a partial index. On
                 // a unique one, dropping it widened the constraint to
                 // every row.
-                "where" => predicate = string_value(value),
+                "where" => predicate = Some(string_value(value).ok_or_else(|| IngestError::Unsupported { file: file.into(), message: format!("index where: on {table_name} must be literal") })?),
                 "using" => using = Some(index_access_method(value, file, table_name)?),
                 _ => {}
             }
         }
     }
     let name = explicit_name.unwrap_or_else(|| {
-        let cols: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
-        format!("index_{}_on_{}", table_name, cols.join("_and_"))
+        let cols: Vec<&str> = expression.as_deref().map(|e| {
+            e.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|s| !s.is_empty()).collect()
+        }).unwrap_or_else(|| columns.iter().map(|c| c.as_str()).collect());
+        format!("index_{}_on_{}", table_name, cols.join(if expression.is_some() { "_" } else { "_and_" }))
     });
-    Ok(Index { name: Symbol::from(name), columns, unique, using, predicate })
+    Ok(Index { name: Symbol::from(name), columns, expression, unique, using, predicate })
+}
+
+fn index_keys(node: &Node<'_>, file: &str) -> IngestResult<(Vec<Symbol>, Option<String>)> {
+    if let Some(sql) = string_value(node) {
+        if sql.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_') {
+            return Ok((Vec::new(), Some(sql)));
+        }
+    }
+    let columns = column_name_list(node);
+    let expected = node.as_array_node().map(|a| a.elements().len()).unwrap_or(1);
+    if columns.is_empty() || columns.len() != expected || columns.iter().any(|c| c.as_str().is_empty()) {
+        return Err(IngestError::Unsupported { file: file.into(), message: "index keys must be literal columns or SQL".into() });
+    }
+    Ok((columns, None))
+}
+
+fn check_constraint(args: &[Node<'_>], file: &str, table: &str) -> IngestResult<crate::schema::CheckConstraint> {
+    let gap = || IngestError::Unsupported { file: file.into(), message: "CHECK requires literal SQL and literal options".into() };
+    let expression = args.first().and_then(string_value).filter(|s| !s.trim().is_empty()).ok_or_else(gap)?;
+    if has_column_option_splats(&args[1..]) || args[1..].iter().any(|n| n.as_keyword_hash_node().is_none()) { return Err(gap()); }
+    for options in &args[1..] {
+        for element in options.as_keyword_hash_node().unwrap().elements().iter() {
+            let key = element.as_assoc_node().and_then(|a| symbol_value(&a.key()));
+            if !matches!(key.as_deref(), Some("name" | "validate")) { return Err(gap()); }
+        }
+    }
+    let name = kwarg_value(args.iter().skip(1), "name").map(|n| name_value(&n).ok_or_else(gap)).transpose()?.unwrap_or_else(|| {
+        let digest = format!("{:x}", Sha256::digest(format!("{table}_{expression}_chk")));
+        format!("chk_rails_{}", &digest[..10])
+    });
+    if kwarg_value(args.iter().skip(1), "validate").is_some_and(|v| bool_value(&v) != Some(true)) { return Err(gap()); }
+    Ok(crate::schema::CheckConstraint { name: Some(name), expression })
 }
 
 /// Rails interpolates `using:` as an unquoted SQL identifier. Fold its
@@ -1523,6 +1631,8 @@ fn table_from_create_table(
         && kwarg_value(table_options.iter(), "primary_key").is_none();
     let mut columns = Vec::new();
     let mut indexes: Vec<Index> = Vec::new();
+    let mut check_constraints = Vec::new();
+    let mut sql_locations = Vec::new();
     if has_id {
         let id_limit = hash_limit.unwrap_or(outer_limit);
         // `serial` and `bigserial` are the integer keys Postgres fills
@@ -1553,6 +1663,8 @@ fn table_from_create_table(
                 col_type: ColumnType::BigInt,
                 nullable: false,
                 default: None,
+                default_expression: None,
+                legacy_default_persistence: false,
                 primary_key: true,
                 generated: None,
                 generated_text_compatible: None,
@@ -1584,6 +1696,13 @@ fn table_from_create_table(
                 for stmt in flatten_statements(body) {
                     if let Some(call) = stmt.as_call_node() {
                         let call_name = constant_id_str(&call.name()).to_string();
+                        if matches!(call_name.as_str(), "index" | "check_constraint") {
+                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, n.location().start_offset())))
+                                .filter(|(s, _)| call_name == "check_constraint" || s.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_'))
+                            {
+                                sql_locations.push(value);
+                            }
+                        }
                         if call_name != "index" {
                             let column_args: Vec<_> = call.arguments()
                                 .map(|args| args.arguments().iter().collect()).unwrap_or_default();
@@ -1598,8 +1717,20 @@ fn table_from_create_table(
                         }
                         if call_name == "index" {
                             match index_from_call(&call, &table_name, file) {
-                                Ok(Some(idx)) => indexes.push(idx),
+                                Ok(Some(idx)) => {
+                                    if idx.expression.is_some() {
+                                        if let Some(value) = kwarg_value(call_arguments(&call).iter().skip(1), "where") {
+                                            if let Some(sql) = string_value(&value) { sql_locations.push((sql, value.location().start_offset())); }
+                                        }
+                                    }
+                                    indexes.push(idx);
+                                }
                                 Ok(None) => {}
+                                Err(gap) => gaps.push(gap),
+                            }
+                        } else if call_name == "check_constraint" {
+                            match check_constraint(&call_arguments(&call), file, &table_name) {
+                                Ok(check) => check_constraints.push(check),
                                 Err(gap) => gaps.push(gap),
                             }
                         } else if call_name == "timestamps" {
@@ -1628,6 +1759,7 @@ fn table_from_create_table(
         columns,
         indexes,
         foreign_keys: vec![],
+        check_constraints,
         virtual_module: None,
         known_keyless,
         primary_key_columns: Vec::new(),
@@ -1646,6 +1778,15 @@ fn table_from_create_table(
         table.indexes.retain(|idx| {
             idx.columns.iter().all(|name| table.columns.iter().any(|col| col.name == *name))
         });
+    }
+    for (expression, offset) in sql_locations {
+        if !crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect)
+        {
+            let line = super::sources::line_at(file, offset).unwrap_or(1);
+            gaps.push(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported schema expression on {table_name}: {expression}") });
+            table.check_constraints.retain(|c| c.expression != expression);
+            table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str()));
+        }
     }
     Some((Symbol::from(table_name), table))
 }
@@ -1680,6 +1821,8 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             col_type: ColumnType::Text,
             nullable: true,
             default: None,
+            default_expression: None,
+            legacy_default_persistence: false,
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
@@ -1695,6 +1838,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             columns,
             indexes: vec![],
             foreign_keys: vec![],
+            check_constraints: Vec::new(),
             virtual_module: Some(crate::schema::VirtualModule { module, args: module_args }),
             known_keyless: false,
             primary_key_columns: Vec::new(),
@@ -1738,6 +1882,7 @@ fn view_from_create_view(
             columns,
             indexes: vec![],
             foreign_keys: vec![],
+            check_constraints: Vec::new(),
             virtual_module: None,
             known_keyless: false,
             primary_key_columns: Vec::new(),
@@ -1790,6 +1935,8 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
             col_type: resolved.map(|(col_type, _)| col_type).unwrap_or_else(|| view_column_type(alias)),
             nullable: true,
             default: None,
+            default_expression: None,
+            legacy_default_persistence: false,
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
@@ -1865,6 +2012,8 @@ fn timestamp_columns_with(nullable: bool) -> [Column; 2] {
         col_type: ColumnType::DateTime,
         nullable,
         default: None,
+        default_expression: None,
+        legacy_default_persistence: false,
         primary_key: false,
         generated: None,
         generated_text_compatible: None,
@@ -1884,6 +2033,8 @@ fn reference_column(name: &str) -> Column {
         col_type: ColumnType::Reference { table: TableRef(Symbol::from(name)) },
         nullable: true,
         default: None,
+        default_expression: None,
+        legacy_default_persistence: false,
         primary_key: false,
         generated: None,
         generated_text_compatible: None,
@@ -1899,6 +2050,7 @@ fn reference_column(name: &str) -> Column {
 struct ColumnOpts {
     nullable: Option<bool>,
     default: Option<String>,
+    default_expression: Option<(usize, Result<String, String>)>,
     json_default: Option<String>,
     /// Whether `default:` was given at all (`default: nil` included):
     /// `change_column` keeps the old default only when it was not.
@@ -1919,6 +2071,51 @@ fn default_value(node: &Node<'_>) -> Option<String> {
         return Some(f.value().to_string());
     }
     bool_value(node).map(|b| b.to_string()).or_else(|| string_value(node))
+}
+
+fn sql_default_expression(node: &Node<'_>) -> Result<String, String> {
+    let gap = || "SQL defaults require a zero-argument literal proc returning a SQL string literal, clock keyword, or supported scalar function expression".to_string();
+    if let Some(parens) = node.as_parentheses_node() {
+        let statements = parens.body().map(flatten_statements).ok_or_else(gap)?;
+        return if statements.len() == 1 { sql_default_expression(&statements[0]) } else { Err(gap()) };
+    }
+    let (body, parameters) = if let Some(lambda) = node.as_lambda_node() {
+        (lambda.body(), lambda.parameters())
+    } else if let Some(call) = node.as_call_node().filter(|c| c.receiver().is_none() && matches!(constant_id_str(&c.name()), "lambda" | "proc") && c.arguments().is_none_or(|a| a.arguments().len() == 0)) {
+        let block = call.block().and_then(|b| b.as_block_node()).ok_or_else(gap)?;
+        (block.body(), block.parameters())
+    } else { return Err(gap()); };
+    if let Some(params) = parameters.and_then(|n| n.as_block_parameters_node()).and_then(|p| p.parameters()) {
+        if params.requireds().len() != 0 || params.optionals().len() != 0 || params.posts().len() != 0
+            || params.keywords().len() != 0 || params.rest().is_some() || params.keyword_rest().is_some() || params.block().is_some()
+        { return Err(gap()); }
+    }
+    let statements = body.map(flatten_statements).ok_or_else(gap)?;
+    if statements.len() != 1 { return Err(gap()); }
+    let sql = string_value(&statements[0]).ok_or_else(gap)?.trim().to_string();
+    // SQLite's datetime('now') is the same clock default in portable DDL.
+    let sql = if sql.eq_ignore_ascii_case("DATETIME('now')") { "CURRENT_TIMESTAMP".into() } else { sql };
+    let quoted = sql.len() >= 2 && sql.starts_with('\'') && sql.ends_with('\'')
+        && !sql[1..sql.len() - 1].replace("''", "").contains('\'');
+    if quoted && sql.contains('|') { return Err(gap()); }
+    // Only direct calls have the lazy classification Rails' SQLite quoting
+    // and default extraction establish here; parentheses can expose a literal.
+    if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())
+        && !regex::Regex::new(r"\A[a-zA-Z_]\w*\(.*\)\z").unwrap().is_match(&sql) { return Err(gap()); }
+    // Rails' default-function regexp does not span lines; its binary-literal
+    // extraction also takes precedence over function recognition (`x'…'`).
+    if !quoted && (sql.contains(['\n', '\r']) || regex::Regex::new("x'[^\\n]*'").unwrap().is_match(&sql)) {
+        return Err(gap());
+    }
+    if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())
+        && !crate::emit::shared::schema_sql::schema_expression_supported(&sql, None, GeneratedExpressionDialect::Portable) { return Err(gap()); }
+    Ok(sql)
+}
+
+fn sql_default_candidate(node: &Node<'_>) -> bool {
+    default_value(node).is_none() && json_default_value(node).is_none()
+        && node.as_nil_node().is_none() && node.as_symbol_node().is_none()
+        && node.as_array_node().is_none() && node.as_hash_node().is_none()
 }
 
 fn json_default_value(node: &Node<'_>) -> Option<String> {
@@ -1981,6 +2178,10 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
                 "default" => {
                     opts.default_given = true;
                     opts.default = default_value(value);
+                    opts.default_expression = None;
+                    if sql_default_candidate(value) {
+                        opts.default_expression = Some((value.location().start_offset(), sql_default_expression(value)));
+                    }
                     opts.json_default = json_default_value(value);
                     opts.empty_array_default = value.as_array_node().is_some_and(|a| a.elements().iter().next().is_none());
                 }
@@ -2173,6 +2374,14 @@ fn generated_column_from_options(
     Ok(column)
 }
 
+fn validate_sql_default_type(sql: &str, boolean: bool, stores_quoted_text: bool) -> Result<(), String> {
+    if sql.starts_with('\'') && !stores_quoted_text {
+        Err("quoted SQL literal defaults on this column type are not modeled".into())
+    } else if boolean && !sql.starts_with('\'') && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()) {
+        Err("Boolean function defaults require an unset value distinct from false".into())
+    } else { Ok(()) }
+}
+
 /// A column-type name (`t.<type>` / `add_column …, :<type>`) to its
 /// `ColumnType`. The Postgres-only types map to their SQLite storage:
 /// `uuid`, `json`, and `jsonb` retain distinct schema variants even when
@@ -2191,6 +2400,15 @@ fn column_with_type(
     table: &str,
     file: &str,
 ) -> Result<Column, IngestError> {
+    // Strict ingest refuses a default it cannot carry. Survey records it and
+    // keeps the column without it: the name and type are still known, and a
+    // dropped column would make every use of its reader another error.
+    let default_expression = opts.default_expression.as_ref().map(|(offset, result)| {
+        result.clone().and_then(|sql| {
+            validate_sql_default_type(&sql, type_name == "boolean", !opts.array && matches!(type_name, "string" | "text" | "json" | "jsonb" | "uuid" | "inet" | "cidr" | "macaddr" | "enum" | "citext"))
+                .map(|()| sql)
+        }).map_err(|why| IngestError::Unsupported { file: file.into(), message: format!("line {}: default for {table}.{col_name}: {why}", super::sources::line_at(file, *offset).unwrap_or(1)) })
+    }).transpose().or_else(|gap| super::survey::continue_or_fail(gap).map(|()| None))?;
     let col_type = match type_name {
         // An integer's `limit:` is its size in bytes, and Rails' PostgreSQL
         // and MySQL adapters make 5 to 8 a `bigint`. Rails 4.2 and earlier
@@ -2269,6 +2487,8 @@ fn column_with_type(
         } else {
             opts.default.clone()
         },
+        default_expression,
+        legacy_default_persistence: false,
         primary_key: false,
         generated: None,
         generated_text_compatible,
@@ -2318,8 +2538,8 @@ fn column_from_call(
         }
         return generated_column_from_options(col_name, table, file, None, &args[1..]).map(Some);
     }
-    // `t.<constraint>` lines are table-level declarations, not columns;
-    // the fold does not model them and they cost the DDL nothing.
+    // Table-level declarations are not columns. CHECKs are collected
+    // separately by table_from_create_table.
     if matches!(
         col_type_name.as_str(),
         "check_constraint" | "foreign_key" | "exclusion_constraint" | "unique_constraint"
@@ -2329,6 +2549,11 @@ fn column_from_call(
     let Some(args_node) = call.arguments() else { return Ok(None) };
     let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
     let Some(col_name) = args.first().and_then(name_value) else { return Ok(None) };
+    if kwarg_value(args.iter().skip(1), "primary_key").is_some()
+        && kwarg_value(args.iter().skip(1), "default").is_some_and(|n| sql_default_candidate(&n)) {
+        let line = super::sources::line_at(file, call.location().start_offset()).unwrap_or(1);
+        return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: SQL defaults with primary_key options are unsupported: {table}.{col_name}") });
+    }
     if has_column_option_splats(&args[1..]) {
         return Err(IngestError::Unsupported {
             file: file.into(),
@@ -2375,11 +2600,9 @@ fn index_from_call(
 
     let Some(args_node) = call.arguments() else { return Ok(None) };
     let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
-    let Some(columns) = args.first().map(column_name_list) else { return Ok(None) };
-    if columns.is_empty() {
-        return Ok(None);
-    }
-    build_index(table_name, columns, args.iter().skip(1), file).map(Some)
+    let Some(first) = args.first() else { return Ok(None) };
+    let (columns, expression) = index_keys(first, file)?;
+    build_index(table_name, columns, expression, args.iter().skip(1), file).map(Some)
 }
 
 #[cfg(test)]
@@ -3184,5 +3407,131 @@ mod tests {
         )
         .unwrap();
         assert_eq!(col_names(&schema, "articles"), ["id", "title", "created_at"]);
+    }
+
+    /// Strict ingest refuses a SQL default it cannot carry. Survey records
+    /// that gap and keeps the column's name, type and nullability without
+    /// the default, so the column's reader stays known.
+    #[test]
+    fn survey_keeps_a_column_whose_sql_default_is_refused() {
+        let source = "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :record_items do |t|\n    t.string :token, default: -> { \"random()\" }, null: false\n  end\nend\n";
+        let strict = ingest_schema(source.as_bytes(), "db/schema.rb").expect_err("strict refuses").to_string();
+        assert!(strict.contains("line 3: default for record_items.token"), "{strict}");
+        crate::ingest::survey::activate();
+        let schema = ingest_schema(source.as_bytes(), "db/schema.rb");
+        let gaps: Vec<String> = crate::ingest::survey::drain().iter().map(|gap| gap.to_string()).collect();
+        let schema = schema.expect("survey continues");
+        assert_eq!(col_names(&schema, "record_items"), ["id", "token"]);
+        let token = col(&schema, "record_items", "token");
+        assert_eq!((&token.col_type, token.nullable), (&ColumnType::String { limit: None }, false));
+        assert_eq!((token.default.as_deref(), token.default_expression.as_deref()), (None, None));
+        assert_eq!(gaps, [strict]);
+    }
+
+    /// The migration fold too: a refused default no longer takes its
+    /// table, or the rest of its migration, with it.
+    #[test]
+    fn survey_keeps_migration_columns_whose_sql_defaults_are_refused() {
+        let source = "class CreateRecordItems < ActiveRecord::Migration[8.1]\n  def change\n    create_table :record_items do |t|\n      t.string :token, default: -> { \"random()\" }, null: false\n    end\n    add_column :record_items, :code, :string, default: -> { \"random()\" }\n    add_column :record_items, :label, :string\n  end\nend\n";
+        let strict = ingest_migration(source.as_bytes(), "1_create.rb", &mut Schema::default()).expect_err("strict refuses");
+        assert!(strict.to_string().contains("line 4: default for record_items.token"), "{strict}");
+        crate::ingest::survey::activate();
+        let mut schema = Schema::default();
+        let folded = ingest_migration(source.as_bytes(), "1_create.rb", &mut schema);
+        let gaps: Vec<String> = crate::ingest::survey::drain().iter().map(|gap| gap.to_string()).collect();
+        folded.expect("survey continues");
+        assert_eq!(col_names(&schema, "record_items"), ["id", "token", "code", "label"]);
+        for name in ["token", "code"] {
+            assert_eq!(col(&schema, "record_items", name).default_expression, None);
+        }
+        assert_eq!(gaps.len(), 2, "{gaps:?}");
+        assert!(gaps[1].contains("line 6: default for record_items.code"), "{gaps:?}");
+    }
+
+    #[test]
+    fn survey_continues_after_a_refused_changed_column_default() {
+        for old in ["'old'", "-> { \"'old'\" }"] {
+            let base = format!("ActiveRecord::Schema[8.1].define do\n create_table :record_items do |t|\n t.string :token, null: false, default: {old}\n t.integer :number, default: 3\n end\nend");
+            for value in ["-> { \"random()\" }", "from: 'old', to: -> { \"random()\" }", "-> { computed_sql }", "SQL_DEFAULT"] {
+                let source = format!("class ChangeDefaults < ActiveRecord::Migration[8.1]\n def change\n change_column_default :record_items, :token, {value}\n add_column :record_items, :middle, :string\n change_column_default :record_items, :number, to: -> {{ \"'7'\" }}\n add_column :record_items, :later, :string\n end\nend");
+                let initial = ingest_schema(base.as_bytes(), "db/schema.rb").unwrap();
+                let mut strict_schema = initial.clone();
+                let strict = ingest_migration(source.as_bytes(), "1_change.rb", &mut strict_schema).expect_err("strict refuses").to_string();
+                assert_eq!(col_names(&strict_schema, "record_items"), ["id", "token", "number"]);
+                assert_eq!(col(&strict_schema, "record_items", "token"), col(&initial, "record_items", "token"));
+                crate::ingest::survey::activate();
+                let mut schema = initial;
+                let folded = ingest_migration(source.as_bytes(), "1_change.rb", &mut schema);
+                let gaps: Vec<String> = crate::ingest::survey::drain().iter().map(|gap| gap.to_string()).collect();
+                folded.expect("survey continues after a refused changed default");
+                assert_eq!(col_names(&schema, "record_items"), ["id", "token", "number", "middle", "later"]);
+                assert!(!col(&schema, "record_items", "token").nullable);
+                for name in ["token", "number"] {
+                    assert_eq!((col(&schema, "record_items", name).default.as_deref(), col(&schema, "record_items", name).default_expression.as_deref()), (None, None));
+                }
+                assert_eq!(gaps.len(), 2, "{gaps:?}");
+                assert_eq!(gaps[0], strict);
+                assert!(gaps[1].contains("quoted SQL literal"), "{gaps:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn migration_boolean_default_changes_follow_creation_rules() {
+        let base = b"ActiveRecord::Schema[8.1].define do\n create_table :flags do |t|\n t.boolean :enabled, null: false, default: true\n end\nend";
+        for sql in ["abs(1)", "ABS(1)", "json_valid('{}')", "'1'"] {
+            for value in [format!("-> {{ {sql:?} }}"), format!("from: true, to: -> {{ {sql:?} }}")] {
+                let source = format!("class ChangeFlags < ActiveRecord::Migration[8.1]\n def change\n change_column_default :flags, :enabled, {value}\n add_column :flags, :later, :string\n end\nend");
+                let initial = ingest_schema(base, "db/schema.rb").unwrap();
+                crate::ingest::survey::activate();
+                let mut schema = initial.clone();
+                let result = ingest_migration(source.as_bytes(), "1_flags.rb", &mut schema);
+                let gaps = crate::ingest::survey::drain();
+                result.expect("survey continues");
+                assert_eq!(gaps.len(), 1, "{sql}: {gaps:?}");
+                assert_eq!(col_names(&schema, "flags"), ["id", "enabled", "later"]);
+                let enabled = col(&schema, "flags", "enabled");
+                assert_eq!((&enabled.col_type, enabled.nullable), (&ColumnType::Boolean, false));
+                assert_eq!((&enabled.default, &enabled.default_expression), (&None, &None));
+                let mut strict = initial.clone();
+                let error = ingest_migration(source.as_bytes(), "1_flags.rb", &mut strict).expect_err("strict refuses");
+                assert_eq!(error.to_string(), gaps[0].to_string());
+                assert_eq!(strict, initial, "strict must not change the column");
+            }
+        }
+        for value in ["false", "nil", "-> { \"CURRENT_TIMESTAMP\" }", "-> { \"CURRENT_DATE\" }", "-> { \"CURRENT_TIME\" }"] {
+            let mut schema = ingest_schema(base, "db/schema.rb").unwrap();
+            let source = format!("class ChangeFlags < ActiveRecord::Migration[8.1]\n def change\n change_column_default :flags, :enabled, {value}\n end\nend");
+            ingest_migration(source.as_bytes(), "1_flags.rb", &mut schema).expect("creation-time controls remain allowed");
+        }
+    }
+
+    #[test]
+    fn migration_boolean_type_changes_refuse_inherited_function_defaults() {
+        for sql in ["abs(1)", "json_valid('{}')", "'1'"] {
+            let base = format!("ActiveRecord::Schema[8.1].define do\n create_table :flags do |t|\n t.string :enabled, null: false, default: -> {{ {sql:?} }}\n end\nend");
+            for options in ["".to_string(), format!(", default: -> {{ {sql:?} }}")] {
+                let source = format!("class ChangeFlags < ActiveRecord::Migration[8.1]\n def change\n change_column :flags, :enabled, :boolean{options}\n add_column :flags, :later, :string\n end\nend");
+                let initial = ingest_schema(base.as_bytes(), "db/schema.rb").unwrap();
+                crate::ingest::survey::activate();
+                let mut schema = initial.clone();
+                let result = ingest_migration(source.as_bytes(), "1_flags.rb", &mut schema);
+                let gaps = crate::ingest::survey::drain();
+                result.expect("survey continues");
+                assert_eq!(gaps.len(), 1, "{sql}: {gaps:?}");
+                assert_eq!(col_names(&schema, "flags"), ["id", "enabled", "later"]);
+                let enabled = col(&schema, "flags", "enabled");
+                assert_eq!((&enabled.col_type, enabled.nullable), (&ColumnType::Boolean, false));
+                assert_eq!((&enabled.default, &enabled.default_expression), (&None, &None));
+                let mut strict = initial.clone();
+                ingest_migration(source.as_bytes(), "1_flags.rb", &mut strict).expect_err("strict refuses");
+                assert_eq!(strict, initial, "strict must not change the column");
+            }
+            for change in ["change_column :flags, :enabled, :string", "change_column :flags, :enabled, :boolean, default: nil"] {
+                let mut schema = ingest_schema(base.as_bytes(), "db/schema.rb").unwrap();
+                let source = format!("class ChangeFlags < ActiveRecord::Migration[8.1]\n def change\n {change}\n end\nend");
+                ingest_migration(source.as_bytes(), "1_flags.rb", &mut schema).expect("unchanged type and replaced defaults remain allowed");
+            }
+        }
     }
 }

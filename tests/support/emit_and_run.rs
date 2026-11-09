@@ -58,6 +58,21 @@ use roundhouse::project::BuildTarget;
 /// (440 MB between them) that the benchmark scripts leave behind.
 const SKIP: &[&str] = &["tmp", "log", "storage", "node_modules", ".git"];
 
+/// The line every `run_ruby` and `run_spinel*` script prints after its own
+/// last line. A script signals a failed check by raising, so exit status 0
+/// alone also passes a script that stopped before its checks: an early
+/// `exit` or `return`, a `rescue` that swallows the raise, a branch never
+/// taken. A run counts as a success only if this line was printed; `Run`
+/// takes it out of `stdout`, so callers read what the script printed.
+const COMPLETED: &str = "roundhouse emit-and-run: script completed";
+
+/// `script` followed by the line that says it ran to its end. Its own
+/// line: a script whose output does not end in a newline keeps that output
+/// whole once the marker is taken out (`Run::new`).
+fn to_completion(script: &str) -> String {
+    format!("{script}\nputs \"\\n{COMPLETED}\"\n")
+}
+
 /// Start from `fixtures/real-blog`.
 pub fn real_blog() -> Overlay {
     Overlay { base: roundhouse::fixtures::real_blog().to_path_buf(), scratch_base: false, edits: Vec::new() }
@@ -180,7 +195,8 @@ impl Overlay {
         // `LANG=C` any non-ASCII literal is a syntax error. The magic
         // comment must be the first line to count.
         let script = format!(
-            "# encoding: utf-8\nrequire File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{script}"
+            "# encoding: utf-8\nrequire File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{}",
+            to_completion(script)
         );
         let output = ruby()
             .arg("-e")
@@ -190,7 +206,7 @@ impl Overlay {
             .envs(env.iter().copied())
             .output()
             .expect("spawn ruby");
-        Run::new("ruby -e <script>".into(), emitted, errors, output)
+        Run::new("ruby -e <script>".into(), emitted, errors, output).expecting_completion()
     }
 
     /// Compile the unchanged Spinel output and run its native binary.
@@ -220,6 +236,8 @@ impl Overlay {
     }
 
     fn run_spinel_with_flags(self, script: &str, flags: &[&str]) -> Run {
+        // Before the bundle's key: a recorded case and its lookup hash the same script.
+        let script = &to_completion(script);
         if let Some(dir) = bundle::collect_dir() {
             bundle::record(&dir, &self, script, flags);
             panic!("spinel bundle collect: recorded, not run");
@@ -231,7 +249,7 @@ impl Overlay {
         let (emitted, errors) = self.emit_tree(BuildTarget::Spinel);
         std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{script}"))
             .expect("write native consumer");
-        compile_and_run_contract(emitted, errors, flags)
+        compile_and_run_contract(emitted, errors, flags).expecting_completion()
     }
 
     /// `run_spinel` for a probe that does not need the app: compile only the
@@ -284,9 +302,9 @@ impl Overlay {
         requires.extend(probes);
         let mut contract: String =
             requires.iter().map(|r| format!("require_relative {r:?}\n")).collect();
-        contract.push_str(script);
+        contract.push_str(&to_completion(script));
         std::fs::write(emitted.join("contract.rb"), contract).expect("write native consumer");
-        compile_and_run_contract(emitted, errors, &[])
+        compile_and_run_contract(emitted, errors, &[]).expecting_completion()
     }
 }
 
@@ -517,7 +535,10 @@ pub struct Run {
     pub emitted: PathBuf,
     /// Analysis, lowering and emission error diagnostics for the overlaid app.
     pub errors: Vec<String>,
+    /// Exit status 0, and for a script run, its completion line printed.
     pub success: bool,
+    /// Whether the exit status was 0, whatever the script reached.
+    exited_zero: bool,
     pub stdout: String,
     pub stderr: String,
 }
@@ -529,9 +550,24 @@ impl Run {
             emitted,
             errors,
             success: output.status.success(),
+            exited_zero: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         }
+    }
+
+    /// For a script given `to_completion`: take its completion line out of
+    /// `stdout` (the last one, as later output can follow it from an
+    /// `at_exit`), and count the run a success only if it was there.
+    fn expecting_completion(mut self) -> Self {
+        let marker = format!("\n{COMPLETED}\n");
+        match self.stdout.rfind(&marker) {
+            Some(at) => {
+                self.stdout.replace_range(at..at + marker.len(), "");
+            }
+            None => self.success = false,
+        }
+        self
     }
 
     /// The whole claim: analysis and emit report no errors AND the emitted
@@ -541,6 +577,16 @@ impl Run {
             self.errors.is_empty(),
             "analysis or emit reports errors, so the construct is not supported yet:\n{}",
             self.errors.join("\n")
+        );
+        assert!(
+            self.success || !self.exited_zero,
+            "the emitted program exited 0 without reaching the end of its script (an early `exit` or \
+             `return`, or a swallowed raise), so its checks did not all run: `{}` in {}\n\
+             \n=== stdout ===\n{}\n=== stderr ===\n{}",
+            self.command,
+            self.emitted.display(),
+            self.stdout,
+            self.stderr,
         );
         assert!(
             self.success,
@@ -823,7 +869,8 @@ pub mod bundle {
             .current_dir(&emitted)
             .output()
             .expect("run bundled native consumer");
-        Some(Run::new(format!("spinel bundle {group} && ./contract {case}"), emitted, Vec::new(), output))
+        // The recorded script already ends in the completion line (`run_spinel_with_flags`).
+        Some(Run::new(format!("spinel bundle {group} && ./contract {case}"), emitted, Vec::new(), output).expecting_completion())
     }
 
     struct Case {

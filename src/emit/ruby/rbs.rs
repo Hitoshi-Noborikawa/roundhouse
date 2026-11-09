@@ -144,7 +144,9 @@ fn render_class(
     let body_pad = "  ".repeat(depth);
 
     if let Some((members, _)) = lc.data_define() {
-        writeln!(s, "{body_pad}def self.new: (*untyped, **untyped) -> instance").unwrap();
+        if !lc.methods.iter().any(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == "new") {
+            writeln!(s, "{body_pad}def self.new: (*untyped, **untyped) -> instance").unwrap();
+        }
         // A `def` in the `Data.define` block replaces the reader, and RBS
         // rejects a second declaration of one method.
         let defined = |member: &crate::ident::Symbol| {
@@ -169,7 +171,8 @@ fn render_class(
 
     for m in &lc.methods {
         let line = render_method(m, &segments);
-        writeln!(s, "{body_pad}{line}").unwrap();
+        let visibility = if lc.data_define().is_some() && m.visibility != MethodVisibility::Public { "private " } else { "" };
+        writeln!(s, "{body_pad}{visibility}{line}").unwrap();
     }
 
     for i in (0..depth).rev() {

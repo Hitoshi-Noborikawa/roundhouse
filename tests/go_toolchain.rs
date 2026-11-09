@@ -23,6 +23,46 @@ mod emit_and_run;
 #[path = "support/content_tag_options.rs"]
 #[allow(dead_code)]
 mod content_tag_options;
+#[path = "support/link_to_if_eval_order.rs"]
+#[allow(dead_code)]
+mod link_to_if_eval_order;
+#[path = "support/simple_format.rs"]
+mod simple_format;
+#[path = "support/link_to_computed_url.rs"]
+mod link_to_computed_url;
+#[path = "support/nested_route_helper_record.rs"]
+#[allow(dead_code)]
+mod nested_route_helper_record;
+#[path = "support/ivar_named_local.rs"]
+#[allow(dead_code)]
+mod ivar_named_local;
+#[path = "support/record_if_condition.rs"]
+#[allow(dead_code)]
+mod record_if_condition;
+#[path = "support/link_to_template_local.rs"]
+#[allow(dead_code)]
+mod link_to_template_local;
+#[path = "support/each_no_param.rs"]
+#[allow(dead_code)]
+mod each_no_param;
+#[path = "support/view_unless_no_else.rs"]
+#[allow(dead_code)]
+mod view_unless_no_else;
+#[path = "support/nilable_string_view.rs"]
+#[allow(dead_code)]
+mod nilable_string_view;
+#[path = "support/go_nil_narrowed.rs"]
+#[allow(dead_code)]
+mod go_nil_narrowed;
+#[path = "support/go_nil_literal_left.rs"]
+#[allow(dead_code)]
+mod go_nil_literal_left;
+#[path = "support/each_receiver_once.rs"]
+#[allow(dead_code)]
+mod each_receiver_once;
+#[path = "support/join_nil.rs"]
+#[allow(dead_code)]
+mod join_nil;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -534,4 +574,241 @@ fn a_conditional_scalar_left_of_or_is_kept() {
         .expect("run go test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("--- PASS: TestNoteOrProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// `link_to_unless`'s block form with a name that is an expression, not a
+/// call (`"a" + "b"`), in a block without a parameter and in one whose
+/// parameter the block doesn't read: the no-link branch still evaluates
+/// the name, and the generated view builds.
+#[test]
+#[ignore]
+fn a_link_to_unless_block_over_an_expression_name_builds() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<% content_for :title, \"Articles\" %>\n",
+            "<% content_for :title, \"Articles\" %>\n<% t = @articles.nil? %>\n<%= link_to_unless !t, \"a\" + \"b\", \"/x\" do %>none<% end %>\n<%= link_to_unless !t, \"c\" + \"d\", \"/x\" do |name| %>none<% end %>\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_go_passes("real-blog with link_to_unless blocks", &emitted);
+}
+
+/// #1862: `link_to_if` / `link_to_unless` evaluate the url when no link
+/// is made, and the generated view still builds and renders as Rails
+/// (`link_to_if_eval_order::STRICT_VIEW`): the app's integration test, run by `go test`.
+#[test]
+#[ignore]
+fn link_to_if_evaluates_its_url_and_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(link_to_if_eval_order::STRICT_VIEW, link_to_if_eval_order::STRICT_RENDERS));
+}
+
+/// #1861: `simple_format` with `sanitize: false` renders as Rails 8.1.4
+/// does, multibyte texts included (`simple_format::VIEW`): the app's integration test, run by `go test`.
+#[test]
+#[ignore]
+fn simple_format_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS));
+}
+
+/// #1865: `link_to` with a url the template computes renders as Rails
+/// 8.1.4 does (`link_to_computed_url::VIEW`).
+#[test]
+#[ignore]
+fn link_to_computed_url_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(link_to_computed_url::VIEW, link_to_computed_url::RENDERS));
+}
+
+/// #1890: a record handed to a route helper inside an output
+/// expression renders as Rails 8.1.4 does
+/// (`nested_route_helper_record::VIEW`).
+#[test]
+#[ignore]
+fn nested_route_helper_record_renders() {
+    assert_content_tag_test_passes(nested_route_helper_record::strict_app().0);
+}
+
+/// A template local assigned from the ivar of its own name renders as
+/// Rails 8.1.4 does (`ivar_named_local::VIEW`).
+#[test]
+#[ignore]
+fn ivar_named_local_renders() {
+    assert_content_tag_test_passes(ivar_named_local::strict_app());
+}
+
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+#[ignore]
+fn record_if_condition_renders() {
+    assert_content_tag_test_passes(record_if_condition::strict_app());
+}
+
+/// #1909: an assignment as the `if` condition, the record read in the
+/// branch, renders as Rails 8.1.4 does (`record_if_condition::ASSIGN_VIEW`).
+#[test]
+#[ignore]
+fn record_if_assignment_renders() {
+    assert_content_tag_test_passes(record_if_condition::strict_assign_app());
+}
+
+/// #1898: a record in a local the template assigns, handed to
+/// `link_to`'s url helper, renders as Rails 8.1.4 does
+/// (`link_to_template_local::VIEW`).
+#[test]
+#[ignore]
+fn link_to_template_local_renders() {
+    assert_content_tag_test_passes(link_to_template_local::strict_app());
+}
+
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_renders() {
+    assert_content_tag_test_passes(each_no_param::strict_app());
+}
+
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_empty_map_renders() {
+    assert_content_tag_test_passes(each_no_param::strict_empty_map_app());
+}
+
+/// #1910: a block whose only parameter is a rest (`|*args|`) is refused,
+/// not emitted as a loop that binds nothing (`each_no_param::REST_VIEW`).
+#[test]
+fn each_no_param_rest_blocks_are_refused() {
+    let (_emitted, errors) = each_no_param::strict_rest_app().emit(roundhouse::project::BuildTarget::Go);
+    for method in ["each", "map"] {
+        assert!(
+            errors.iter().any(|e| e.contains(&format!("{method} not supported")) && e.contains("a block with only a rest")),
+            "{method}: {errors:?}"
+        );
+    }
+}
+
+/// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// does (`view_unless_no_else::VIEW`).
+#[test]
+#[ignore]
+fn view_unless_no_else_renders() {
+    assert_content_tag_test_passes(view_unless_no_else::strict_app());
+}
+
+/// #1937: a view reading a nullable string column with `==`, `!=`,
+/// `empty?` and `length` renders as Rails 8.1.4 does
+/// (`nilable_string_view::VIEW`).
+#[test]
+#[ignore]
+fn nilable_string_view_renders() {
+    assert_content_tag_test_passes(nilable_string_view::strict_app());
+}
+
+/// #1937: `==` and `!=` on a nullable string column evaluate each
+/// operand once, left then right, as Rails 8.1.4 does
+/// (`nilable_string_view::EFFECT_VIEW`, title present).
+#[test]
+#[ignore]
+fn nilable_string_view_effect_renders() {
+    assert_content_tag_test_passes(nilable_string_view::strict_effect_app());
+}
+
+/// #1937: with the column nil, `==` and `!=` render as Rails 8.1.4
+/// does (`nilable_string_view::NIL_VIEW`).
+#[test]
+#[ignore]
+fn nilable_string_view_nil_renders() {
+    assert_content_tag_test_passes(nilable_string_view::strict_nil_app());
+}
+
+/// #1937: the same operands with a nil title: the right operand still
+/// runs, as in Rails 8.1.4 (`nilable_string_view::EFFECT_VIEW`).
+#[test]
+#[ignore]
+fn nilable_string_view_nil_effect_renders() {
+    assert_content_tag_test_passes(nilable_string_view::strict_nil_effect_app());
+}
+
+/// #1946: `each` runs a receiver with an effect once, as Rails 8.1.4
+/// does (`each_receiver_once::VIEW`).
+#[test]
+#[ignore]
+fn each_receiver_once_renders() {
+    assert_content_tag_test_passes(each_receiver_once::strict_app());
+}
+
+/// #1949: `join` reads a nil element as an empty string, as Rails 8.1.4
+/// does (`join_nil::GO_VIEW`).
+#[test]
+#[ignore]
+fn join_nil_renders() {
+    assert_content_tag_test_passes(join_nil::strict_go_app());
+}
+
+/// #1949: a nil column beside an Integer joins as an empty string, as
+/// Rails 8.1.4 does (`join_nil::MIXED_VIEW`).
+#[test]
+#[ignore]
+fn join_nil_mixed_nil_renders() {
+    assert_content_tag_test_passes(join_nil::strict_mixed_nil_app());
+}
+
+/// #1949: a present column beside an Integer joins as its text, as
+/// Rails 8.1.4 does (`join_nil::MIXED_VIEW`).
+#[test]
+#[ignore]
+fn join_nil_mixed_renders() {
+    assert_content_tag_test_passes(join_nil::strict_mixed_app());
+}
+
+/// #1977: a String on the left of a nil column renders as Rails 8.1.4
+/// does (`go_nil_literal_left::VIEW`).
+#[test]
+#[ignore]
+fn go_nil_literal_left_nil_renders() {
+    assert_content_tag_test_passes(go_nil_literal_left::strict_nil_app());
+}
+
+/// #1977: a String on the left of a present column renders as Rails
+/// 8.1.4 does (`go_nil_literal_left::VIEW`).
+#[test]
+#[ignore]
+fn go_nil_literal_left_renders() {
+    assert_content_tag_test_passes(go_nil_literal_left::strict_app());
+}
+
+/// A nullable column compared after a nil check, on either side, renders as
+/// Rails 8.1.4 does (`go_nil_narrowed::VIEW`).
+#[test]
+#[ignore]
+fn go_nil_narrowed_renders() {
+    assert_content_tag_test_passes(go_nil_narrowed::strict_app());
+}
+
+/// The nil check and the comparison in a controller and a model method,
+/// where a local's reader narrows, render as Rails 8.1.4 does.
+#[test]
+#[ignore]
+fn go_nil_narrowed_code_renders() {
+    assert_content_tag_test_passes(go_nil_narrowed::strict_code_app());
+}
+
+/// Two nullable columns compare as Rails 8.1.4 does: nil equals only nil.
+#[test]
+#[ignore]
+fn go_nil_column_pairs_render() {
+    for app in go_nil_narrowed::strict_pair_apps() {
+        assert_content_tag_test_passes(app);
+    }
+}
+
+/// `join` runs a receiver with an effect once, as Rails 8.1.4 does
+/// (`each_receiver_once::JOIN_VIEW`).
+#[test]
+#[ignore]
+fn join_receiver_once_renders() {
+    assert_content_tag_test_passes(each_receiver_once::strict_join_app());
 }

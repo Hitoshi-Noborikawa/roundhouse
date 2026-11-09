@@ -47,6 +47,13 @@ pub const VIEW: &str = concat!(
     "c8:<%= link_to @article.label + pluralize(1, @comment.label), \"/x\" %>\n",
     "c9:<%= tag.p(@article.label + pluralize(1, @comment.label)) %>\n",
     "c10:<% x = @comment.nil? ? @article : @comment %><%= content_tag(:p, x.label + \"!\") %>\n",
+    "i1:<%= link_to Safe.html_escape(\"<s>\"), \"/z\" %>\n",
+    "i2:<%= link_to_if true, Safe.html_escape(\"<r>\"), \"/z\" %>\n",
+    "f1:<% f = @article.nil? %><%= link_to_if f, @article.label + @comment.label, \"/x\" %>\n",
+    "f2:<% f = @article.nil? %><%= link_to_if f, truncate(\"<b>xx</b>\", length: 5) + \"!\", \"/x\" %>\n",
+    "f3:<% f = @article.nil? %><%= link_to_if f, \"<s>\".html_safe + \"<t>\", \"/x\" %>\n",
+    "f4:<% f = @article.nil? %><%= link_to_if f, @article.label, \"/x\" %>\n",
+    "f5:<% f = @article.nil? %><%= link_to_if f, @comment.label, \"/x\" %>\n",
 );
 
 pub const RENDERS: &[&str] = &[
@@ -60,6 +67,8 @@ pub const RENDERS: &[&str] = &[
     "c6:<p><b>a</b>&lt;b...</p>", "c7:<b>a</b>1 &lt;c&gt;",
     "c8:<a href=\"/x\"><b>a</b>1 &lt;c&gt;</a>", "c9:<p><b>a</b>1 &lt;c&gt;</p>",
     "c10:<p>&lt;c&gt;!</p>",
+    "i1:<a href=\"/z\">&lt;s&gt;</a>", "i2:<a href=\"/z\">&lt;r&gt;</a>",
+    "f1:<b>a</b>&lt;c&gt;", "f2:&lt;b...!", "f3:<s>&lt;t&gt;", "f4:<b>a</b>", "f5:&lt;c&gt;",
 ];
 
 /// What trusting a mark too widely wrote: another class's `label`,
@@ -67,7 +76,7 @@ pub const RENDERS: &[&str] = &[
 /// (only `Article` has the marked one), and each value whose closer
 /// definition shadows a marked one, unescaped, also as `content_tag`'s
 /// content.
-pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>", "J:<span><c></span>", "w1:<ow>", "w1:<b>", "w2:<ow>", "w2:<b>", "s1:<d>", "s1:<il>", "s2:<d>", "s2:<il>", "c1:<p><b>a</b>1 <c></p>", "c2:<p><b", "c3:<p><c></p>", "c4:<p><c>", "c5:<p>1 <b>a</b></p>", "c6:<p><b>a</b><b...</p>", "c7:<b>a</b>1 <c>", "c8:<a href=\"/x\"><b>a</b>1 <c></a>", "c9:<p><b>a</b>1 <c></p>", "c10:<p><c>!</p>"];
+pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>", "J:<span><c></span>", "w1:<ow>", "w1:<b>", "w2:<ow>", "w2:<b>", "s1:<d>", "s1:<il>", "s2:<d>", "s2:<il>", "c1:<p><b>a</b>1 <c></p>", "c2:<p><b", "c3:<p><c></p>", "c4:<p><c>", "c5:<p>1 <b>a</b></p>", "c6:<p><b>a</b><b...</p>", "c7:<b>a</b>1 <c>", "c8:<a href=\"/x\"><b>a</b>1 <c></a>", "c9:<p><b>a</b>1 <c></p>", "c10:<p><c>!</p>", "i1:<a href=\"/z\">&amp;", "i2:<a href=\"/z\">&amp;", "f1:<b>a</b><c>", "f2:&amp;lt;b", "f3:<s><t>", "f4:&lt;b&gt;a", "f5:<c>"];
 
 /// real-blog with `GET /probe` rendering `VIEW`:
 /// - `Article#label` and `ApplicationRecord#tag_html` return html-safe
@@ -116,6 +125,13 @@ pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t
 ///   `Article | Comment` receiver, is escaped whole; `truncate` escapes an
 ///   unmarked value, and a marked one it cuts; `pluralize` drops the
 ///   mark;
+/// - `Safe.html_escape` (#1808's reduction) escapes its argument and
+///   returns it html-safe; lines `i1` and `i2` take it as `link_to`'s and
+///   `link_to_if`'s label, which Rails 8.1.4 shows as it is, escaped once;
+/// - lines `f1` to `f5` take `link_to_if`'s false branch, which shows
+///   the label as a bare `<%= %>` does: a marked value, a `truncate` or an
+///   `x.html_safe`, alone or on the left of a `+`, stays as it is and the
+///   `+`'s plain operand is escaped; a plain value is escaped;
 /// - `ApplicationRecord#body` is html-safe, and `articles.body` is a
 ///   column. Rails 8.1.4 renders `K:<j>`: Active Record doesn't generate
 ///   a reader that a class between the model and `ActiveRecord::Base`
@@ -139,6 +155,7 @@ pub fn app() -> emit_and_run::Overlay {
             "  validates :commenter, presence: true\n",
             "  attr_accessor :note_html\n\n  validates :commenter, presence: true\n\n  def label\n    \"<c>\"\n  end\n",
         )
+        .write("lib/safe.rb", "module Safe\n  def self.html_escape(s)\n    s.gsub(\"<\", \"&lt;\").gsub(\">\", \"&gt;\").html_safe\n  end\nend\n")
         .write("lib/formatting.rb", "module Formatting\n  def self.badge\n    \"<s>\".html_safe\n  end\nend\n")
         .write("lib/plain.rb", "module Plain\n  def self.badge\n    \"<p>\"\n  end\nend\n")
         .write("lib/base.rb", "class Base\n  def label\n    \"<b>\".html_safe\n  end\n\n  def first\n    \"<w>\".html_safe\n  end\n\n  def inner_label\n    \"<il>\".html_safe\n  end\nend\n")

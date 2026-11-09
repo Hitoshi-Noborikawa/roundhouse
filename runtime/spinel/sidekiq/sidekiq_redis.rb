@@ -3,7 +3,7 @@
 # `queue_adapter :sidekiq`. Swapped in for the raising façade at
 # `runtime/sidekiq_redis.rb`. `require "redis"` is spinel-redis on
 # spinel and the redis-rb gem on ruby and jruby; both take
-# `Redis.new(url:)`, `pipelined` and `zadd` with the same meaning and
+# `Redis.new(url:)`, `pipelined`, `multi` and `zadd` with the same meaning and
 # raise `Redis::BaseConnectionError` for a socket that fails, so one
 # body serves every lane.
 #
@@ -213,12 +213,13 @@ module SidekiqRedis
   end
 
   # ZADD dead, then the trims by age (scores up to `oldest`) and by
-  # count (ranks 0..`keep`, a negative String).
+  # count (ranks 0..`keep`, a negative String), in one MULTI as
+  # Sidekiq's DeadSet#kill sends them.
   def self.write_dead(conn, now, json, oldest, keep)
-    conn.pipelined do |p|
-      p.zadd("dead", now, json)
-      p.zremrangebyscore("dead", "-inf", oldest)
-      p.zremrangebyrank("dead", "0", keep)
+    conn.multi do |tx|
+      tx.zadd("dead", now, json)
+      tx.zremrangebyscore("dead", "-inf", oldest)
+      tx.zremrangebyrank("dead", "0", keep)
     end
     nil
   end

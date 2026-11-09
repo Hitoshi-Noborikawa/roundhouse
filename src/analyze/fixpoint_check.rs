@@ -482,7 +482,7 @@ impl Analyzer {
                         )
                     })
                     .collect();
-                let layout = resolution.layout.as_ref().map(|l| l.as_str());
+                let layout: Vec<&str> = resolution.layouts.iter().map(|l| l.as_str()).collect();
                 put("view_seeds", format!("resolution {}", id.0.as_str()), hash_of((filters, layout)));
             }
         }
@@ -510,6 +510,7 @@ impl Analyzer {
         snapshot: Option<&mut HashMap<super::ParamKey, Vec<Ty>>>,
     ) {
         let before = self.state_fp(app);
+        let prev = self.capture_inference_sig();
         match which {
             Loop::Production | Loop::Absorb => {
                 self.run_typing_passes(
@@ -544,6 +545,7 @@ impl Analyzer {
                 self.overlay_test_params(app);
             }
         }
+        self.settle_oscillations(&prev);
         let moved = self.state_fp(app).moved(&before);
         self.fixpoint_checks.verified.push((which.name(), moved));
     }
@@ -595,6 +597,8 @@ impl Analyzer {
             });
             line["harvest_untie_cut"] =
                 serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+            let (cycles, widened) = self.settle.counts();
+            line["settled"] = serde_json::json!({"cycles": cycles, "widened": widened});
         }
         eprintln!("rh-fixpoint: {line}");
     }
@@ -709,7 +713,7 @@ end
                     filter, defined_in: id.clone(), included_via: id.clone(),
                     assigns: HashMap::default(), effects: Default::default(),
                 }],
-                layout: Some(Symbol::from("layouts/application")),
+                layouts: vec![Symbol::from("layouts/application")],
             };
             let app = App::default();
             let mut analyzer = Analyzer::new(&app);

@@ -82,7 +82,7 @@ pub(crate) fn validate_column_with_dialect(
             column.name.as_str()
         ));
     }
-    if column.default.is_some() {
+    if column.default.is_some() || column.default_expression.is_some() {
         return Err("generated columns cannot also have a default".into());
     }
     let text_result = is_text_type(&column.col_type);

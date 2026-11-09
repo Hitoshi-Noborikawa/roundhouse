@@ -131,6 +131,29 @@ pub struct App {
     /// (`ingest::boot_program`): run at boot on the ruby family and spinel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boot_program: Vec<Expr>,
+    /// The constants an initializer statement held by a gem not compiled
+    /// from source calls (`Rack::Attack` of `Rack::Attack.throttle`):
+    /// `ingest::auto_source_gems` brings that gem in, and the statement
+    /// then joins [`App::boot_program`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boot_gem_constants: Vec<String>,
+    /// The Rack middleware a source gem's Railtie `use`s, outermost
+    /// first (`ingest::railtie_middleware`): both ruby-family boots stack
+    /// them in front of the routes, where Rails puts them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_middlewares: Vec<String>,
+    /// The insertions it could not read, reported by analyze.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_middleware_refusals: Vec<crate::diagnostic::Diagnostic>,
+    /// A def hoisted out of a concern's `included do` that a module the same block includes also defines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub included_hoist_conflicts: Vec<crate::diagnostic::Diagnostic>,
+    /// A superclass expression read off a configured object that did not fold to a constant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superclass_refusals: Vec<crate::diagnostic::Diagnostic>,
+    /// Routes a gem's routing method draws that are left out (`ingest::gem_hooks::omits_on_failure`), at the call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_route_gaps: Vec<crate::diagnostic::Diagnostic>,
     /// Pins from `config/importmap.rb`, expanded (each
     /// `pin_all_from` has been resolved into explicit per-file
     /// pins via `app/javascript/**` walking). Consumed by the
@@ -594,6 +617,31 @@ pub struct App {
     /// the app walk; empty for apps without concerns.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_filters: HashMap<ClassId, Vec<Filter>>,
+    /// Callback declarations in a concern's `included do` block that ingest
+    /// could not read, keyed by the module, as `(file, message)`. They
+    /// refuse the compile only once a controller registers the concern
+    /// (`ingest::app::refuse_unread_concern_filters`): the block has no
+    /// effect on an app that never includes it in a controller.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_filter_refusals: HashMap<ClassId, Vec<(String, String)>>,
+    /// Modules known not to be Concerns. Ruby does not run the `included`
+    /// hooks of what such a module includes on the module's own includers,
+    /// so filter registration stops there; its methods still arrive.
+    #[serde(default, skip_serializing_if = "crate::det::HashSet::is_empty")]
+    pub plain_mixins: crate::det::HashSet<ClassId>,
+    /// Modules whose `def self.included` hook registers controller filters,
+    /// read or refused. Such a filter says nothing about Concern identity.
+    #[serde(default, skip_serializing_if = "crate::det::HashSet::is_empty")]
+    pub concern_hook_modules: crate::det::HashSet<ClassId>,
+    /// Name spans of the hooks fully read into `concern_filters`, left out
+    /// of the emitted module: nothing is left for them to do at load.
+    #[serde(default, skip_serializing_if = "crate::det::HashSet::is_empty")]
+    pub modelled_included_hooks: crate::det::HashSet<crate::span::Span>,
+    /// The hooks among those with a filter no guard stands in front of:
+    /// on a class that is not a controller it raises or calls that
+    /// class's own macro, even where `respond_to?` would say no.
+    #[serde(default, skip_serializing_if = "crate::det::HashSet::is_empty")]
+    pub unguarded_included_hooks: crate::det::HashSet<crate::span::Span>,
     /// graphql-ruby object types (`ingest::graphql_ruby`), for the
     /// analyzer only; their synthesized methods leave at lowering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -814,12 +862,11 @@ pub struct ControllerResolution {
     /// pick the subset they care about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filter_chain: Vec<ResolvedFilter>,
-    /// Effective layout view name (`layouts/application`), resolved by
-    /// walking the inheritance chain; `None` records an explicit
-    /// `layout false`. Convention default applies, so this may name a
-    /// layout view the app doesn't ship — Rails would render bare.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layout: Option<Symbol>,
+    /// The layout templates this controller's actions render in
+    /// (`layouts/application`), as `controller_layout` resolves them;
+    /// empty when none does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<Symbol>,
 }
 
 /// One hop of a resolved filter chain: the declaration plus the
@@ -1235,6 +1282,12 @@ impl App {
             fixtures: Vec::new(),
             seeds: None,
             boot_program: Vec::new(),
+            boot_gem_constants: Vec::new(),
+            gem_middlewares: Vec::new(),
+            gem_middleware_refusals: Vec::new(),
+            included_hoist_conflicts: Vec::new(),
+            superclass_refusals: Vec::new(),
+            gem_route_gaps: Vec::new(),
             importmap: None,
             engine_importmaps: Vec::new(),
             inertia: None,
@@ -1292,6 +1345,11 @@ impl App {
             library_class_files: Vec::new(),
             rails_application: None,
             concern_filters: HashMap::default(),
+            concern_filter_refusals: HashMap::default(),
+            plain_mixins: Default::default(),
+            concern_hook_modules: Default::default(),
+            modelled_included_hooks: Default::default(),
+            unguarded_included_hooks: Default::default(),
             graphql_types: Vec::new(),
             graphql_signatures: Vec::new(),
             concern_spliced_actions: HashMap::default(),

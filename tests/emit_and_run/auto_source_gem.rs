@@ -40,3 +40,21 @@ fn the_ruby_tree_loads_the_real_gem_instead() {
     let gemfile = std::fs::read_to_string(emitted.join("Gemfile")).expect("Gemfile");
     assert!(gemfile.contains("gem \"greetings\""), "{gemfile}");
 }
+
+/// A direct dependency that depends on a gem compiled from source is Bundler's to require, and it
+/// extends that gem as it loads (devise_invitable's `Devise.add_module`): it is compiled with it, though
+/// the app names nothing of its own.
+#[test]
+fn a_gem_that_extends_a_compiled_gem_comes_with_it() {
+    let (emitted, errors) = auto_source_gem::overlay()
+        .edit("Gemfile.lock", "    greetings (1.0)\n      exclaim\n", "    greetings (1.0)\n      exclaim\n    greetings_loud (1.0)\n      greetings\n")
+        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  greetings_loud\n")
+        .write(
+            "vendor/bundle/ruby/3.4.0/gems/greetings_loud-1.0/lib/greetings_loud.rb",
+            "module Greetings\n  class Formatter\n    def self.loud(text)\n      shout(text) + \"!!\"\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "  def shouted_title\n", "  def loud_title\n    Greetings::Formatter.loud(title)\n  end\n\n  def shouted_title\n")
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(mentions(&emitted, "def self.loud(text)"), "the extending gem is not in the Spinel tree");
+}

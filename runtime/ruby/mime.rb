@@ -193,7 +193,11 @@ module Mime
       @symbol
     end
 
+    # Rails compares the string or the symbol, so `request.format == :json`
+    # and `== "application/json"` both hold (synonyms are not registered here).
     def ==(other)
+      return !@symbol.nil? && @symbol == other if other.is_a?(Symbol)
+      return @string == other || (!@symbol.nil? && @symbol.to_s == other) if other.is_a?(String)
       other.is_a?(Mime::Type) && to_s == other.to_s
     end
 
@@ -226,6 +230,12 @@ module Mime
         return new(base, nil)
       end
       new(canonical, SYMBOLS[canonical])
+    end
+
+    # The registered symbol of a media type or its alias (`text/x-json` is `:json`).
+    def self.symbol_for(media_type)
+      canonical = CANONICAL[media_type]
+      canonical.nil? ? nil : SYMBOLS[canonical]
     end
 
     def self.lookup_by_extension(extension)

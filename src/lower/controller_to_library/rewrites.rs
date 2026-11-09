@@ -39,7 +39,7 @@ use super::util::{map_expr, map_expr_mut};
 /// `partial: "users/sidebars/rooms/shared", locals: { room: room }` →
 /// `Views::Users::Sidebars::Rooms.shared(room)`, bound against the
 /// partial's DEF-SITE contract: the record by the partial's record-arg
-/// convention, closure ivars as `@<name>` (a same-named local wins),
+/// convention, closure ivars as `@<name>` (never a same-named local),
 /// extras from `locals:` (nil-filled, trailing-trimmed).
 ///
 /// Shared by the render rewrite and the broadcast rewrite — a broadcast
@@ -103,7 +103,7 @@ pub(super) fn partial_view_call_with_record(
         .or_else(|| record_override.cloned())
         .unwrap_or_else(|| nil_expr(span))];
     for n in &contract.closure {
-        view_args.push(lookup(n).unwrap_or_else(|| ivar(n.as_str(), span)));
+        view_args.push(ivar(n.as_str(), span));
     }
     // An action's render passes its own action, controller and path parameters, as a view's call passes them to a partial.
     let request_value = |name: &str| -> Option<Expr> {
@@ -222,8 +222,8 @@ pub(super) fn rewrite_render_to_views(
             // "commentbox", layout: false, content_type: …, locals:
             // {comment: c}` (lobsters' reply). Bind against the
             // partial's def-site contract: record by the partial's
-            // record-arg convention, closure ivars as `@<name>` (a
-            // same-named local wins), extras from locals (nil-filled,
+            // record-arg convention, closure ivars as `@<name>` (never
+            // a same-named local), extras from locals (nil-filled,
             // trailing-trimmed). `layout:` drops (Rails renders
             // partials without one); other kwargs (content_type:,
             // status:) ride the render.

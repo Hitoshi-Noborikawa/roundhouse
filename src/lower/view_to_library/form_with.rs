@@ -1613,6 +1613,8 @@ mod tests {
         ViewCtx {
             locals: Vec::new(),
             ivar_params: Vec::new(),
+            assigned_locals: Vec::new(),
+            nested_assigned_locals: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             view_name: String::new(),
@@ -1632,6 +1634,8 @@ mod tests {
             time_columns: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            app_helper_names: Default::default(),
+            direct_route_helpers: Default::default(),
             i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),

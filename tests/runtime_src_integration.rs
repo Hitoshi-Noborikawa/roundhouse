@@ -1307,7 +1307,18 @@ fn every_runtime_method_body_concretely_typed() {
     // each; reduce adds seven generic accumulator/block-result sites,
     // exactly as inject does. Existing methods' counts are unchanged.
     // Add the ten new sites to 929, preserving its two-site headroom.
-    const CEILING: usize = 939;
+    // MEASURED 944 on 2026-11-05 (exact main 310f2e61: 937):
+    // deep_stringify_keys adds 6 sites and deep_stringify_keys_value adds 5.
+    // Built-in Hash case narrowing removes 2 each from deep_dup and
+    // JSON.jsonable; every other method's count is unchanged.
+    // Add the net 7 sites to 939, preserving its two-site headroom.
+    // MEASURED 947 on 2026-11-08 (main db5fa1edd is within 946): partial
+    // writes' new bodies in active_record/connection.rb read the record's
+    // untyped attribute values (`_attributes_snapshot` copies each Array
+    // value; `update_columns` names each column it writes). No other
+    // runtime file's sites change. Raise to 949, preserving the two-site
+    // headroom.
+    const CEILING: usize = 949;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

@@ -62,7 +62,7 @@ mod diagnostic;
 pub(crate) use diagnostic::some_operands_take_it;
 mod const_resolution;
 mod lambda_local;
-pub(crate) use const_resolution::{ConstResolver, ConstResolverTask, definition_index, has_ambiguous_namespace};
+pub(crate) use const_resolution::{ConstResolver, ConstResolverTask, definition_index, has_ambiguous_namespace, is_core_value_constant};
 pub use const_resolution::DefinitionIndex;
 pub use const_resolution::PreparedConstResolver;
 use const_resolution::ResolvedConstant;
@@ -1739,6 +1739,8 @@ impl<'a> BodyTyper<'a> {
                 for (k, v) in entries.iter_mut() {
                     let kt = self.analyze_expr(k, ctx);
                     let vt = self.analyze_expr(v, ctx);
+                    let kt = super::Analyzer::class_object_expr_ty(k).unwrap_or(kt);
+                    let vt = super::Analyzer::class_object_expr_ty(v).unwrap_or(vt);
                     key_ty = Some(match key_ty.take() {
                         Some(prev) => union_of(prev, kt),
                         None => kt,
@@ -1767,6 +1769,9 @@ impl<'a> BodyTyper<'a> {
                 let mut elem_ty: Option<Ty> = None;
                 for e in elements.iter_mut() {
                     let et = self.analyze_expr(e, ctx);
+                    // A stored value keeps its class-object alternatives;
+                    // the flat nominal type is only for receiver lookup.
+                    let et = super::Analyzer::class_object_expr_ty(e).unwrap_or(et);
                     // `[*a, b]` holds `a`'s elements, not `a`.
                     let et = if matches!(&*e.node, ExprNode::Splat { .. }) {
                         match splat_elements(et) {
@@ -2382,7 +2387,15 @@ impl<'a> BodyTyper<'a> {
                     // read from — its own computed type already IS
                     // the referenced method's return type.
                     match &*b.node {
-                        ExprNode::Lambda { body, .. } => body.ty.clone(),
+                        ExprNode::Lambda { body, .. } => {
+                            let mut yielded = Vec::new();
+                            if block_exits(body, &mut yielded, false) {
+                                yielded.extend(super::Analyzer::class_object_return_ty(body));
+                                Some(union_many(yielded))
+                            } else {
+                                body.ty.clone()
+                            }
+                        }
                         ExprNode::MethodRef { .. } => Some(method_ref_ty),
                         // Forwarded proc (`&callback`): Var in the block
                         // slot, no body to type. Presence must still reach
@@ -2963,9 +2976,17 @@ impl<'a> BodyTyper<'a> {
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
                     && block.is_none()
-                    && crate::lower::errors_index::delete_field(args).is_some()
+                    && crate::lower::errors_index::literal_field(args).is_some()
                 {
                     return Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Nil].into() };
+                }
+                if matches!(method.as_str(), "messages_for" | "full_messages_for")
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && block.is_none()
+                    && crate::lower::errors_index::messages_for_grounds(recv.as_ref(), args)
+                {
+                    return Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
                 }
                 if matches!(method.as_str(), "import" | "merge!")
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
@@ -3109,7 +3130,7 @@ impl<'a> BodyTyper<'a> {
                         {
                             Some(id.0.as_str())
                         }
-                        Some(Ty::Str) if matches!(method.as_str(), "to_date" | "to_time" | "to_datetime" | "in_time_zone" | "to_d" | "as_json" | "tableize" | "strip_heredoc") => Some("String extension"),
+                        Some(Ty::Str) if matches!(method.as_str(), "to_date" | "to_time" | "to_datetime" | "in_time_zone" | "to_d" | "as_json" | "tableize") => Some("String extension"),
                         Some(Ty::Hash { .. }) if method.as_str() == "to_sentence" => Some("Hash extension"),
                         _ if method.as_str() == "not_nil!" => Some("not_nil!"),
                         // `to_param` on Untyped goes through ActiveSupport.to_param
@@ -3213,6 +3234,17 @@ impl<'a> BodyTyper<'a> {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),
                 };
+                // `if e.respond_to?(:response)` where nothing `e` can be answers it: the branch is for a value the
+                // inference has not seen, so `e` is untyped there rather than the class it would fail on.
+                if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*cond.node
+                    && method.as_str() == "respond_to?"
+                    && let ExprNode::Var { name, .. } = &*r.node
+                    && let Some(ExprNode::Lit { value: Literal::Sym { value: asked } }) = args.first().map(|a| &*a.node)
+                    && let Some(ty) = base.local_bindings.get(name)
+                    && self.never_responds(ty, asked)
+                {
+                    then_ctx.local_bindings.insert(name.clone(), Ty::Untyped);
+                }
                 narrowing::drop_unstable_members(&mut then_ctx, &[&*cond, &*then_branch]);
                 let t = self.analyze_expr(then_branch, &then_ctx);
                 let mut else_ctx = match &pred {
@@ -3229,8 +3261,26 @@ impl<'a> BodyTyper<'a> {
                 self.analyze_expr(scrutinee, ctx);
                 let mut branch_tys = Vec::new();
                 for arm in arms.iter_mut() {
-                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, ctx); }
-                    branch_tys.push(self.analyze_expr(&mut arm.body, ctx));
+                    let pred = if let crate::expr::Pattern::Expr { expr: class } = &mut arm.pattern
+                        && matches!(&*class.node, ExprNode::Const { .. })
+                    {
+                        self.analyze_expr(class, ctx);
+                        let reader = |name: &Symbol| self.self_attribute_ty(name, ctx);
+                        (self.is_class_object(class, ctx)
+                            && !self.owns_operator(class.ty.as_ref(), &Symbol::from("==="), true)).then(|| {
+                            narrowing::extract_case_hash_narrowing(
+                                scrutinee, class, &narrowing::Probe::without_members(&reader),
+                            )
+                        }).flatten()
+                    } else {
+                        None
+                    };
+                    let mut inner = pred.as_ref()
+                        .map(|pred| narrowing::apply_narrowing(ctx, pred, true))
+                        .unwrap_or_else(|| ctx.clone());
+                    narrowing::drop_unstable_members(&mut inner, &[&arm.body]);
+                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, &inner); }
+                    branch_tys.push(self.analyze_expr(&mut arm.body, &inner));
                 }
                 union_many(branch_tys)
             }
@@ -4541,7 +4591,7 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
             if let Some((is_ivar, name)) = slot {
                 let mut pushed: Option<Ty> = None;
                 for a in args {
-                    let Some(t) = a.ty.clone() else { continue };
+                    let Some(t) = super::Analyzer::class_object_return_ty(a) else { continue };
                     if t.is_open() {
                         continue;
                     }
@@ -4648,7 +4698,7 @@ fn memo_keys(expr: &Expr, memo: &Symbol, out: &mut Vec<Ty>) {
         && matches!(method.as_str(), "[]=" | "store")
         && args.len() == 2
         && matches!(&*r.node, ExprNode::Var { name, .. } if name == memo)
-        && let Some(ty) = args[0].ty.clone().filter(|t| !t.is_open())
+        && let Some(ty) = super::Analyzer::class_object_return_ty(&args[0]).filter(|t| !t.is_open())
     {
         out.push(ty);
     }
@@ -4659,7 +4709,7 @@ fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
     let write = match &*expr.node {
         ExprNode::Assign { target: LValue::Index { recv, .. }, value }
         | ExprNode::OpAssign { target: LValue::Index { recv, .. }, value, .. } => {
-            value.ty.clone().map(|t| (recv, t))
+            super::Analyzer::class_object_return_ty(value).map(|t| (recv, t))
         }
         // `h[k] = v` reaches the analyzer as a two-arg `[]=` send, NOT
         // as an `LValue::Index` assign — the LValue shape only survives
@@ -4669,7 +4719,7 @@ fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
         ExprNode::Send { recv: Some(r), method, args, .. }
             if matches!(method.as_str(), "[]=" | "store") && args.len() == 2 =>
         {
-            args[1].ty.clone().map(|t| (r, t))
+            super::Analyzer::class_object_return_ty(&args[1]).map(|t| (r, t))
         }
         _ => None,
     };
@@ -5035,13 +5085,7 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     let mut acc = UnionAcc::default();
     push_union_variants(a, &mut acc);
     push_union_variants(b, &mut acc);
-    let mut variants = acc.out;
-    Ty::canonicalize_variants(&mut variants);
-    match variants.len() {
-        0 => Ty::Bottom,
-        1 => variants.into_iter().next().unwrap(),
-        _ => Ty::Union { variants: variants.into() },
-    }
+    acc.finish()
 }
 
 /// Unions at or above this many variants find an equal variant through a
@@ -5073,9 +5117,23 @@ struct UnionAcc {
     /// Fingerprint → positions in `out`, covering `out[..indexed]`.
     index: HashMap<u64, Vec<usize>>,
     indexed: usize,
+    /// Where `out` holds its one `Hash` and its one `Array` spine.
+    hash_at: Option<usize>,
+    array_at: Option<usize>,
 }
 
 impl UnionAcc {
+    /// The canonical type of the variants pushed.
+    fn finish(self) -> Ty {
+        let mut variants = self.out;
+        Ty::canonicalize_variants(&mut variants);
+        match variants.len() {
+            0 => Ty::Bottom,
+            1 => variants.into_iter().next().unwrap(),
+            _ => Ty::Union { variants: variants.into() },
+        }
+    }
+
     /// The first position holding a variant `==` to `other`. `other` is
     /// neither `Hash` nor `Array`, so those entries (mutated in place by
     /// the merge arms) never match and are left out of the index.
@@ -5107,25 +5165,27 @@ fn push_union_variants(t: Ty, acc: &mut UnionAcc) {
                 push_union_variants(v, acc);
             }
         }
-        Ty::Hash { key, value } => {
-            for existing in acc.out.iter_mut() {
-                if let Ty::Hash { key: k0, value: v0 } = existing {
-                    *k0 = std::sync::Arc::new(union_of((**k0).clone(), std::sync::Arc::unwrap_or_clone(key)));
-                    *v0 = std::sync::Arc::new(union_of((**v0).clone(), std::sync::Arc::unwrap_or_clone(value)));
-                    return;
-                }
+        Ty::Hash { key, value } => match acc.hash_at {
+            Some(i) => {
+                let Ty::Hash { key: k0, value: v0 } = &mut acc.out[i] else { unreachable!("hash_at holds the Hash") };
+                *k0 = std::sync::Arc::new(union_of((**k0).clone(), std::sync::Arc::unwrap_or_clone(key)));
+                *v0 = std::sync::Arc::new(union_of((**v0).clone(), std::sync::Arc::unwrap_or_clone(value)));
             }
-            acc.out.push(Ty::Hash { key, value });
-        }
-        Ty::Array { elem } => {
-            for existing in acc.out.iter_mut() {
-                if let Ty::Array { elem: e0 } = existing {
-                    *e0 = std::sync::Arc::new(union_of((**e0).clone(), std::sync::Arc::unwrap_or_clone(elem)));
-                    return;
-                }
+            None => {
+                acc.hash_at = Some(acc.out.len());
+                acc.out.push(Ty::Hash { key, value });
             }
-            acc.out.push(Ty::Array { elem });
-        }
+        },
+        Ty::Array { elem } => match acc.array_at {
+            Some(i) => {
+                let Ty::Array { elem: e0 } = &mut acc.out[i] else { unreachable!("array_at holds the Array") };
+                *e0 = std::sync::Arc::new(union_of((**e0).clone(), std::sync::Arc::unwrap_or_clone(elem)));
+            }
+            None => {
+                acc.array_at = Some(acc.out.len());
+                acc.out.push(Ty::Array { elem });
+            }
+        },
         other => match acc.position_of(&other) {
             // An equal variant can differ in record field order; keep
             // the canonical one so the result doesn't depend on which
@@ -5193,14 +5253,27 @@ fn is_settled_arm_list(variants: &[Ty]) -> bool {
         && variants.windows(2).all(|w| Ty::cmp_nil_last(&w[0], &w[1]) != std::cmp::Ordering::Greater)
 }
 
+/// The join of `tys`, as folding them through [`union_of`] gives.
+///
+/// Three or more arms, none of them a union (a union's arms, as
+/// `fixpoint_bound::cut` re-joins them), go into one accumulator
+/// instead: a fold built a fresh one per step and indexed the whole
+/// result so far each time, which made a wide union (a parameter met by
+/// a call per class of an app with thousands) quadratic in its arms.
+/// Each step of the fold flattens, dedups and merges spines into a
+/// sorted list as `push_union_variants` does, so the result is the
+/// same. A union among the inputs keeps the fold: `union_of` returns an
+/// input equal to the other as it stands, nested arms included.
 pub(super) fn union_many(tys: Vec<Ty>) -> Ty {
-    // Fold through `union_of` so the same Bottom-filtering, structural
-    // container join, and flatten/dedup normalization applies.
-    let mut iter = tys.into_iter().filter(|t| !matches!(t, Ty::Bottom));
-    match iter.next() {
-        None => Ty::Bottom,
-        Some(first) => iter.fold(first, union_of),
+    let tys: Vec<Ty> = tys.into_iter().filter(|t| !matches!(t, Ty::Bottom)).collect();
+    if tys.len() < 3 || tys.iter().any(|t| matches!(t, Ty::Union { .. })) {
+        return tys.into_iter().reduce(union_of).unwrap_or(Ty::Bottom);
     }
+    let mut acc = UnionAcc::default();
+    for t in tys {
+        push_union_variants(t, &mut acc);
+    }
+    acc.finish()
 }
 
 
@@ -6499,6 +6572,26 @@ mod tests {
     }
 
     #[test]
+    fn union_many_is_the_fold_of_union_of() {
+        let universe = law_universe();
+        let wide: Vec<Ty> = (0..60).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("C{i}").as_str())), args: vec![].into() }).collect();
+        let fold = |tys: &[Ty]| tys.iter().cloned().filter(|t| !matches!(t, Ty::Bottom)).reduce(union_of).unwrap_or(Ty::Bottom);
+        for a in &universe {
+            for b in &universe {
+                for c in &universe {
+                    let tys = [a.clone(), b.clone(), c.clone(), a.clone()];
+                    assert_eq!(union_many(tys.to_vec()), fold(&tys), "{tys:?}");
+                }
+            }
+            let tys: Vec<Ty> = wide.iter().cloned().chain([a.clone()]).chain(wide.iter().rev().cloned()).chain(universe.iter().cloned()).collect();
+            assert_eq!(union_many(tys.clone()), fold(&tys), "{a:?} among a wide union");
+        }
+        let nested = Ty::Union { variants: vec![Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() }, Ty::Nil].into() };
+        let tys = vec![nested.clone(), nested.clone(), nested];
+        assert_eq!(union_many(tys.clone()), fold(&tys), "a union equal to the other arms is kept as it stands");
+    }
+
+    #[test]
     fn union_of_bool_int_nil_is_structural_not_debug_order() {
         // Debug-string sort put Bool before Int; `ty_tag` puts Int first.
         let got = union_of(union_of(Ty::Bool, Ty::Int), Ty::Nil);
@@ -7276,19 +7369,17 @@ fn filter_map_and_value(body: &Expr) -> Option<Ty> {
     let ExprNode::BoolOp { op: crate::expr::BoolOpKind::And, right, .. } = &*tail.node else {
         return None;
     };
-    let mut yielded = vec![right.ty.clone()?];
-    if !block_exits(body, &mut yielded) {
+    let mut yielded = vec![super::Analyzer::class_object_return_ty(right)?];
+    if !block_exits(body, &mut yielded, true) {
         return None;
     }
     yielded.into_iter().reduce(union_of)
 }
 
-/// Collect the types of this block's `next` values (a bare `next` is
-/// nil; a literal `next false` adds nothing, since `filter_map` drops
-/// it) into `yielded`, leaving out the blocks and loops inside it,
-/// which own their `next`. `false` on a `break`, or a `next` value with
-/// no type yet.
-fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
+/// Collect this block's `next` values, leaving out inner blocks and loops,
+/// which own their `next`. A bare `next` is nil; only `filter_map` drops
+/// a literal `next false`. `false` on a `break` or an untyped value.
+fn block_exits(e: &Expr, yielded: &mut Vec<Ty>, drop_false: bool) -> bool {
     match &*e.node {
         ExprNode::Break { .. } => false,
         ExprNode::Next { value } => match value {
@@ -7297,11 +7388,11 @@ fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
                 true
             }
             // `filter_map` drops a `next false` as it drops the `&&`'s false: no element
-            Some(v) if matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }) => true,
-            Some(v) => match &v.ty {
+            Some(v) if drop_false && matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }) => true,
+            Some(v) => match super::Analyzer::class_object_return_ty(v) {
                 Some(ty) => {
-                    yielded.push(ty.clone());
-                    block_exits(v, yielded)
+                    yielded.push(ty);
+                    block_exits(v, yielded, drop_false)
                 }
                 None => false,
             },
@@ -7309,10 +7400,31 @@ fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
         ExprNode::Lambda { .. } | ExprNode::While { .. } => true,
         _ => {
             let mut ok = true;
-            e.node.for_each_child(&mut |child| ok &= block_exits(child, yielded));
+            e.node.for_each_child(&mut |child| ok &= block_exits(child, yielded, drop_false));
             ok
         }
     }
+}
+
+pub(super) fn class_object_boolop_ty(left: &Expr, op: crate::expr::BoolOpKind, right: &Expr) -> Option<Ty> {
+    use crate::expr::BoolOpKind::{And, Or};
+    let lt = super::Analyzer::class_object_expr_ty(left)?;
+    let falsy = matches!(lt, Ty::Nil)
+        || matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: false } });
+    let truthy = never_falsy(&lt)
+        || matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: true } });
+    let right = || super::Analyzer::class_object_expr_ty(right);
+    Some(match op {
+        Or if truthy => lt,
+        And if falsy => lt,
+        Or if falsy => right()?,
+        And if truthy => right()?,
+        Or => union_of(narrowing::remove_nil(&lt), right()?),
+        And => match falsy_part(&lt) {
+            Some(f) => union_of(f, right()?),
+            None => right()?,
+        },
+    })
 }
 
 /// The arms of `ty` a falsy value can come from -- `nil`, `false`, and

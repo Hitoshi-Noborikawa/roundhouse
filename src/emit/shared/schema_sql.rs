@@ -141,6 +141,7 @@ impl Dialect {
     /// else — a date or binary value, a default ingest could not read — is left to
     /// the model layer, as before.
     fn column_default(self, col: &Column) -> Option<String> {
+        if let Some(sql) = &col.default_expression { return Some(format!("({sql})")); }
         let raw = col.stored_default()?;
         if col.generated.is_some() {
             return None;
@@ -323,13 +324,19 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
                 lines.push(line);
             }
         }
+        for check in &table.check_constraints {
+            let name = check.name.as_ref().map(|n| format!("CONSTRAINT {} ", dialect.ident(n))).unwrap_or_default();
+            lines.push(format!("  {name}CHECK ({})", check.expression));
+        }
         writeln!(s, "{}", lines.join(",\n")).unwrap();
         s.push(')');
         out.push(s);
     }
     for (_name, table) in &schema.tables {
         for idx in &table.indexes {
-            let cols: Vec<String> = idx.columns.iter().map(|c| dialect.ident(c.as_str())).collect();
+            let cols = idx.expression.clone().unwrap_or_else(|| {
+                idx.columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", ")
+            });
             let unique = if idx.unique { "UNIQUE " } else { "" };
             let using = match (dialect, idx.using.as_deref()) {
                 (Dialect::Postgres, Some(method)) => format!(" USING {}", dialect.ident(method)),
@@ -343,7 +350,7 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
                 "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({}){predicate}",
                 dialect.ident(idx.name.as_str()),
                 dialect.ident(table.name.as_str()),
-                cols.join(", "),
+                cols,
             ));
         }
     }
@@ -371,6 +378,27 @@ pub fn validate_schema_for_dialect(schema: &Schema, dialect: Dialect) -> Result<
         Dialect::Postgres => crate::schema::generated::GeneratedExpressionDialect::Postgres,
     };
     for table in schema.tables.values() {
+        if let Some(column) = table.columns.iter().find(|c| c.primary_key && c.default_expression.is_some()) {
+            return Err(format!("unsupported primary-key default on {}.{}", table.name, column.name));
+        }
+        {
+            for expression in table.check_constraints.iter().map(|c| c.expression.as_str())
+                .chain(table.indexes.iter().filter_map(|i| i.expression.as_deref()))
+                .chain(table.indexes.iter().filter(|_| dialect == Dialect::Postgres).filter_map(|i| i.predicate.as_deref()))
+            {
+                if !schema_expression_supported(expression, Some(table), expression_dialect) {
+                    return Err(format!("unsupported schema expression on {}: {expression}", table.name));
+                }
+            }
+            for expression in table.columns.iter().filter_map(|c| c.computed_default()) {
+                if !schema_expression_supported(expression, None, expression_dialect) {
+                    return Err(format!("unsupported default expression on {}: {expression}", table.name));
+                }
+            }
+            if let Some(column) = table.columns.iter().find(|c| c.col_type == ColumnType::Boolean && c.computed_default().is_some_and(|sql| !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()))) {
+                return Err(format!("unsupported Boolean function default on {}.{}", table.name, column.name));
+            }
+        }
         if let Some(vm) = &table.virtual_module {
             if dialect != Dialect::Sqlite {
                 return Err(format!(
@@ -429,29 +457,45 @@ pub fn render_schema_sql(schema: &Schema) -> String {
 /// - `AND`, `OR`, `NOT`, `IS`, `NULL`, `TRUE`, `FALSE`, `IN` and
 ///   `BETWEEN` (not `LIKE`, which ignores ASCII case in SQLite and not in
 ///   Postgres);
-/// - the functions both engines define alike (on ASCII text), called as
-///   `lower(…)`: `lower`, `upper`, `length`, `coalesce`, `nullif` and
-///   `abs`;
+/// - a closed list of SQLite scalar functions, called as `lower(…)`;
+///   SQLite-specific calls are refused by the PostgreSQL expression gate;
 /// - parentheses, commas, and the operators `= <> != < > <= >= + - * / %
 ///   ||`.
 ///
 /// No rewriting: dropping a `::text` cast is not generally
 /// meaning-preserving (`status::text = '01'` is false for an integer 1
 /// in Postgres, and `status = '01'` is true in SQLite).
-fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
+pub(crate) fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
+    sqlite_expression(predicate, Some(table))
+}
+
+/// Defaults cannot reference columns; randomblob is allowed only there.
+pub(crate) fn schema_expression_supported(sql: &str, table: Option<&Table>, dialect: crate::schema::generated::GeneratedExpressionDialect) -> bool {
+    if dialect == crate::schema::generated::GeneratedExpressionDialect::Portable {
+        return sqlite_expression(sql, table);
+    }
+    // Skip quoted data and comments; recognize quoted function names too.
+    let tokens = regex::Regex::new(r#"'(?:''|[^'])*'|--[^\n]*|/\*[\s\S]*?\*/|"((?:""|[^"])*)"((?:\s|/\*[\s\S]*?\*/|--[^\n]*\n)*\()?|([a-zA-Z_][a-zA-Z0-9_]*)(?:\s|/\*[\s\S]*?\*/|--[^\n]*\n)*\("#).unwrap();
+    !tokens.captures_iter(sql).filter_map(|c| c.get(3).or_else(|| c.get(2).and(c.get(1)))).any(|name| {
+        ["printf", "hex", "randomblob", "json_valid", "substr"].iter().any(|f| name.as_str().eq_ignore_ascii_case(f))
+    })
+}
+
+fn sqlite_expression(predicate: &str, table: Option<&Table>) -> bool {
     const WORDS: &[&str] = &["AND", "OR", "NOT", "IS", "NULL", "TRUE", "FALSE", "IN", "BETWEEN"];
-    const FUNCTIONS: &[&str] = &["lower", "upper", "length", "coalesce", "nullif", "abs"];
+    const FUNCTIONS: &[&str] = &["lower", "upper", "length", "coalesce", "nullif", "abs", "printf", "hex", "json_valid", "substr"];
     let is_column = |name: &str, quoted: bool| {
-        table.columns.iter().any(|c| {
+        table.is_some_and(|table| table.columns.iter().any(|c| {
             if quoted {
                 c.name.as_str() == name
             } else {
                 c.name.as_str().eq_ignore_ascii_case(name)
             }
-        })
+        }))
     };
     let chars: Vec<char> = predicate.chars().collect();
     let mut i = 0;
+    let mut has_function = false;
     while i < chars.len() {
         let c = chars[i];
         if c == '\'' {
@@ -484,7 +528,8 @@ fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
                 }
             }
             i += 1;
-            if !is_column(&name, true) {
+            // Quoted identifiers name columns, never unlisted function calls.
+            if !is_column(&name, true) || chars[i..].iter().find(|c| !c.is_ascii_whitespace()) == Some(&'(') {
                 return false;
             }
         } else if c.is_ascii_alphabetic() || c == '_' {
@@ -497,10 +542,15 @@ fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
             while chars.get(next).is_some_and(|ch| ch.is_ascii_whitespace()) {
                 next += 1;
             }
-            let ok = if WORDS.iter().any(|w| word.eq_ignore_ascii_case(w)) {
-                true
-            } else if chars.get(next) == Some(&'(') {
+            let operator = ["AND", "OR", "NOT", "IS", "IN", "BETWEEN"].iter().any(|w| word.eq_ignore_ascii_case(w));
+            let ok = if chars.get(next) == Some(&'(') && !operator {
+                // Rails recognizes a lazy default only when a call has no space before `(`.
+                has_function |= next == i;
                 FUNCTIONS.iter().any(|f| word.eq_ignore_ascii_case(f))
+                    || table.is_none() && word.eq_ignore_ascii_case("randomblob")
+            } else if WORDS.iter().any(|w| word.eq_ignore_ascii_case(w))
+                || table.is_none() && ["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].iter().any(|w| word.eq_ignore_ascii_case(w)) {
+                true
             } else {
                 is_column(&word, false)
             };
@@ -517,12 +567,14 @@ fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
         } else if c.is_ascii_whitespace()
             || matches!(c, '(' | ')' | ',' | '=' | '<' | '>' | '!' | '+' | '-' | '*' | '/' | '%' | '|')
         {
+            // Comments cannot separate a column name from an unlisted call.
+            if (c == '/' && chars.get(i + 1) == Some(&'*')) || (c == '-' && chars.get(i + 1) == Some(&'-')) { return false; }
             i += 1;
         } else {
             return false;
         }
     }
-    true
+    table.is_some() || has_function || ["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].iter().any(|clock| predicate.eq_ignore_ascii_case(clock))
 }
 
 fn is_integer(ct: &ColumnType) -> bool {
@@ -602,6 +654,8 @@ mod tests {
             col_type,
             nullable,
             default: None,
+            default_expression: None,
+            legacy_default_persistence: false,
             primary_key,
             generated: None,
             generated_text_compatible: None,
@@ -612,7 +666,7 @@ mod tests {
     }
 
     fn table(name: &str, columns: Vec<Column>, indexes: Vec<Index>) -> Table {
-        Table { name: Symbol::from(name), columns, indexes, foreign_keys: Vec::new(), virtual_module: None, known_keyless: false, primary_key_columns: Vec::new() }
+        Table { name: Symbol::from(name), columns, indexes, foreign_keys: Vec::new(), check_constraints: Vec::new(), virtual_module: None, known_keyless: false, primary_key_columns: Vec::new() }
     }
 
     fn schema_of(tables: Vec<Table>) -> Schema {
@@ -957,6 +1011,7 @@ end
             vec![Index {
                 name: Symbol::from("index_user_on_createdAt"),
                 columns: vec![Symbol::from("createdAt")],
+                expression: None,
                 unique: true,
                 using: None,
                 predicate: None,

@@ -4046,6 +4046,7 @@ end
         ),
         ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
         ("app/views/widgets/show.html.erb", "<p><%= @widget %></p>\n"),
+        ("app/views/layouts/application.html.erb", "<%= yield %>\n"),
         (
             "db/schema.rb",
             r#"ActiveRecord::Schema[7.1].define(version: 1) do
@@ -4118,7 +4119,7 @@ end
     );
 
     // Convention default layout, resolved through the chain.
-    assert_eq!(res.layout.as_ref().map(|s| s.as_str()), Some("layouts/application"));
+    assert_eq!(res.layouts.iter().map(|s| s.as_str()).collect::<Vec<_>>(), vec!["layouts/application"]);
 }
 
 #[test]
@@ -4217,6 +4218,7 @@ end
         ),
         ("app/views/public/index.html.erb", "<p>hi</p>\n"),
         ("app/views/pages/index.html.erb", "<p>hi</p>\n"),
+        ("app/views/layouts/admin.html.erb", "<%= yield %>\n"),
         (
             "db/schema.rb",
             "ActiveRecord::Schema[7.1].define(version: 1) do\nend\n",
@@ -4224,17 +4226,17 @@ end
     ]);
 
     // Explicit `layout "admin"` resolves and inherits down the chain;
-    // explicit `layout false` records as None.
+    // explicit `layout false` records none.
     let pages = app
         .controller_resolutions
         .get(&ClassId(Symbol::from("PagesController")))
         .expect("PagesController resolution");
-    assert_eq!(pages.layout.as_ref().map(|s| s.as_str()), Some("layouts/admin"));
+    assert_eq!(pages.layouts.iter().map(|s| s.as_str()).collect::<Vec<_>>(), vec!["layouts/admin"]);
     let public = app
         .controller_resolutions
         .get(&ClassId(Symbol::from("PublicController")))
         .expect("PublicController resolution");
-    assert_eq!(public.layout, None, "layout false → None");
+    assert!(public.layouts.is_empty(), "layout false → none: {:?}", public.layouts);
 
     // The Skip entry is retained in the chain (per-action consumers
     // apply it), carrying no assigns/effects of its own, while the

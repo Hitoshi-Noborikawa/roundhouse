@@ -127,6 +127,11 @@ fn measure(ty: &Ty) -> (usize, usize) {
     (depth + usize::from(is_container(ty)), nodes)
 }
 
+/// [`cut`] for a widening outside the bound itself (`oscillation`).
+pub(super) fn cut_to(ty: &Ty, levels: usize) -> Ty {
+    cut(ty, levels)
+}
+
 /// `ty` with at most `levels` nested containers: one that would sit
 /// deeper is `untyped`. Unions are re-joined, since cut arms can coincide.
 fn cut(ty: &Ty, levels: usize) -> Ty {

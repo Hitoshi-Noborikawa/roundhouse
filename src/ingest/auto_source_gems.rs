@@ -120,8 +120,39 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
             named.insert((path.to_string(), in_source_gem(c)));
         })
     });
+    // An initializer setting of a gem no recognizer reads: the gem's own code would run it (`Rack::Attack.throttle`).
+    for path in &app.boot_gem_constants {
+        named.insert((path.clone(), false));
+    }
     for (path, from_gem) in &named {
         consider(path, *from_gem);
     }
+    // Not only gems the app names: Bundler requires every direct dependency, and one that depends on a gem compiled from source can extend it as it loads (devise_invitable's `Devise.add_module :invitable`).
+    let mut extenders: Vec<String> = Vec::new();
+    for gem in &lock.dependencies {
+        // Not only this pass's: a gem an earlier pass brought in (`app.auto_source_gems`) is compiled too.
+        let sourced = |d: &str| out.contains(d) || lock.source.iter().any(|s| s == d) || app.auto_source_gems.iter().any(|g| g == d);
+        let depends_on_sourced = lock.spec_deps.get(gem.as_str()).is_some_and(|deps| deps.iter().any(|d| sourced(d)));
+        if !depends_on_sourced || sourced(gem) || !matches!(crate::gems::fate_of(gem), GemFate::Unknown) {
+            continue;
+        }
+        if lock.is_in_repo(gem) || lock.is_from_git(gem) || lock.is_source(gem) || app.extensions.is_rails_dependent(gem) {
+            continue;
+        }
+        let Some(version) = lock.version_of(gem) else { continue };
+        let Some(installed) = crate::i18n::gems::installed_gem(vfs, &roots, gem, version) else { continue };
+        if vfs.is_dir(&installed.join("ext")) {
+            continue;
+        }
+        let lib = installed.join("lib");
+        let has_entry = match lock.gemfile_requires.get(gem.as_str()).filter(|f| !f.is_empty()) {
+            Some(features) => features.iter().all(|f| vfs.exists(&lib.join(if f.ends_with(".rb") { f.clone() } else { format!("{f}.rb") }))),
+            None => [gem.to_string(), gem.replace('-', "/")].iter().any(|f| vfs.exists(&lib.join(format!("{f}.rb")))),
+        };
+        if has_entry {
+            extenders.push(gem.clone());
+        }
+    }
+    out.extend(extenders);
     out.into_iter().collect()
 }

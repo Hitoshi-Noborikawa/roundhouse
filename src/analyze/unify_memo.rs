@@ -139,8 +139,9 @@ impl UnifyMemo {
         });
         // Group by key in first-seen order: the rows go in in the order a
         // full fold would insert them.
-        let mut order: Vec<ParamKey> = Vec::new();
-        let mut groups: HashMap<ParamKey, Vec<Vec<Ty>>> = HashMap::default();
+        let previous_len = self.folded(scope).len();
+        let mut order: Vec<ParamKey> = Vec::with_capacity(previous_len);
+        let mut groups: HashMap<ParamKey, Vec<Vec<Ty>>> = HashMap::with_capacity_and_hasher(previous_len, Default::default());
         for (key, tys) in observations {
             match groups.get_mut(&key) {
                 Some(group) => group.push(tys),
@@ -151,7 +152,7 @@ impl UnifyMemo {
             }
         }
         let previous = std::mem::take(self.folded(scope));
-        let mut next = Folded::default();
+        let mut next = Folded::with_capacity_and_hasher(order.len(), Default::default());
         let (mut kept, mut refolded) = (0usize, 0usize);
         for key in order {
             let observed = groups.remove(&key).expect("grouped above");

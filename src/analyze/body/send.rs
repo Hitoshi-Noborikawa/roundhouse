@@ -1225,6 +1225,44 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    /// Whether no value of `ty` answers `method`: each variant is a class whose chain the program
+    /// defines, without it, up to a core class that does not answer it either.
+    pub(super) fn never_responds(&self, ty: &Ty, method: &Symbol) -> bool {
+        let variants: Vec<&Ty> = match ty {
+            Ty::Union { variants } => variants.iter().collect(),
+            t => vec![t],
+        };
+        !variants.is_empty()
+            && variants.iter().all(|v| match v {
+                Ty::Class { id, .. } => self.chain_lacks(id, method),
+                _ => false,
+            })
+    }
+
+    fn chain_lacks(&self, of: &ClassId, method: &Symbol) -> bool {
+        const CORE: &[&str] = &["Object", "BasicObject", "StandardError", "Exception", "RuntimeError", "ArgumentError"];
+        const EXCEPTION_METHODS: &[&str] = &["message", "backtrace", "backtrace_locations", "full_message", "detailed_message", "cause", "set_backtrace", "exception"];
+        let mut current = Some(of.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return !crate::emit::audit::OBJECT_METHODS.contains(&method.as_str()) };
+            let Some(cls) = self.classes().get(&id) else {
+                return CORE.contains(&id.0.as_str().trim_start_matches("::"))
+                    && !crate::emit::audit::OBJECT_METHODS.contains(&method.as_str())
+                    && !EXCEPTION_METHODS.contains(&method.as_str());
+            };
+            // Not settled past a module the program does not define, or a `method_missing`: either may answer it.
+            if cls.instance_methods.contains_key(method)
+                || cls.instance_methods.contains_key(&Symbol::from("method_missing"))
+                || cls.instance_methods.contains_key(&Symbol::from("respond_to_missing?"))
+                || cls.includes.iter().any(|m| self.classes().get(m).is_none() || self.lookup_in_module(m, method).is_some())
+            {
+                return false;
+            }
+            current = cls.parent.clone();
+        }
+        false
+    }
+
     fn defines_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {
@@ -3887,8 +3925,12 @@ pub(super) fn hash_method(
             value: std::sync::Arc::new(value.clone()),
         })
         .unwrap_or_else(unknown),
-        "stringify_keys" | "deep_stringify_keys" | "stringify_keys!"
-        | "deep_stringify_keys!" => Ty::Hash {
+        "deep_stringify_keys" => crate::analyze::hash_keys::deep_stringify_keys(
+            &Ty::Hash { key: std::sync::Arc::new(key.clone()), value: std::sync::Arc::new(value.clone()) },
+            method,
+            args,
+        ).unwrap_or_else(unknown),
+        "stringify_keys" | "stringify_keys!" | "deep_stringify_keys!" => Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
             value: std::sync::Arc::new(value.clone()),
         },
@@ -4127,14 +4169,14 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // ActiveSupport String extensions. Pluralization/inflection
         // methods all return Str; comparison-style return Bool. Match
         // the surface of `ActiveSupport::Inflector` that real Rails
-        // code reaches for in views and helpers. `tableize` and
-        // `strip_heredoc` are not here: no runtime answers them, so
-        // they stay unknown and read as a `String extension` gap.
+        // code reaches for in views and helpers. `tableize` is not here:
+        // no runtime answers it, so it stays unknown and reads as a
+        // `String extension` gap.
         "pluralize" | "singularize" | "camelize" | "camelcase"
         | "underscore" | "dasherize" | "titleize" | "titlecase"
         | "humanize" | "demodulize" | "deconstantize" | "classify"
         | "foreign_key" | "parameterize" | "truncate" | "truncate_words" | "truncate_bytes"
-        | "squish" | "remove" | "indent"
+        | "squish" | "remove" | "indent" | "strip_heredoc"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),
         // JSON encoding is provided by the Ruby runtime; the other
@@ -4160,6 +4202,7 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
         // constant holding it was a value with no inferred type, so
         // every read of it was "constant not supported".
         "to_proc" => Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("Proc")), args: vec![].into() },
+        "name" => Ty::Str,
         "length" | "size" => Ty::Int,
         "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
         "empty?" => Ty::Bool,

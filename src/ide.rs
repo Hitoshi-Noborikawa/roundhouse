@@ -2272,7 +2272,9 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
                 partials,
                 n_plus_one: preloads_in_files(app, &preload_diags, &view_files, &path_bodies),
             });
-            if let Some(layout) = &resolution.layout {
+            let layout = crate::controller_layout::Layouts::new(&app.controllers, &app.views)
+                .for_action(controller_id.0.as_str(), action_name.as_str());
+            if let crate::controller_layout::Layout::Template(layout) = &layout {
                 let file = view_location(app, layout);
                 let n_plus_one = match &file {
                     Some(f) => preloads_in_files(

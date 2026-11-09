@@ -140,6 +140,7 @@ fn emit_migrations(app: &App) -> Vec<EmittedFile> {
 /// the DB-level cascade is the idiomatic equivalent (and what the
 /// reviewed exemplar does).
 fn migration_for(app: &App, table: &Table) -> String {
+    let ruby_str = crate::emit::ruby::expr::ruby_str_literal;
     let fk_cols: Vec<&str> = table
         .foreign_keys
         .iter()
@@ -172,12 +173,17 @@ fn migration_for(app: &App, table: &Table) -> String {
         if !col.nullable {
             l.push_str(", null: false");
         }
+        if let Some(sql) = &col.default_expression {
+            l.push_str(&format!(", default: Sequel.lit({})", crate::emit::ruby::expr::ruby_str_literal(sql)));
+        }
         lines.push(l);
     }
     for idx in &table.indexes {
         // The FK line above doesn't auto-index; keep the schema's
         // explicit indexes (minus any on the primary key).
-        let cols = if idx.columns.len() == 1 {
+        let cols = if let Some(expression) = &idx.expression {
+            format!("Sequel.lit({})", ruby_str(expression))
+        } else if idx.columns.len() == 1 {
             format!(":{}", idx.columns[0])
         } else {
             format!(
@@ -186,7 +192,13 @@ fn migration_for(app: &App, table: &Table) -> String {
             )
         };
         let unique = if idx.unique { ", unique: true" } else { "" };
-        lines.push(format!("      index {cols}{unique}"));
+        let name = idx.expression.as_ref().map(|_| format!(", name: {}", ruby_str(idx.name.as_str()))).unwrap_or_default();
+        let predicate = idx.predicate.as_ref().filter(|sql| crate::emit::shared::schema_sql::sqlite_reads_alike(sql, table)).map(|sql| format!(", where: Sequel.lit({})", ruby_str(sql))).unwrap_or_default();
+        lines.push(format!("      index {cols}{unique}{name}{predicate}"));
+    }
+    for check in &table.check_constraints {
+        let name = check.name.as_ref().map(|n| ruby_str(n)).unwrap_or_else(|| "nil".into());
+        lines.push(format!("      constraint({name}, Sequel.lit({}))", ruby_str(&check.expression)));
     }
     format!(
         "Sequel.migration do\n  change do\n    create_table(:{}) do\n{}\n    end\n  end\nend\n",
@@ -231,12 +243,12 @@ fn sequel_column_type(ty: &ColumnType) -> (&'static str, &'static str) {
         ColumnType::DateTime => ("DateTime", ""),
         ColumnType::Time => ("Time", ""),
         ColumnType::Binary => ("File", ""),
-        // No 1:1 Sequel generic type; store as text and note the source type.
-        ColumnType::Json => ("String", ", text: true # was json"),
-        ColumnType::Jsonb => ("String", ", text: true # was jsonb"),
-        ColumnType::Uuid => ("String", ", fixed: true, size: 36 # was uuid"),
-        ColumnType::Interval => ("String", ", text: true # was interval"),
-        ColumnType::Reference { .. } => ("Integer", " # was t.references"),
+        // No 1:1 Sequel generic type; store as text.
+        ColumnType::Json => ("String", ", text: true"),
+        ColumnType::Jsonb => ("String", ", text: true"),
+        ColumnType::Uuid => ("String", ", fixed: true, size: 36"),
+        ColumnType::Interval => ("String", ", text: true"),
+        ColumnType::Reference { .. } => ("Integer", ""),
     }
 }
 
@@ -299,8 +311,9 @@ fn model_for(model: &Model, schema: &Schema) -> String {
 
     let mut validate_lines: Vec<String> = Vec::new();
     let mut presence: Vec<String> = Vec::new();
+    let ordered_presence = model.validations().any(|v| v.prepend);
 
-    for item in &model.body {
+    for item in model.validation_order() {
         match item {
             ModelBodyItem::Association { assoc, .. } => {
                 lines.push(format!("  {}", association_line(assoc)));
@@ -338,7 +351,7 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                     .unwrap_or_default();
                 for rule in &validation.rules {
                     match rule {
-                        ValidationRule::Presence if !custom.is_empty() => {
+                        ValidationRule::Presence if ordered_presence || !custom.is_empty() => {
                             validate_lines.push(format!("    validates_presence :{}{custom}", validation.attribute));
                         }
                         ValidationRule::Presence => {
@@ -2211,6 +2224,7 @@ mod tests {
             refused: None,
             format_required: false,
             mount_root: false,
+            guards: Vec::new(),
         }
     }
 

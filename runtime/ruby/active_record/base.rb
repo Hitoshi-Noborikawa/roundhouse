@@ -354,6 +354,14 @@ module ActiveRecord
       out
     end
 
+    # Rails' `errors.full_messages_for(attribute)`: the full messages of the errors on one attribute.
+    # The ruby-family connection.rb reopen answers them frozen, as Rails does; a strict target has no frozen Array.
+    def error_full_messages_for(attribute)
+      out = []
+      error_details.each { |error| out << error.full_message if error.attribute == attribute }
+      out
+    end
+
     # Not `errors`, the full messages: Rails renders a record's errors keyed by attribute, as `errors.as_json` answers.
     def errors_json
       out = {}
@@ -1127,6 +1135,12 @@ module ActiveRecord
       changes.key?(name)
     end
 
+    # `to_s`: the pending diff is keyed by column-name String, and
+    # callers usually pass a Symbol.
+    def will_save_change_to_attribute?(name)
+      attribute_changed?(name.to_s)
+    end
+
     # Rails' `changed?` / `has_changes_to_save?`: any column pending.
     # campfire's `RecordCache` snapshots only records with none.
     def changed?
@@ -1228,6 +1242,16 @@ module ActiveRecord
     # no transaction to wait on, so here it is `touch`.
     def touch_later
       touch
+    end
+
+    # Whether the update that just ran wrote the row, which is what
+    # Rails' `belongs_to …, touch: true` asks (`if: :saved_changes?`)
+    # before touching the parent from `after_update`. A strict target's
+    # `save` writes the whole row every time, so the answer is always
+    # yes; the ruby-family reopen (connection.rb) skips an update with
+    # nothing pending and answers from `saved_changes`.
+    def _wrote_on_update?
+      true
     end
 
     # `touch` after a call-site column write (`touch :connected_at`,

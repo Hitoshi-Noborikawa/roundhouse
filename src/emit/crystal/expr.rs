@@ -1741,9 +1741,15 @@ pub(super) fn emit_send_base(
             // `parent.nil?` check turns into `parent.not_nil!.nil?`
             // — always false — and the surrounding `return if` is
             // dead code.
-            let recv_s = if is_nilable_class_union(r.ty.as_ref())
+            // A nilable String (a nullable string column, `String | Nil`)
+            // takes the same `.not_nil!` for the String methods nil has
+            // no answer for in Ruby: they raise on nil there too.
+            let nilable_string_method = is_nilable_str_union(r.ty.as_ref())
+                && matches!(method.as_str(), "empty?" | "length" | "size");
+            let recv_s = if (is_nilable_class_union(r.ty.as_ref())
                 && is_simple_method_name(method.as_str())
-                && !is_nil_safe_dispatch(method.as_str())
+                && !is_nil_safe_dispatch(method.as_str()))
+                || nilable_string_method
             {
                 format!("{recv_s}.not_nil!")
             } else {
@@ -1798,6 +1804,14 @@ fn is_nilable_class_union(ty: Option<&Ty>) -> bool {
     let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
     let has_class = variants.iter().any(|v| matches!(v, Ty::Class { .. }));
     has_nil && has_class
+}
+
+/// `String | Nil`: a nilable String, such as a nullable string column.
+fn is_nilable_str_union(ty: Option<&Ty>) -> bool {
+    let Some(Ty::Union { variants }) = ty else { return false; };
+    variants.len() == 2
+        && variants.iter().any(|v| matches!(v, Ty::Nil))
+        && variants.iter().any(|v| matches!(v, Ty::Str))
 }
 
 /// Method names that are part of Crystal's / Ruby's null-safety

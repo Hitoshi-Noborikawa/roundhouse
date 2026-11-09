@@ -8,7 +8,7 @@ use crate::det::{HashMap, HashSet};
 
 use crate::App;
 use crate::dialect::{MethodDef, MethodReceiver};
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol};
 
 use super::SourceContractIndex;
@@ -51,11 +51,14 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
     // Every method name the app defines, on any class, module or model: a
     // send of one on a hook's callback receiver runs app code, which may
     // change the receiver's lookup (`base.install_factory` after
-    // `base.extend(Factory)`).
+    // `base.extend(Factory)`). A definition that makes no call can't, so
+    // an accessor named `methods` on some unrelated class doesn't make
+    // `base.methods` suspect.
     let app_methods: HashSet<Symbol> = super::classes(app)
         .flat_map(|class| class.methods.iter())
         .chain(app.models.iter().flat_map(|model| model.methods()))
         .chain(app.test_modules.iter().flat_map(|module| module.helpers.iter()))
+        .filter(|method| !makes_no_call(method))
         .map(|method| method.name.clone())
         .collect();
     let modules_with_custom_new: HashSet<ClassId> = index
@@ -627,10 +630,19 @@ pub(super) fn scan_constructor_mutations(
         result: &mut ConstructorMutationScan,
     ) {
         if let ExprNode::Send {
-            recv, method, args, ..
+            recv, method, args, block, ..
         } = &*expr.node
         {
-            let mutates_lookup = mutates_constructor_lookup_method(
+            let mutates_lookup = !callback_receiver.is_some_and(|callback_receiver| {
+                eval_only_registers_filters(
+                    recv.as_ref(),
+                    method,
+                    args,
+                    block.as_ref(),
+                    callback_receiver,
+                    context.app_methods,
+                )
+            }) && mutates_constructor_lookup_method(
                 method.as_str(),
                 args,
                 context.modules_with_custom_new,
@@ -841,6 +853,162 @@ fn literal_method_name(expr: &Expr) -> Option<&str> {
         } => Some(value.as_str()),
         _ => None,
     }
+}
+
+/// A body of reads and local or instance variable writes: it runs nothing
+/// else, whichever receiver it lands on. Anything not named here counts as
+/// a call, including a setter write and a nested `def`'s stamped nil.
+fn makes_no_call(method: &MethodDef) -> bool {
+    fn runs_nothing(expr: &Expr) -> bool {
+        if expr.diagnostic().is_some() || expr.nested_def().is_some() {
+            return false;
+        }
+        match &*expr.node {
+            ExprNode::Lit { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Var { .. }
+            | ExprNode::SelfRef
+            | ExprNode::Const { .. } => true,
+            ExprNode::Seq { exprs } => exprs.iter().all(runs_nothing),
+            ExprNode::Assign { target: LValue::Ivar { .. } | LValue::Var { .. }, value } => {
+                runs_nothing(value)
+            }
+            _ => false,
+        }
+    }
+    runs_nothing(&method.body)
+        && method.params.iter().all(|param| param.default.as_ref().is_none_or(runs_nothing))
+}
+
+/// Action callback registrations. On a controller they add to its callback
+/// chain and leave `new` and `initialize` alone (Rails 8.1.4,
+/// `tests/included_hook_constructor/oracle.rb`).
+const ACTION_CALLBACK_MACROS: &[&str] = &[
+    "before_action",
+    "after_action",
+    "around_action",
+    "append_before_action",
+    "append_after_action",
+    "append_around_action",
+    "prepend_before_action",
+    "prepend_after_action",
+    "prepend_around_action",
+    "skip_before_action",
+    "skip_after_action",
+    "skip_around_action",
+];
+
+/// What a guard around such a registration may ask of the receiver.
+const LOOKUP_READS: &[&str] = &[
+    "include?",
+    "instance_methods",
+    "method_defined?",
+    "methods",
+    "public_instance_methods",
+    "public_method_defined?",
+    "public_methods",
+    "respond_to?",
+    "singleton_methods",
+];
+
+/// Whether `recv.method(args) { block }` is an eval, on the hook's own
+/// receiver, of a literal block that can't change constructor lookup:
+/// `base.instance_eval { before_action(:load) if base.methods.include?(:before_action) }`.
+/// That block is the `base.before_action` the scan already accepts, written
+/// through `self`.
+///
+/// Inside an eval block `self` is the includer, so any call may reach `new`
+/// by a route the name-based scan doesn't follow: `def new`, `eval`,
+/// `private_class_method :new`, a `Method` object, `singleton_class`, `self`
+/// through a local. Hence an allow-list over the whole block rather than a
+/// search for bad calls: anything it doesn't name keeps the eval's refusal.
+/// Names the app defines stay out because their bodies are app code.
+fn eval_only_registers_filters(
+    recv: Option<&Expr>,
+    method: &Symbol,
+    args: &[Expr],
+    block: Option<&Expr>,
+    callback_receiver: &Symbol,
+    app_methods: &HashSet<Symbol>,
+) -> bool {
+    fn framework_name(names: &[&str], method: &Symbol, app_methods: &HashSet<Symbol>) -> bool {
+        names.contains(&method.as_str()) && !app_methods.contains(method)
+    }
+    fn is_implicit_self(recv: Option<&Expr>) -> bool {
+        recv.is_none_or(|recv| matches!(&*recv.node, ExprNode::SelfRef))
+    }
+    /// Ingest writes a nested `def` as a stamped nil, so a nil isn't
+    /// always nothing: `def new` in the block, or `before_action(def new; end)`.
+    fn is_unstamped(expr: &Expr) -> bool {
+        expr.diagnostic().is_none() && expr.nested_def().is_none()
+    }
+    /// A value with no calls in it: a filter name or an `only:` list.
+    fn is_literal(expr: &Expr) -> bool {
+        if !is_unstamped(expr) {
+            return false;
+        }
+        match &*expr.node {
+            ExprNode::Lit { .. } => true,
+            ExprNode::Array { elements, .. } => elements.iter().all(is_literal),
+            ExprNode::Hash { entries, .. } => {
+                entries.iter().all(|(key, value)| is_literal(key) && is_literal(value))
+            }
+            _ => false,
+        }
+    }
+    fn is_read(expr: &Expr, callback_receiver: &Symbol, app_methods: &HashSet<Symbol>) -> bool {
+        let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else {
+            return false;
+        };
+        is_unstamped(expr)
+            && framework_name(LOOKUP_READS, method, app_methods)
+            && args.iter().all(is_literal)
+            && (is_implicit_self(recv.as_ref())
+                || recv.as_ref().is_some_and(|recv| {
+                    matches!(&*recv.node, ExprNode::Var { name, .. } if name == callback_receiver)
+                        || is_read(recv, callback_receiver, app_methods)
+                }))
+    }
+    fn is_registration(expr: &Expr, callback_receiver: &Symbol, app_methods: &HashSet<Symbol>) -> bool {
+        if !is_unstamped(expr) {
+            return false;
+        }
+        match &*expr.node {
+            ExprNode::Lit { value: crate::expr::Literal::Nil } => true,
+            ExprNode::Seq { exprs } => {
+                exprs.iter().all(|expr| is_registration(expr, callback_receiver, app_methods))
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                is_read(cond, callback_receiver, app_methods)
+                    && is_registration(then_branch, callback_receiver, app_methods)
+                    && is_registration(else_branch, callback_receiver, app_methods)
+            }
+            ExprNode::Send { recv, method, args, block: None, .. } => {
+                is_implicit_self(recv.as_ref())
+                    && framework_name(ACTION_CALLBACK_MACROS, method, app_methods)
+                    && args.iter().all(is_literal)
+            }
+            _ => false,
+        }
+    }
+
+    if !matches!(
+        method.as_str(),
+        "class_eval" | "module_eval" | "instance_eval" | "class_exec" | "instance_exec"
+    ) || !args.is_empty()
+        || !recv.is_some_and(|recv| {
+            matches!(&*recv.node, ExprNode::Var { name, .. } if name == callback_receiver)
+        })
+    {
+        return false;
+    }
+    matches!(
+        block.map(|block| &*block.node),
+        Some(ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. })
+            if params.is_empty()
+                && extra_params.is_empty()
+                && is_registration(body, callback_receiver, app_methods)
+    )
 }
 
 /// Whether `method(args)` runs a method the app defines: by name, or

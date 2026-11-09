@@ -248,12 +248,35 @@ fn included_eval_block_that_replaces_new_still_refuses() {
         "base.class_eval { |klass| klass.extend(Unknown::Factory) }",
         "base.instance_eval { it.define_singleton_method(:new) { |**o| o } }",
         "base.instance_eval { _1.define_singleton_method(:new) { |**o| o } }",
-        // Any literal eval block on the receiver refuses, as on `main`: even a
-        // bare macro call, a numbered parameter of a nested block, or `self`
-        // through a local (CodeRabbit on #1525).
-        "base.instance_eval do\n      before_action(:load_tag) if base.methods.include?(:before_action)\n    end",
+        // Any other literal eval block on the receiver refuses: a numbered
+        // parameter of a nested block, or `self` through a local (CodeRabbit
+        // on #1525). Only the filter registrations in
+        // `included_eval_block_that_only_registers_filters_keeps_keywords`
+        // are read as leaving `new` alone.
         "base.instance_eval { [1].map { _1 } }",
         "base.instance_eval do\n      target = self\n      target.define_singleton_method(:new) { |**o| o }\n    end",
+        // Each of these really changes `new` on rails 8.1.4
+        // (tests/included_hook_constructor/oracle.rb).
+        "base.instance_eval do\n      def new(**o) = o\n    end",
+        "base.class_eval do\n      def self.new(**o) = o\n    end",
+        "base.instance_eval { eval(\"def self.new(**o) = o\") }",
+        "base.instance_eval { private_class_method :new }",
+        "base.instance_eval { method(:define_singleton_method).call(:new) { |**o| o } }",
+        "base.instance_eval { singleton_class.send(:define_method, :new) { |**o| o } }",
+        // A filter beside, inside or guarding something that isn't one.
+        "base.instance_eval do\n      before_action(:load_tag)\n      define_singleton_method(:new) { |**o| o }\n    end",
+        "base.instance_eval { before_action(:load_tag) { self.class.define_singleton_method(:new) { |**o| o } } }",
+        "base.instance_eval { before_action(:load_tag, if: -> { define_singleton_method(:new) { |**o| o } }) }",
+        "base.instance_eval { before_action(filter_name) }",
+        "base.instance_eval { before_action(def new(**o) = o) }",
+        "base.class_eval do\n      class << self\n        def new(**o) = o\n      end\n    end",
+        "base.instance_eval { before_action(:load_tag) if base.method(:define_singleton_method).call(:new) { |**o| o } }",
+        "base.instance_eval { before_action(:load_tag) if define_singleton_method(:new) { |**o| o } }",
+        // Not the literal block on the receiver itself.
+        "base.singleton_class.instance_eval { before_action(:load_tag) }",
+        "base.instance_eval(\"def self.new(**o) = o\") { before_action(:load_tag) }",
+        "base.send(:instance_eval) { before_action(:load_tag) }",
+        "base.instance_eval { |klass| before_action(:load_tag) }",
     ] {
         let source = format!(
             r#"
@@ -278,6 +301,113 @@ end
         );
         assert!(constructor_keywords_are_refused(&source), "{body}");
     }
+}
+
+/// A literal block on the hook's receiver that only registers action
+/// callbacks, optionally guarded by a read of the receiver, can't reach
+/// `new`: it is the same call as `base.before_action`, written through
+/// `self`. Rails 8.1.4: `tests/included_hook_constructor/oracle.rb`.
+#[test]
+fn included_eval_block_that_only_registers_filters_keeps_keywords() {
+    for body in [
+        "base.instance_eval do\n      before_action(:load_tag) if base.methods.include?(:before_action)\n    end",
+        "base.class_eval do\n      before_action(:load_tag) if base.respond_to?(:before_action)\n    end",
+        "base.instance_eval do\n      before_action(:load_tag, only: [:show]) if respond_to?(:before_action)\n      skip_before_action(:other, raise: false) if respond_to?(:skip_before_action)\n    end",
+        "base.class_exec { self.after_action(:load_tag) if self.respond_to?(:after_action) }",
+    ] {
+        let source = format!(
+            r#"
+module Tagging
+  def self.included(base)
+    {body}
+  end
+end
+
+class WidgetClient
+  include Tagging
+
+  def initialize(args)
+    @name = args[:name]
+  end
+
+  def self.build
+    new(name: "x")
+  end
+end
+"#
+        );
+        assert!(!constructor_keywords_are_refused(&source), "{body}");
+    }
+}
+
+/// An accessor that happens to share a guard's name, on an unrelated class,
+/// runs nothing: the guard is still a read. A method of that name that does
+/// run code is app code (`included_eval_block_calling_an_app_defined_...`).
+#[test]
+fn an_unrelated_accessor_named_like_a_guard_keeps_keywords() {
+    let source = r#"
+module Noise
+  def self.methods
+    @methods
+  end
+end
+
+module Tagging
+  def self.included(base)
+    base.instance_eval do
+      before_action(:load_tag) if base.methods.include?(:before_action)
+    end
+  end
+end
+
+class WidgetClient
+  include Tagging
+
+  def initialize(args)
+    @name = args[:name]
+  end
+
+  def self.build
+    new(name: "x")
+  end
+end
+"#;
+    assert!(!constructor_keywords_are_refused(source));
+    let running = source.replace("    @methods\n", "    define_singleton_method(:new) { |**o| o }\n");
+    assert_ne!(running, source);
+    assert!(constructor_keywords_are_refused(&running));
+}
+
+/// `before_action` the app defines is app code: its body may change `new`.
+#[test]
+fn included_eval_block_calling_an_app_defined_filter_macro_still_refuses() {
+    let source = r#"
+module Installer
+  def before_action(name)
+    define_singleton_method(:new) { |**options| options }
+  end
+end
+
+module Tagging
+  def self.included(base)
+    base.instance_eval { before_action(:load_tag) }
+  end
+end
+
+class WidgetClient
+  extend Installer
+  include Tagging
+
+  def initialize(args)
+    @name = args[:name]
+  end
+
+  def self.build
+    new(name: "x")
+  end
+end
+"#;
+    assert!(constructor_keywords_are_refused(source));
 }
 
 /// A lookup change sent reflectively on the hook's receiver: `send`,

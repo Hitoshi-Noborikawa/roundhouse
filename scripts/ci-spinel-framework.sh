@@ -12,6 +12,20 @@ else
 fi
 mkdir -p "$tmp/logs"
 
+# Not left to the job's 30m: a suite stopped here is named, and the shard's other results and timings survive.
+budget=${CI_SPINEL_FRAMEWORK_BUDGET:-1620}
+deadline=$(( $(date +%s) + budget ))
+
+# Not -O2: these suites judge behavior, and cc at -O2 was over a third of their CPU. A `spin build` finds the
+# spinel beside it and keeps -O2, as do spinel-smoke, spinel-compare and the Campfire lanes. Empty keeps the default.
+opt=${CI_SPINEL_OPT-0}
+if [ -n "$opt" ] && real=$(command -v spinel); then
+  mkdir -p "$tmp/shim"
+  printf '#!/bin/sh\nexec "%s" -O%s "$@"\n' "$real" "$opt" > "$tmp/shim/spinel"
+  chmod +x "$tmp/shim/spinel"
+  export PATH="$tmp/shim:$PATH"
+fi
+
 args=()
 for suite in $TESTS; do args+=(--test "$suite"); done
 cargo test --no-run --message-format=json "${args[@]}" > "$tmp/build.json" || exit 1
@@ -31,15 +45,34 @@ PY
 filter() {
   case "$1" in param_binds|param_binds_values|param_binds_cleanup) echo _spinel ;; esac
 }
+# Not all at the end: a job that still hits its limit keeps what already finished. The lock keeps each suite's lines together.
+report_suite() {
+  local suite=$1 status=$2
+  (
+    if command -v flock > /dev/null; then flock 9; fi
+    echo "::group::$suite"
+    cat "$tmp/logs/$suite.log"
+    echo "::endgroup::"
+    grep -qE "^test result: FAILED|error: test failed|panicked at" "$tmp/logs/$suite.log" && echo "::error::$suite failed"
+    [ "$status" -eq 124 ] && echo "::error::$suite stopped at this shard's ${budget}s budget"
+  ) 9>> "$tmp/report.lock"
+}
 run_suite() {
   local suite=$1
-  local bin
+  local bin left status=124
   bin=$(exe "$suite")
-  python3 scripts/ci-plan.py timed --kind framework --name "$suite" -- \
-    "$bin" --ignored --nocapture $(filter "$suite") > "$tmp/logs/$suite.log" 2>&1
+  left=$(( deadline - $(date +%s) ))
+  : > "$tmp/logs/$suite.log"
+  if [ "$left" -gt 0 ]; then
+    python3 scripts/ci-plan.py timed --kind framework --name "$suite" -- \
+      timeout -k 15 "$left" "$bin" --ignored --nocapture $(filter "$suite") > "$tmp/logs/$suite.log" 2>&1
+    status=$?
+  fi
+  report_suite "$suite" "$status"
+  return "$status"
 }
-export -f exe filter run_suite
-export tmp
+export -f exe filter report_suite run_suite
+export tmp budget deadline
 
 start=$(date +%s)
 
@@ -62,11 +95,5 @@ for suite in $ordered; do
 done
 printf '%s\n' "${parallel[@]}" | xargs -P "$(nproc)" -I{} bash -c 'run_suite {}' || status=1
 for suite in "${serial[@]}"; do run_suite "$suite" || status=1; done
-for suite in $TESTS; do
-  echo "::group::$suite"
-  cat "$tmp/logs/$suite.log"
-  echo "::endgroup::"
-  grep -qE "^test result: FAILED|error: test failed|panicked at" "$tmp/logs/$suite.log" && echo "::error::$suite failed"
-done
 echo "finished in $(( $(date +%s) - start ))s"
 exit "$status"

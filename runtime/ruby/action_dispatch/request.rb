@@ -130,7 +130,6 @@ module ActionDispatch
     attr_accessor :referer
     # `host` is a method: it answers `raw_host_with_port`, while `@host`
     # stays the Host header the dispatcher stored.
-    attr_reader :format
     attr_accessor :env
     # Rails' `request_parameters`: the BODY's params alone, without the
     # query string or the path captures. ParamsWrapper copies from these
@@ -224,6 +223,14 @@ module ActionDispatch
     # canonical string.
     def format=(value)
       @format = value.to_s
+    end
+
+    # Rails' `request.format`: the negotiated Mime::Type, which answers
+    # `== :json` as well as `== "application/json"`.
+    def format
+      type = Mime::Type.lookup_by_extension(@format)
+      return type unless type.nil?
+      Mime::Type.new("text/html", :html)
     end
 
     # The body the transport (or the test harness) hands over is a
@@ -354,6 +361,30 @@ module ActionDispatch
       @host = value.to_s
     end
 
+    # Rails' `domain` and `subdomains` at the default `tld_length` of 1,
+    # over the host without its port; an IPv4 host has neither.
+    def domain
+      parts = named_host_parts
+      return nil if parts.empty?
+      parts.last(2).join(".")
+    end
+
+    def subdomains
+      parts = named_host_parts
+      return [] if parts.length < 3
+      parts[0, parts.length - 2].to_a
+    end
+
+    def subdomain
+      subdomains.join(".")
+    end
+
+    def named_host_parts
+      name = host.sub(/:[0-9]+\z/, "")
+      return [] if name.match?(/\A[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\z/)
+      name.split(".")
+    end
+
     def forwarded_authority
       return "" unless trusted_forwarded_peer?
       forwarded = @env.fetch("HTTP_X_FORWARDED_HOST", "").to_s.split(",").last.to_s.strip
@@ -363,9 +394,9 @@ module ActionDispatch
 
     def trusted_forwarded_peer?
       ip = @remote_ip.to_s
-      # An empty peer is not loopback. Spinel's socket address is still
-      # unimplemented, so `remote_ip` is "" there; trusting that would
-      # honor a client-supplied X-Forwarded-Host on every connection.
+      # An empty peer is not loopback: a UNIX-socket connection on the
+      # Spinel server has no address, and trusting that would honor a
+      # client-supplied X-Forwarded-Host on every such connection.
       return false if ip.empty?
       return true if ip == "127.0.0.1" || ip == "::1" || ip == "localhost"
       return true if ip.start_with?("10.") || ip.start_with?("192.168.") || ip.start_with?("169.254.")

@@ -2708,7 +2708,18 @@ fn reads_action_name(
             reads(&bound)
         }
     };
+    // A `layout` scoped by `only:`/`except:` can make a render outside the
+    // actions pick its layout by `action_name` (`apply_layout_lowering`).
+    let scoped_layout = chain
+        .iter()
+        .rev()
+        .find_map(|c| match &c.layout {
+            crate::dialect::LayoutDecl::Declared(call) => Some(call),
+            crate::dialect::LayoutDecl::Inherit => None,
+        })
+        .is_some_and(|call| !call.only.is_empty() || !call.except.is_empty());
     dispatched.iter().any(|e| reads(e))
+        || scoped_layout
         || chain.iter().any(|c| {
             c.actions().any(|a| {
                 reads(&a.body) || renders_partial(&a.body) || renders_with_action_name(c, &a.body)

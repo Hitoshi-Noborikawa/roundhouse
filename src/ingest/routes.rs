@@ -16,16 +16,14 @@
 //! emission refuses it unless explicitly overridden. A route-body
 //! statement that is not a call and is not a walked `if`/`unless` or a
 //! local write (`case`, and the rest) records that same gap; `if` and
-//! `unless` are kept, both arms, so they are not gaps.
+//! `unless` are walked, not gaps: a literal keeps its arm, any other both and is refused.
 //!
 //! `devise_scope` is path-transparent and its routes are kept. The
 //! authentication guards (`authenticate`, `authenticated`, and
 //! `unauthenticated`) are unsupported: flattening them would expose
 //! guarded handlers because the generated runtime does not enforce
-//! Warden/Devise route constraints. `devise_for` expands a static
-//! route/helper table (sessions / registrations / passwords /
-//! confirmations) from the resource name and optional `controllers:`
-//! overrides; it does not claim Warden or Devise controller runtime.
+//! Warden/Devise route constraints. `devise_for` is drawn from Devise's
+//! own source, as any gem's routing method is (`gem_routes`).
 
 use std::cell::{Cell, OnceCell, RefCell};
 use crate::det::{HashMap, HashSet};
@@ -263,6 +261,9 @@ pub(super) fn ingest_route_file(
             }
         }
     }
+    // A route set behind a guard or wrapper (`if flag`, `flag &&`) reaches the walk alone.
+    let statements = root.as_program_node().into_iter().flat_map(|program| program.statements().body().iter());
+    entries.extend(ingest_route_stmts(statements.filter(wrapped_route_set), file, None, &cx)?);
     // A `load`ed file carries its own `Rails.application.routes.draw`,
     // which starts a fresh mapper: its routes sit at the top of the
     // table whatever scope the `load` call was written inside.
@@ -301,6 +302,31 @@ pub(super) fn ingest_route_file(
 /// (or any `<something>.routes.draw` whose receiver is not an engine).
 fn top_level_app_draws<'pr>(root: &Node<'pr>) -> Vec<ruby_prism::CallNode<'pr>> {
     top_level_app_route_blocks(root, &["draw"])
+}
+
+fn wrapped_route_set(stmt: &Node<'_>) -> bool {
+    !stmt.as_call_node().is_some_and(|c| is_app_route_block(&c, &["draw", "prepend", "append"]))
+        && has_app_route_block(stmt, &["draw", "prepend", "append"])
+}
+
+/// A `<app>.routes.<method> do … end` call anywhere in `node`; a `prepend` or `append` on any other value doesn't count.
+fn has_app_route_block(node: &Node<'_>, methods: &[&str]) -> bool {
+    struct Finder<'a> {
+        methods: &'a [&'a str],
+        found: bool,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Finder<'_> {
+        fn visit_call_node(&mut self, call: &ruby_prism::CallNode<'pr>) {
+            if is_app_route_block(call, self.methods) {
+                self.found = true;
+                return;
+            }
+            ruby_prism::visit_call_node(self, call);
+        }
+    }
+    let mut finder = Finder { methods, found: false };
+    ruby_prism::Visit::visit(&mut finder, node);
+    finder.found
 }
 
 /// The top-level `<app>.routes.<method> do … end` calls for each of
@@ -440,9 +466,36 @@ fn runtime_cable_mount(call: &ruby_prism::CallNode<'_>) -> bool {
 /// is not served. Located at the regex literal when it can be found.
 fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -> Vec<Diagnostic> {
     let mut seen = HashSet::default();
+    let mut seen_guards = HashSet::default();
+    let mut defaults_seen = HashSet::default();
     let mut out = Vec::new();
     for route in crate::lower::routes::flatten_route_entries(entries) {
+        for (key, (_, span)) in &route.param_defaults {
+            let segment = route.path_params.iter().take(route.required_params).any(|p| p == key);
+            let kept = key == crate::lower::routes::FORMAT_REQUIRED_KEY
+                || if key == "format" { route.format.is_some() && !segment } else { segment };
+            // A scope's default reaches every route under it; refuse it once at its source.
+            if !kept && defaults_seen.insert((*span, key.clone())) {
+                let detail = format!("no required segment of {} {} carries `{key}`", format!("{:?}", route.method).to_uppercase(), route.path);
+                out.push(Diagnostic::unsupported(*span, None, "route defaults", detail));
+            }
+        }
         let Some((param, rx)) = &route.refused else { continue };
+        // At the constraint, once: every route it guards is refused for it.
+        if param == crate::lower::routes::GUARD_REFUSAL {
+            // One the Ruby-family router asks is refused per target instead (`route_guard_gaps_for_target`).
+            if let Some(guard) = route.guards.iter().find(|g| !crate::lower::route_guards::enforceable(g))
+                && seen_guards.insert(guard.span)
+            {
+                out.push(Diagnostic::unsupported(
+                    guard.span,
+                    None,
+                    "request constraint",
+                    "the routes it guards are not dispatched: the router cannot ask this constraint with the request, and matching by verb and path alone would answer every request it refuses; their URL helpers are still generated",
+                ));
+            }
+            continue;
+        }
         let verb = format!("{:?}", route.method).to_uppercase();
         if !seen.insert((verb.clone(), route.path.clone())) {
             continue;
@@ -483,14 +536,14 @@ fn note_required_format(
     cx: &Ctx<'_>,
     key: &str,
     value: &ruby_prism::Node<'_>,
-    defaults: &mut IndexMap<Symbol, String>,
+    defaults: &mut IndexMap<Symbol, (String, Span)>,
 ) {
     if key != "format" || value.as_true_node().is_none() {
         return;
     }
     // The helpers take the format as a required last param; the router peels
     // it like an optional suffix, so a request without it is still served.
-    defaults.insert(Symbol::from(crate::lower::routes::FORMAT_REQUIRED_KEY), "true".to_string());
+    defaults.insert(Symbol::from(crate::lower::routes::FORMAT_REQUIRED_KEY), ("true".to_string(), Span::synthetic()));
     let detail = "`format: true` (a required `.:format` suffix) is only modeled in the route helpers; \
                   the router also serves a request without the suffix";
     let location = call.location();
@@ -1192,33 +1245,21 @@ fn ingest_route_stmts<'pr>(
     for stmt in stmts {
         // A conditional around routes (`if Rails.env.development?`) is
         // decided at boot, not here: both arms are walked, so the
-        // helpers of every environment's table exist in the model.
+        // helpers of every environment's table exist, and the guard is refused unless a literal settles it.
         // Includes the modifier form `get "/x" if flag`. A mount inside
         // is nested, so the runtime cable exemption does not apply.
-        if let Some(cond) = stmt.as_if_node() {
-            let mut arms: Vec<Node<'pr>> = Vec::new();
-            if let Some(body) = cond.statements() {
-                arms.extend(body.body().iter());
+        let guard = stmt.as_if_node().map(|c| (c.predicate(), c.statements().map(|s| s.as_node()), c.subsequent()))
+            .or_else(|| stmt.as_unless_node().map(|c| (c.predicate(), c.else_clause().map(|e| e.as_node()), c.statements().map(|s| s.as_node()))));
+        if let Some((predicate, then_arm, else_arm)) = guard {
+            let known = bool_value(&predicate).or(predicate.as_nil_node().map(|_| false));
+            let effectful = then_arm.is_some() || else_arm.is_some();
+            let diagnosed = cx.diagnostics.borrow().len();
+            let arms = [then_arm.filter(|_| known != Some(false)), else_arm.filter(|_| known != Some(true))].into_iter().flatten();
+            let walked = cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || ingest_route_stmts(arms.flat_map(flatten_statements), file, parent, cx))?;
+            if known.is_none() && effectful && cx.diagnostics.borrow().len() == diagnosed {
+                route_refusal(&stmt, file, cx, "conditional routes", "these declarations can change routes or mapper state depending on the guard");
             }
-            if let Some(rest) = cond.subsequent() {
-                arms.push(rest);
-            }
-            entries.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
-                ingest_route_stmts(arms.into_iter(), file, parent, cx)
-            })?);
-            continue;
-        }
-        if let Some(cond) = stmt.as_unless_node() {
-            let mut arms: Vec<Node<'pr>> = Vec::new();
-            if let Some(body) = cond.statements() {
-                arms.extend(body.body().iter());
-            }
-            if let Some(rest) = cond.else_clause() {
-                arms.push(rest.as_node());
-            }
-            entries.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
-                ingest_route_stmts(arms.into_iter(), file, parent, cx)
-            })?);
+            entries.extend(walked);
             continue;
         }
         if let Some(rest) = stmt.as_else_node() {
@@ -1289,7 +1330,7 @@ fn ingest_route_stmts<'pr>(
             continue;
         }
 
-        if call.receiver().is_some() {
+        if call.receiver().is_some_and(|recv| cx.strict || recv.as_self_node().is_none()) {
             // Any other receiver-bearing call with a block (`PAGES.each`,
             // `3.times`, `.each_with_index`) holds routes the walker
             // cannot evaluate. Skipping it, as below, dropped them with
@@ -1297,6 +1338,7 @@ fn ingest_route_stmts<'pr>(
             // nested `routes.draw` the skip exists for is left to it.
             if call.block().is_some_and(|b| b.as_block_node().is_some())
                 && constant_id_str(&call.name()) != "draw"
+                && !is_app_route_block(&call, &["prepend", "append"])
             {
                 let err = receiver_block_route_stmt(&call, file);
                 if super::survey::is_active() {
@@ -1316,6 +1358,7 @@ fn ingest_route_stmts<'pr>(
             if cx.strict {
                 return Err(receiver_block_route_stmt(&call, file));
             }
+            if is_app_route_block(&call, &["draw", "prepend", "append"]) { route_refusal(&call.as_node(), file, cx, "nested route set", "only top-level draws, prepends and appends are read"); }
             // `Rails.application.routes.draw` gets re-found as a nested
             // call when we walk a weird input; skip anything with an
             // explicit receiver here.
@@ -1376,8 +1419,8 @@ fn ingest_route_stmts<'pr>(
                         // DOWN into every route the block flattens to
                         // (transitively, through nested scopes/resources).
                         // A lambda/object arg (`constraints(SomeGuard.new)`)
-                        // yields no hash here, so it changes nothing — that
-                        // request-based shape stays unenforced, as before.
+                        // yields no hash here; `block_request_guard` wraps
+                        // the block's routes in a `RouteSpec::Guarded`.
                         // Non-literal / modified regex values refuse via
                         // the shared reader (same fail-closed policy as
                         // the `constraints:` kwarg on a route/resource).
@@ -1387,10 +1430,13 @@ fn ingest_route_stmts<'pr>(
                         if method == "constraints" {
                             match call.arguments() {
                                 None => entries.extend(inner),
-                                Some(args) => match block_constraints_hash(&args, file) {
-                                    Ok(block_constraints) => {
+                                Some(args) => match block_constraints_hash(&args, file).and_then(|c| block_request_guard(&args, file).map(|g| (c, g))) {
+                                    Ok((block_constraints, guard)) => {
                                         merge_outer_constraints(&mut inner, &block_constraints);
-                                        entries.extend(inner);
+                                        match guard {
+                                            Some(guard) => entries.push(RouteSpec::Guarded { guard, entries: inner }),
+                                            None => entries.extend(inner),
+                                        }
                                     }
                                     Err(err) if super::survey::is_active() => {
                                         super::survey::record(&err);
@@ -1407,6 +1453,9 @@ fn ingest_route_stmts<'pr>(
             continue;
         }
 
+        if !route_options_kept(&call, &method) {
+            route_refusal(&call.as_node(), file, cx, "route defaults", "only literal `format` and segment defaults reach the table");
+        }
         // Per-entry recovery: one `mount`/`use_doorkeeper` must not
         // zero the whole table. Survey mode records the gap and keeps
         // walking; strict mode still fails loud.
@@ -1426,6 +1475,53 @@ fn ingest_route_stmts<'pr>(
         }
     }
     Ok(entries)
+}
+
+fn empty_route_splat(node: &Node<'_>) -> bool {
+    node.as_assoc_splat_node().and_then(|s| s.value()).is_some_and(|v| empty_splat_value(&v))
+}
+
+/// `nil`, `{}` (whose own entries are empty splats) or a parenthesized one: a keyword splat Ruby reads as nothing.
+fn empty_splat_value(value: &Node<'_>) -> bool {
+    if let Some(p) = value.as_parentheses_node() {
+        let stmts: Vec<Node<'_>> = p.body().and_then(|b| b.as_statements_node()).map(|s| s.body().iter().collect()).unwrap_or_default();
+        return matches!(stmts.as_slice(), [only] if empty_splat_value(only));
+    }
+    value.as_nil_node().is_some() || value.as_hash_node().is_some_and(|h| h.elements().iter().all(|item| empty_route_splat(&item)))
+}
+
+/// Literal `defaults:` the table keeps (scope ones are checked per route), and no option the ingesters skip.
+fn route_options_kept(call: &ruby_prism::CallNode<'_>, method: &str) -> bool {
+    let default_kept = |default: Node<'_>| empty_route_splat(&default) || default.as_assoc_node().is_some_and(|pair| symbol_or_string_value(&pair.value()).is_some()
+        && symbol_value(&pair.key()).is_some_and(|key| method == "scope" || (key == "format" && http_method_from(method).is_some())));
+    let literal_format = |value: Node<'_>| symbol_or_string_value(&value).is_some() || bool_value(&value).is_some()
+        || value.as_nil_node().is_some() || value.as_regular_expression_node().is_some();
+    let (mut defaults_seen, mut path_seen, mut format_seen) = (false, false, false);
+    let mut read = |arg: Node<'_>| {
+        if arg.as_interpolated_string_node().is_some() || rname(&arg).is_some() { path_seen = true; return true; }
+        arg.as_keyword_hash_node().is_some_and(|options| options.elements().iter().all(|option| {
+            if empty_route_splat(&option) { return true; }
+            option.as_assoc_node().is_some_and(|pair| match symbol_value(&pair.key()) {
+                Some(key) if key == "format" => !std::mem::replace(&mut format_seen, true) && literal_format(pair.value())
+                    && (http_method_from(method).is_some() || pair.value().as_true_node().is_some() || pair.value().as_regular_expression_node().is_some()),
+                Some(key) if key != "defaults" && pair.value().as_regular_expression_node().is_some() => true,
+                Some(key) if key == "defaults" => !std::mem::replace(&mut defaults_seen, true)
+                    && pair.value().as_hash_node().is_some_and(|hash| hash.elements().iter().all(&default_kept)),
+                Some(key) => matches!(key.as_str(), "path" | "as" | "controller" | "action" | "constraints" | "to" | "via")
+                    || (http_method_from(method).is_some() && key == "on")
+                    || (matches!(method, "scope" | "namespace" | "resources" | "resource") && matches!(key.as_str(), "module" | "only" | "except" | "shallow" | "path_names"))
+                    || (matches!(method, "resources" | "resource") && matches!(key.as_str(), "param" | "concerns")),
+                None => http_method_from(method).is_some() && !std::mem::replace(&mut path_seen, true)
+                    && (pair.key().as_string_node().is_some() || pair.key().as_interpolated_string_node().is_some()),
+            })
+        }))
+    };
+    let routed = http_method_from(method).is_some() || matches!(method, "root" | "scope" | "namespace" | "resources" | "resource");
+    !routed || call.arguments().is_none_or(|args| args.arguments().iter().all(&mut read))
+}
+
+fn route_refusal(node: &Node<'_>, file: &str, cx: &Ctx<'_>, construct: &str, detail: &str) {
+    cx.diagnostics.borrow_mut().push(Diagnostic::unsupported(super::util::node_span(node, file), None, construct, detail));
 }
 
 /// One option a `with_options` block hands to the calls inside it: the
@@ -1719,6 +1815,10 @@ fn retag_scope(entries: &mut Vec<RouteSpec>, scope: ResourceScope) {
 /// time the outer block merges here, any param the inner block set is
 /// already present on the child's `constraints` map and `or_insert`
 /// leaves it alone.
+pub(super) fn apply_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
+    merge_outer_constraints(entries, outer)
+}
+
 fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
     if outer.is_empty() {
         return;
@@ -1736,13 +1836,21 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
                 }
                 merge_outer_constraints(nested, outer);
             }
-            RouteSpec::Scope { entries, .. } => {
+            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } | RouteSpec::Guarded { entries, .. } => {
                 merge_outer_constraints(entries, outer);
             }
             RouteSpec::Root { .. } | RouteSpec::RackMount { .. } => {}
+            RouteSpec::Deferred { constraints, .. } => {
+                for (k, v) in outer {
+                    constraints.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
         }
     }
 }
+
+/// The call `ingest::gem_routes` writes around routes drawn under a scope the method set for itself.
+pub(super) const EXCLUSIVE_SCOPE: &str = "__roundhouse_exclusive_scope";
 
 std::thread_local! {
     /// The constants the app's route files read, folded from their owners
@@ -1780,6 +1888,10 @@ fn read_param_regex_constraints<'a>(
     for el in elements {
         let Some(a) = el.as_assoc_node() else { continue };
         let Some(param) = symbol_value(&a.key()) else { continue };
+        // A literal `subdomain: "api"` is still asked of the request, not of a segment: `request_keyed` guards it.
+        if REQUEST_CONSTRAINT_KEYS.contains(&param.as_str()) {
+            continue;
+        }
         // `format` names the `(.:format)` extension, not a path param: a
         // requirement on it, which forces no format of its own.
         let key = if param == "format" { crate::dialect::FORMAT_REQUIREMENT } else { param.as_str() };
@@ -1819,13 +1931,6 @@ fn read_param_regex_constraints<'a>(
             {
                 out.insert(Symbol::from(key), src);
             }
-            // `constraints host: Rails.configuration.app_host_constraint,
-            // protocol: "https://" do … end`: Rails matches a key that
-            // names no path segment against the request's own method of
-            // that name. A request constraint, as a guard object is: the
-            // block's routes are kept and the request is not checked
-            // (`constraints(SomeGuard.new)` stays unenforced the same way).
-            None if REQUEST_CONSTRAINT_KEYS.contains(&param.as_str()) => {}
             None => {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
@@ -1839,10 +1944,29 @@ fn read_param_regex_constraints<'a>(
     Ok(out)
 }
 
-/// The `constraints` keys Rails answers from the request rather than the
-/// path (`ActionDispatch::Request#host`, `#protocol`, …) when a value is
-/// not a literal.
-const REQUEST_CONSTRAINT_KEYS: &[&str] = &["host", "protocol", "subdomain", "domain", "port"];
+const REQUEST_CONSTRAINT_KEYS: &[&str] = crate::lower::route_guards::REQUEST_KEYS;
+
+/// A `constraints` Hash naming a request attribute (`constraints host: …, protocol: "https://"`): Rails asks the request.
+fn request_keyed(value: &Node<'_>) -> bool {
+    let elements: Vec<Node<'_>> = if let Some(kh) = value.as_keyword_hash_node() {
+        kh.elements().iter().collect()
+    } else if let Some(h) = value.as_hash_node() {
+        h.elements().iter().collect()
+    } else {
+        return false;
+    };
+    elements.iter().any(|el| {
+        el.as_assoc_node()
+            .and_then(|a| symbol_value(&a.key()))
+            .is_some_and(|key| REQUEST_CONSTRAINT_KEYS.contains(&key.as_str()))
+    })
+}
+
+/// The guard a `constraints:` value sets: any value but a Hash of segment requirements alone.
+fn constraint_guard(value: &Node<'_>, file: &str) -> Option<crate::expr::Expr> {
+    let segments_only = (value.as_hash_node().is_some() || value.as_keyword_hash_node().is_some()) && !request_keyed(value);
+    (!segments_only).then(|| guard_expr(value, file))
+}
 
 /// The param→regex-source map from a `constraints(...)` call's own
 /// arguments — the block-level counterpart of the route-level
@@ -1850,9 +1974,13 @@ const REQUEST_CONSTRAINT_KEYS: &[&str] = &["host", "protocol", "subdomain", "dom
 /// (`constraints(slug: /.../)`, an implicit keyword hash) and an
 /// explicit Hash literal (`constraints({slug: /.../})`). A non-hash
 /// arg — the request-based `constraints(SomeGuard.new)` shape — yields
-/// an empty map, which is exactly "change nothing": that shape stays
-/// unenforced, as before (#727). Hash entries ride the shared
-/// fail-closed reader.
+/// an empty map, and a request key is skipped; `block_request_guard` reads them instead (#727). Hash
+/// entries ride the shared fail-closed reader.
+/// `constraints(->(req) { … }) do … end`, `constraints(SomeGuard.new) do … end`, `constraints(host: …) do … end`.
+fn block_request_guard(args: &ruby_prism::ArgumentsNode<'_>, file: &str) -> IngestResult<Option<crate::expr::Expr>> {
+    Ok(args.arguments().iter().find_map(|arg| constraint_guard(&arg, file)))
+}
+
 fn block_constraints_hash(
     args: &ruby_prism::ArgumentsNode<'_>,
     file: &str,
@@ -2318,8 +2446,62 @@ fn redirect_expression_is_string_in(
     }
 }
 
+thread_local! {
+    static GEM_DSL: RefCell<HashSet<String>> = RefCell::new(HashSet::default());
+}
+
+/// The routing methods gems add to the mapper (`ingest::gem_routes`), read in place for later.
+pub(super) fn set_gem_dsl(names: HashSet<String>) {
+    GEM_DSL.with(|g| *g.borrow_mut() = names);
+}
+
 /// Recognize a route DSL call; unknown calls return an unsupported-DSL error.
 fn ingest_route_call(
+    call: &ruby_prism::CallNode<'_>,
+    method: &str,
+    file: &str,
+    parent: Option<&str>,
+    cx: &Ctx<'_>,
+) -> IngestResult<Option<RouteSpec>> {
+    let guard = if matches!(method, "resources" | "resource") || http_method_from(method).is_some() { request_guard(call, file)? } else { None };
+    let spec = ingest_unguarded_route_call(call, method, file, parent, cx)?;
+    Ok(match (spec, guard) {
+        (Some(spec), Some(guard)) => Some(RouteSpec::Guarded { guard, entries: vec![spec] }),
+        (spec, _) => spec,
+    })
+}
+
+/// A route's `constraints:` that is not a Hash of segment requirements: a lambda, a proc or an object
+/// answering `matches?`, which Rails asks with the request (`constraints: ->(req) { req.format == :json }`).
+fn request_guard(call: &ruby_prism::CallNode<'_>, file: &str) -> IngestResult<Option<crate::expr::Expr>> {
+    let Some(args) = call.arguments() else { return Ok(None) };
+    for arg in args.arguments().iter() {
+        let Some(kh) = arg.as_keyword_hash_node() else { continue };
+        for element in kh.elements().iter() {
+            let Some(pair) = element.as_assoc_node() else { continue };
+            if symbol_value(&pair.key()).as_deref() != Some("constraints") {
+                continue;
+            }
+            if let Some(guard) = constraint_guard(&pair.value(), file) {
+                return Ok(Some(guard));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The constraint as an expression, or one holding only its place when it does not ingest (`->(req, &block) { … }`):
+/// it is never run, only refused where it is written, so an argument it cannot read still leaves its routes' helpers.
+fn guard_expr(node: &Node<'_>, file: &str) -> crate::expr::Expr {
+    let span = super::util::node_span(node, file);
+    let mut guard = super::survey::without_recording(|| super::expr::ingest_expr(node, file))
+        .unwrap_or_else(|_| crate::expr::Expr::new(span, crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil }));
+    // A survey pass answers a failed ingest with a synthetic span, which would merge two constraints' refusals.
+    guard.span = span;
+    guard
+}
+
+fn ingest_unguarded_route_call(
     call: &ruby_prism::CallNode<'_>,
     method: &str,
     file: &str,
@@ -2445,10 +2627,10 @@ fn ingest_route_call(
         // custom URL helper, not a route, so it contributes no entry
         // here.
         "direct" => Ok(None),
-        // `devise_for` — static Devise route/helper table; see
-        // `ingest::devise_routes`. Controllers override via
-        // `controllers:`. Does not model Warden or OmniAuth callbacks.
-        "devise_for" => super::devise_routes::ingest_devise_for(call, file),
+        // Written only by `ingest::gem_routes`: the routes a gem's method drew under a scope it set for itself.
+        EXCLUSIVE_SCOPE if call.receiver().is_none() && GEM_DSL.with(|g| !g.borrow().is_empty()) => {
+            Ok(Some(RouteSpec::Exclusive { entries: block_entries(call, file, None, cx)? }))
+        }
         // A block-taking method the app added to the mapper
         // (`routing_method :x do … end`): a scope over the enclosing
         // mapper that changes no path.
@@ -2461,6 +2643,16 @@ fn ingest_route_call(
             suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries: block_entries(call, file, parent, cx)?,
         })),
+        // A gem's own routing method: kept where it stands, drawn once its body can run.
+        _ if call.receiver().is_none() && GEM_DSL.with(|g| g.borrow().contains(method)) => {
+            let call_expr = super::expr::ingest_expr(&call.as_node(), file)?;
+            let span = Span {
+                file: super::sources::file_id(file),
+                start: call.location().start_offset() as u32,
+                end: call.location().end_offset() as u32,
+            };
+            Ok(Some(RouteSpec::Deferred { call: call_expr, span, constraints: IndexMap::new() }))
+        }
         // Unknown DSL — `concern`, `use_doorkeeper`, and Devise's
         // route-authentication guards (`authenticate` / `authenticated` /
         // `unauthenticated`), among others, land here. Strict ingest fails
@@ -2658,7 +2850,7 @@ fn ingest_namespace_route(
     // prefix with no URL segment.
     let (mut path, mut module, mut as_prefix) =
         (Some(name.clone()), Some(name.clone()), Some(name));
-    let mut defaults: IndexMap<Symbol, String> = IndexMap::new();
+    let mut defaults: IndexMap<Symbol, (String, Span)> = IndexMap::new();
     if let Some(args) = call.arguments() {
         for arg in args.arguments().iter() {
             let Some(kh) = arg.as_keyword_hash_node() else { continue };
@@ -2705,8 +2897,9 @@ fn ingest_scope_route(
     let mut path = first_name_arg(call);
     let mut module: Option<String> = None;
     let mut as_prefix: Option<String> = None;
-    let mut defaults: IndexMap<Symbol, String> = IndexMap::new();
+    let mut defaults: IndexMap<Symbol, (String, Span)> = IndexMap::new();
     let mut controller: Option<String> = None;
+    let guard = request_guard(call, file)?;
     if let Some(args) = call.arguments() {
         for arg in args.arguments().iter() {
             let Some(kh) = arg.as_keyword_hash_node() else { continue };
@@ -2740,7 +2933,7 @@ fn ingest_scope_route(
                                 else {
                                     continue;
                                 };
-                                defaults.insert(Symbol::from(k.as_str()), v);
+                                defaults.insert(Symbol::from(k.as_str()), (v, super::util::node_span(&value, file)));
                             }
                         }
                     }
@@ -2757,7 +2950,11 @@ fn ingest_scope_route(
         }
         None => block_entries(call, file, None, cx)?,
     };
-    Ok(RouteSpec::Scope { path, module, as_prefix, defaults, nest: false, suppress_helpers: false, mount: false, within: ResourceScope::Nested, entries })
+    let scope = RouteSpec::Scope { path, module, as_prefix, defaults, nest: false, suppress_helpers: false, mount: false, within: ResourceScope::Nested, entries };
+    Ok(match guard {
+        Some(guard) => RouteSpec::Guarded { guard, entries: vec![scope] },
+        None => scope,
+    })
 }
 
 /// `draw(:admin)` / `load(root.join("config", "routes", "admin.rb"))` /
@@ -2838,6 +3035,7 @@ fn ingest_route_file_include(
                         entries.extend(ingest_route_body(body, path, None, cx)?);
                     }
                 }
+                entries.extend(ingest_route_stmts(program.statements().body().iter().filter(wrapped_route_set), path, None, cx)?);
                 Ok(entries)
             })?;
             cx.hoisted.borrow_mut().extend(entries);
@@ -3495,6 +3693,13 @@ fn ingest_explicit_route(
             if path.is_none() {
                 path = Some(s);
             }
+        } else if arg.as_interpolated_string_node().is_some() && path.is_none() {
+            // Not left pathless: that drew the route at its scope's own path, where forem's
+            // `get "/#{ENV.fetch(…)}/:placement_area"` took every `/:username/:slug`.
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!("{} route path is not a literal string", format!("{method:?}").to_lowercase()),
+            });
         } else if arg.as_symbol_node().is_some() && path.is_none() && to.is_none() {
             // Positional SYMBOL arg — the same shortcut in the other
             // spelling: `member do get :doff end` is identical to
@@ -3523,7 +3728,13 @@ fn ingest_explicit_route(
 
                 // String-keyed entry → path → target pair (hashrocket
                 // form). Only consume the first such entry as path.
-                if let Some(key_str) = string_value(&key_node) {
+                if key_node.as_interpolated_string_node().is_some() && path.is_none() && rstring(&key_node).is_none() {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!("{} route path is not a literal string", format!("{method:?}").to_lowercase()),
+                    });
+                }
+                if let Some(key_str) = rstring(&key_node).filter(|_| key_node.as_symbol_node().is_none()) {
                     if path.is_none() {
                         path = Some(key_str);
                         if let Some(v) = rstring(value) {
@@ -3666,11 +3877,15 @@ fn ingest_explicit_route(
     // A symbol verb with `path:` keeps the symbol as its action and name
     // (`post :render_x, path: "x"` is `render_x`) and takes the option as
     // its URL segment; a string verb ignores the option, as Rails does.
+    // Not `as:` a canonical action's symbol: Rails names the route by it as it names a bare symbol verb, so on a member or collection it adds nothing (devise's `post :create, path: "sign_in"` is `user_session`).
     if let (true, Some(segment), Some(symbol)) = (action_symbol, path_kwarg, path.clone()) {
         action_kwarg = action_kwarg.or_else(|| Some(symbol.replace('-', "_")));
-        as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
         path = Some(format!("/{}", segment.trim_start_matches('/')));
-        action_symbol = false;
+        let targeted = to.is_some() || redirect_target.is_some() || to_is_unsupported.is_some();
+        if targeted || action_kwarg.as_deref() != Some(symbol.replace('-', "_").as_str()) || !matches!(symbol.as_str(), "index" | "create" | "new" | "show" | "update" | "destroy") {
+            as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
+            action_symbol = false;
+        }
     }
 
     // `scope controller: :x do get :y end` — the scope's controller is the
@@ -3990,6 +4205,7 @@ fn ingest_resources_route(
     let mut except: Vec<Symbol> = Vec::new();
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
+    let mut to_action: Option<Symbol> = None;
     let mut module: Option<String> = None;
     let mut param: Option<Symbol> = None;
     let mut path: Option<String> = None;
@@ -4002,6 +4218,7 @@ fn ingest_resources_route(
     // and into this node's own `constraints` field below, once the
     // block body has been ingested.
     let mut constraints: IndexMap<Symbol, String> = IndexMap::new();
+    let mut path_names: IndexMap<Symbol, String> = IndexMap::new();
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -4062,6 +4279,17 @@ fn ingest_resources_route(
                 // pointed five routes at `MessagesController`, which
                 // answers them with the human HTML flow.
                 "controller" => controller = rname(&value),
+                "to" => {
+                    let target = string_value(&value).and_then(|to| to.split_once('#').map(|(c, a)| (c.to_string(), a.to_string())));
+                    let Some((to_controller, action)) = target else {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!("resources :{name_str} `to:` is not a literal \"controller#action\""),
+                        });
+                    };
+                    controller = Some(to_controller);
+                    to_action = Some(Symbol::from(action));
+                }
                 "module" => {
                     module = Some(rname(&value).ok_or_else(|| IngestError::Unsupported {
                         file: file.into(),
@@ -4125,6 +4353,23 @@ fn ingest_resources_route(
                         )?);
                     }
                 }
+                // `path_names: { new: "sign_up" }` renames the `new` and `edit` segments. Rails also names a block's own action by it (`get :cancel`), which is read only where the name is the action's own.
+                "path_names" => {
+                    let Some(h) = value.as_hash_node() else {
+                        return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names:` is not a literal Hash") });
+                    };
+                    for element in h.elements().iter() {
+                        let pair = element.as_assoc_node().and_then(|a| Some((symbol_or_string_value(&a.key())?, symbol_or_string_value(&a.value())?)));
+                        let Some((action, named)) = pair else {
+                            return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names:` entry is not a literal name") });
+                        };
+                        if matches!(action.as_str(), "new" | "edit") {
+                            path_names.insert(Symbol::from(action.as_str()), named.trim_matches('/').to_string());
+                        } else if named != action {
+                            return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names: {{ {action}: {named:?} }}` renames a block action") });
+                        }
+                    }
+                }
                 // `shallow:` lands when a fixture demands it.
                 _ => {}
             }
@@ -4181,9 +4426,11 @@ fn ingest_resources_route(
         singular,
         as_name,
         controller,
+        action: to_action,
         param,
         path,
         constraints,
+        path_names,
     };
     Ok(match module {
         Some(module) => RouteSpec::Scope {

@@ -958,6 +958,76 @@ fn visit_update(upd: &Update, schema: &Schema) -> Expr {
     db_call(&db, "exec", vec![concat_chain(segments)])
 }
 
+/// The partial-write form of `visit_update`, for the targets whose
+/// runtime tracks pending changes (Rails' `partial_updates`): the
+/// UPDATE sets only the columns named in `cols` (an `Array[String]`
+/// local the caller assigns), and runs nothing when none is named.
+///
+/// ```ruby
+/// sets = ""
+/// sets = sets + ", name = " + Db.escape_string_opt(@name) if cols.include?("name")
+/// # …one line per column…
+/// Db.exec("UPDATE t SET " + sets[2, sets.length - 2] + " WHERE …") unless sets.empty?
+/// ```
+///
+/// `sets` grows by `+`, never `<<`: a String mutated in place through a
+/// second name is a shape Spinel refuses.
+pub fn visit_partial_update(upd: &Update, schema: &Schema, cols: &Symbol, sets: &Symbol) -> Expr {
+    let table = lookup_table(schema, &upd.table.0);
+    let db = ClassId(Symbol::from(DB_MOD));
+    let sets_ref = || {
+        let mut e = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: sets.clone() });
+        e.ty = Some(Ty::Str);
+        e
+    };
+    let assign_sets = |value: Expr| {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign { target: LValue::Var { id: VarId(0), name: sets.clone() }, value },
+        );
+        e.ty = Some(Ty::Str);
+        e
+    };
+    let mut stmts = vec![assign_sets(lit_str(String::new()))];
+    for a in &upd.assignments {
+        let column = a.column.as_str();
+        let grown = concat_chain(vec![
+            sets_ref(),
+            lit_str(format!(", {} = ", crate::naming::sql_ident(column))),
+            escape_value(&db, &a.value),
+        ]);
+        let cols_ref = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: cols.clone() });
+        let mut named = send_to(cols_ref, "include?", vec![lit_str(column.to_string())], true);
+        named.ty = Some(Ty::Bool);
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::If { cond: named, then_branch: assign_sets(grown), else_branch: nil_lit() },
+        ));
+    }
+    let mut len = send_to(sets_ref(), "length", vec![], false);
+    len.ty = Some(Ty::Int);
+    let mut rest_len = send_to(len, "-", vec![lit_int(2)], false);
+    rest_len.ty = Some(Ty::Int);
+    let mut list = send_to(sets_ref(), "[]", vec![lit_int(2), rest_len], false);
+    list.ty = Some(Ty::Str);
+    let mut segments: Vec<Expr> = vec![
+        lit_str(format!("UPDATE {} SET ", crate::naming::sql_ident(upd.table.0.as_str()))),
+        list,
+    ];
+    // Exec path — inline WHERE, as in `visit_update`.
+    push_where_segments(&mut segments, upd.conditions.as_ref(), table, false, &mut Vec::new(), next_read_id());
+    let write = db_call(&db, "exec", vec![concat_chain(segments)]);
+    let mut empty = send_to(sets_ref(), "empty?", vec![], false);
+    empty.ty = Some(Ty::Bool);
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::If { cond: empty, then_branch: nil_lit(), else_branch: write },
+    ));
+    let mut body = seq(stmts);
+    body.ty = Some(Ty::Nil);
+    body
+}
+
 fn visit_delete(del: &Delete, schema: &Schema) -> Expr {
     let table = lookup_table(schema, &del.table.0);
     let db = ClassId(Symbol::from(DB_MOD));
@@ -1153,7 +1223,7 @@ fn push_value_segment(segments: &mut Vec<Expr>, val: &Value, param: bool, binds:
             segments.push(lit_str("?".to_string()));
             binds.push(Bind { expr: expr.clone(), ty: *ty, nullable_column: None, parameterized: true });
         }
-        Value::Runtime { .. } => segments.push(escape_value(&db, val)),
+        Value::Runtime { .. } | Value::SqlDefault { .. } => segments.push(escape_value(&db, val)),
     }
 }
 
@@ -1162,6 +1232,11 @@ fn push_value_segment(segments: &mut Vec<Expr>, val: &Value, param: bool, binds:
 /// `push_value_segment` instead.
 fn escape_value(db: &ClassId, val: &Value) -> Expr {
     match val {
+        Value::SqlDefault { expr, ty, sql } => Expr::new(Span::synthetic(), ExprNode::If {
+            cond: send_to(expr.clone(), "nil?", vec![], true),
+            then_branch: lit_str(format!("({sql})")),
+            else_branch: escape_value(db, &Value::Runtime { expr: expr.clone(), ty: *ty }),
+        }),
         Value::Runtime { expr, ty } => {
             let method = match ty {
                 ValueType::Int => "escape_int",
@@ -1396,6 +1471,8 @@ mod tests {
                         col_type: ColumnType::Integer,
                         nullable: false,
                         default: None,
+                        default_expression: None,
+                        legacy_default_persistence: false,
                         primary_key: true,
                         generated: None,
                         generated_text_compatible: None,
@@ -1408,6 +1485,8 @@ mod tests {
                         col_type: ColumnType::Text,
                         nullable: false,
                         default: None,
+                        default_expression: None,
+                        legacy_default_persistence: false,
                         primary_key: false,
                         generated: None,
                         generated_text_compatible: None,
@@ -1418,6 +1497,7 @@ mod tests {
                 ],
                 indexes: vec![],
                 foreign_keys: vec![],
+                check_constraints: Vec::new(),
                 virtual_module: None,
                 known_keyless: false,
                 primary_key_columns: Vec::new(),

@@ -245,6 +245,8 @@ pub enum Value {
     /// program — typically `id` (Var ref to a method param) or
     /// `instance.<col>` (instance-field accessor) or `@id` (Ivar).
     Runtime { expr: Expr, ty: ValueType },
+    /// A nil model slot asks the database to evaluate its schema default.
+    SqlDefault { expr: Expr, ty: ValueType, sql: String },
 }
 
 /// Discriminator for which `Db.escape_*` primitive the visitor calls.

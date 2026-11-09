@@ -294,6 +294,7 @@ fn handle_create_table(
         columns,
         indexes: Vec::new(),
         foreign_keys: Vec::new(),
+        check_constraints: Vec::new(),
         virtual_module: None,
         known_keyless: false,
         primary_key_columns,
@@ -402,6 +403,8 @@ fn parse_column_def(
         col_type,
         nullable,
         default,
+        default_expression: None,
+        legacy_default_persistence: false,
         primary_key: top_level_words(modifiers).windows(2)
             .any(|words| words[0].1 == "PRIMARY" && words[1].1 == "KEY"),
         generated,
@@ -692,6 +695,7 @@ fn handle_create_index(stmt: &str, file: &str, schema: &mut Schema, gaps: &mut V
             table.indexes.push(Index {
                 name: Symbol::from(index_name),
                 columns: cols,
+                expression: None,
                 unique,
                 using,
                 predicate,

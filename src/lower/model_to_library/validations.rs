@@ -34,9 +34,11 @@ pub(super) fn push_validate_method(
         .into_iter()
         .flat_map(|(_, attrs)| attrs.into_iter().map(|a| a.name))
         .collect();
+    let defaulted_attrs: crate::det::HashSet<Symbol> =
+        super::markers::attribute_api_defaults(&model.body).into_iter().map(|(name, _)| name).collect();
 
-    // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
-    for item in &model.body {
+    // Unprepended validations and belongs_to checks keep declaration order.
+    for item in model.validation_order() {
         let span = item.span();
         match item {
             crate::dialect::ModelBodyItem::Validation { validation: v, .. } => {
@@ -135,6 +137,13 @@ pub(super) fn push_validate_method(
                     } else {
                         validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty, runtime_relation)
                     };
+                    // Not the `@attr` slot a column has: a typed_store attribute lives in its store column, behind the reader Rails validates through.
+                    // A defaulted `attribute` holds nil in `@attr` until its reader applies the default.
+                    if store_attrs.contains(&v.attribute) || defaulted_attrs.contains(&v.attribute) {
+                        for check in &mut produced {
+                            read_through_reader(check, &v.attribute);
+                        }
+                    }
                     if v.if_cond.is_some() || v.unless_cond.is_some() {
                         let body = if produced.len() == 1 {
                             produced.pop().unwrap()
@@ -142,12 +151,6 @@ pub(super) fn push_validate_method(
                             seq(produced)
                         };
                         produced = vec![with_condition_guard(body, &v.if_cond, &v.unless_cond)];
-                    }
-                    // Not the `@attr` slot a column has: a typed_store attribute lives in its store column, behind the reader Rails validates through.
-                    if store_attrs.contains(&v.attribute) {
-                        for check in &mut produced {
-                            read_through_reader(check, &v.attribute);
-                        }
                     }
                     for mut check in produced {
                         // Each expanded check attributes to its `validates` line.
@@ -533,16 +536,20 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             mutates_self: false,
             block_param: None,
         });
-    }    if !defines("error_messages_for") {
+    }
+    for (name, message) in [("error_messages_for", "message"), ("error_full_messages_for", "full_message")] {
+        if defines(name) {
+            continue;
+        }
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
-            name: Symbol::from("error_messages_for"),
+            name: Symbol::from(name),
             receiver: MethodReceiver::Instance,
             params: vec![crate::dialect::Param::positional(Symbol::from("attribute"))],
-            body: error_messages_for_body(span, errors_readers),
+            body: error_messages_for_body(span, errors_readers, message),
             signature: Some(fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: std::sync::Arc::new(Ty::Str) })),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
@@ -575,10 +582,12 @@ fn errors_reader(span: Span, errors_readers: ErrorsReaders, name: &str, ty: Ty) 
     read
 }
 
-/// `out = []; error_details.each { |e| out << e.message if e.attribute == attribute }; out`,
-/// the body `ActiveRecord::Base#error_messages_for` has in the shared runtime
-/// (`@error_details.each` for `ErrorsReaders::FieldRead`).
-fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders) -> Expr {
+/// `out = []; error_details.each { |e| out << e.<message> if e.attribute == attribute }; out`,
+/// the body `ActiveRecord::Base#error_messages_for` (`message`) and
+/// `#error_full_messages_for` (`full_message`) have in the shared runtime
+/// (`@error_details.each` for `ErrorsReaders::FieldRead`). The ruby family answers the full
+/// messages frozen, as its connection.rb reopen does; a strict target has no frozen Array.
+fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders, message: &str) -> Expr {
     let str_array = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
     let typed = |node: ExprNode, ty: Ty| {
         let mut e = Expr::new(span, node);
@@ -594,7 +603,7 @@ fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders) -> Expr {
     let picked = typed(
         ExprNode::If {
             cond: call(call(error(), "attribute", vec![], Ty::Str), "==", vec![var("attribute", Ty::Str)], Ty::Bool),
-            then_branch: call(var("out", str_array.clone()), "<<", vec![call(error(), "message", vec![], Ty::Str)], str_array.clone()),
+            then_branch: call(var("out", str_array.clone()), "<<", vec![call(error(), message, vec![], Ty::Str)], str_array.clone()),
             else_branch: typed(ExprNode::Lit { value: Literal::Nil }, Ty::Nil),
         },
         Ty::Nil,
@@ -628,7 +637,12 @@ fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders) -> Expr {
             value: typed(ExprNode::Array { elements: vec![], style: ArrayStyle::default() }, str_array.clone()),
         },
     );
-    seq(vec![init, each, var("out", str_array)])
+    let answer = if message == "full_message" && errors_readers == ErrorsReaders::CreatedOnFirstRead {
+        call(var("out", str_array.clone()), "freeze", vec![], str_array)
+    } else {
+        var("out", str_array)
+    };
+    seq(vec![init, each, answer])
 }
 
 /// Produce the list of helper-call expressions for one `ValidationRule` on

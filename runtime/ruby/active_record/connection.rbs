@@ -116,6 +116,8 @@ module ActiveRecord
     def write_attribute: (Symbol name, untyped value) -> untyped
     def slice: (*(Symbol | String | Array[Symbol | String]) names) -> Hash[String, untyped]
     def saved_changes?: () -> bool
+    def _wrote_on_update?: () -> bool
+    def _attributes_snapshot: () -> Hash[String, untyped]
     def attribute_in_database: (Symbol | String name) -> untyped
     def self.schema_column_types: () -> Hash[Symbol, Symbol]
     def self.schema_json_coder_columns: () -> Array[Symbol]
@@ -252,6 +254,7 @@ module ActiveRecord
     def self._adapter_find_by_id: (Integer id) -> Base?
     def self.decode_plucked: (String | Symbol column, untyped value) -> untyped
     def save: () -> bool
+    def error_full_messages_for: (String attribute) -> Array[String]
     def valid?: () -> bool
     def save!: () -> Base
     def destroy: () -> (Base | false)
@@ -271,6 +274,7 @@ module ActiveRecord
     def _destroy_committed: () -> void
     def _enlist_or_run: (Integer kind) -> nil
     def _enlist_write: (Integer kind) -> nil
+    def _enlist_direct_write: () -> nil
     def _forget_rollback_state: () -> nil
     def _run_commit_callbacks: (Integer kind) -> nil
     def self._txn_parent_joinable?: (Integer depth) -> bool
@@ -284,6 +288,7 @@ module ActiveRecord
     def __track_saved_changes: (bool was_new) -> void
     def saved_changes: () -> Hash[String, untyped]
     def changes_to_save: () -> Hash[String, untyped]
+    def _columns_to_write: () -> Array[String]
     def attribute_was: (String name) -> untyped
     def clear_attribute_change: (String name) -> nil
     def restore_attribute!: (String name) -> nil

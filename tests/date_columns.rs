@@ -1,3 +1,5 @@
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 use roundhouse::App;
 use roundhouse::diagnostic::{DiagnosticKind, Severity};
 use roundhouse::dialect::ModelBodyItem;
@@ -36,7 +38,7 @@ require_relative 'tests/date_columns_spinel'
         .output()
         .expect("run Rails date-column control");
     if oracle.status.code() == Some(77) {
-        eprintln!("{}", String::from_utf8_lossy(&oracle.stderr));
+        prerequisite::missing(String::from_utf8_lossy(&oracle.stderr).trim());
         return;
     }
     assert!(
@@ -140,7 +142,7 @@ end
         .output()
         .expect("run initialized Rails stored-date control");
     if oracle.status.code() == Some(77) {
-        eprintln!("{}", String::from_utf8_lossy(&oracle.stderr));
+        prerequisite::missing(String::from_utf8_lossy(&oracle.stderr).trim());
         return;
     }
     assert!(

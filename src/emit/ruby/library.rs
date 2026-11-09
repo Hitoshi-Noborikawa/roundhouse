@@ -239,18 +239,22 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             }
             files
         })
-        .fold(Vec::<EmittedFile>::new(), |mut out, file| {
+        .fold((Vec::<EmittedFile>::new(), HashMap::<PathBuf, usize>::default()), |(mut out, mut at), file| {
             // Not left to the tree's last-wins dedupe: a module opened in two files (rolify's `Rolify`) would lose one opening's methods.
-            match out.iter_mut().find(|f| f.path == file.path) {
-                Some(existing) if existing.content == file.content => {}
-                Some(existing) => {
-                    existing.content.push('\n');
-                    existing.content.push_str(&file.content);
+            match at.get(&file.path) {
+                Some(&i) if out[i].content == file.content => {}
+                Some(&i) => {
+                    out[i].content.push('\n');
+                    out[i].content.push_str(&file.content);
                 }
-                None => out.push(file),
+                None => {
+                    at.insert(file.path.clone(), out.len());
+                    out.push(file);
+                }
             }
-            out
+            (out, at)
         })
+        .0
 }
 
 /// A class opened in several gem files (graphql-client's `Client`, in
@@ -756,6 +760,7 @@ fn emit_library_class_with_nested(
             .filter(|l| !l.starts_with("require"))
             .collect();
         let Some(block) = child_block(&body, depth, kid.name.0.as_str()) else { continue };
+        let block = within_namespaces(block, parent.name.0.as_str(), kid.name.0.as_str(), classes);
         blocks.push(NestedBlock {
             name: kid.name.0.as_str().to_string(),
             requires: nested_dependencies(kid, kids),
@@ -769,7 +774,7 @@ fn emit_library_class_with_nested(
         let sidecar = super::rbs::emit_library_class_rbs(kid, &rb_path);
         let lines: Vec<&str> = sidecar.content.lines().collect();
         if let Some(block) = child_block(&lines, depth, kid.name.0.as_str()) {
-            sidecar_blocks.push(block);
+            sidecar_blocks.push(within_namespaces(block, parent.name.0.as_str(), kid.name.0.as_str(), classes));
         }
     }
     if blocks.is_empty() {
@@ -992,6 +997,40 @@ impl NestedEmitter<'_> {
 /// segment is the runtime's — with ONE compact header naming the whole
 /// path (`module WebPush::Connections::Stages`), which is renamed to
 /// its last segment.
+/// A child two or more levels below the parent (`Rack::Attack::StoreProxy::RedisProxy`
+/// in `Rack::Attack`) inside the namespaces between them: `child_block` names it by its
+/// last segment, which alone would define `Rack::Attack::RedisProxy`.
+fn within_namespaces(block: String, parent: &str, child: &str, classes: &[LibraryClass]) -> String {
+    let Some(relative) = child.strip_prefix(&format!("{parent}::")) else { return block };
+    let segments: Vec<&str> = relative.split("::").collect();
+    let Some((_, between)) = segments.split_last() else { return block };
+    // Already inside them: `unwrapped` kept the source's own `module StoreProxy`.
+    let first = block.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+    // Not a bare prefix test: `module StoreProxyHelpers` would pass for `StoreProxy`.
+    let opens = |kw: &str| {
+        first.strip_prefix(&format!("{kw} {}", between.first().copied().unwrap_or(""))).is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', ';']))
+    };
+    if between.is_empty() || opens("module") || opens("class") {
+        return block;
+    }
+    let mut out = String::new();
+    let mut name = parent.to_string();
+    for (i, seg) in between.iter().enumerate() {
+        name = format!("{name}::{seg}");
+        let keyword = if classes.iter().any(|c| c.name.0.as_str() == name && !c.is_module) { "class" } else { "module" };
+        out.push_str(&format!("{}{keyword} {seg}\n", "  ".repeat(i)));
+    }
+    out.push_str(&indent_lines(&block, between.len()));
+    out.push('\n');
+    for i in (0..between.len()).rev() {
+        out.push_str(&format!("{}end", "  ".repeat(i)));
+        if i > 0 {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn child_block(body: &[&str], depth: usize, full_name: &str) -> Option<String> {
     let first = body.iter().position(|l| !l.trim().is_empty())?;
     let header = body[first];
@@ -1112,9 +1151,8 @@ pub(super) fn restore_extras_facades(files: &mut [(String, String)], app: &App) 
 /// have.
 ///
 /// A name the locals do not bind falls back to the enclosing method's
-/// own PARAMETER of that name before it falls back to nil. Same policy
-/// as the controller-side rewrite ("a same-named local wins"), and here
-/// it is what keeps the call type-correct: the partial's record
+/// own PARAMETER of that name before it falls back to nil. Here it is
+/// what keeps the call type-correct: the partial's record
 /// parameter is typed as its record (`unrenderable(Message message,
 /// …)`), so a nil there is a seed contradiction that stops a strict
 /// build. The divergence it buys is bounded and in the safe direction —
@@ -1261,12 +1299,8 @@ fn rewrite_library_partial_render(
     for n in &contract.closure {
         // Not the helper's same-named param: the partial's ivar is the rendering template's, which `rewrite_helper_ivars` reaches.
         let ivar = in_helper.then(|| Expr::new(span, ExprNode::Ivar { name: Symbol::from(n.as_str()) }));
-        // Nor a local of its name: Rails hands `post: other` to the partial's `post`, never its `@post`. Only a param the local shares (`shared_locals`) takes it.
-        let local = || locals_lookup(n).filter(|_| *n != contract.record);
-        let value = match contract.shared_locals.contains(n) {
-            true => local().or(ivar),
-            false => ivar.or_else(local),
-        };
+        // Nor a local of its name: Rails hands `post: other` to the partial's `post`, never its `@post`.
+        let value = ivar.or_else(|| locals_lookup(n).filter(|_| *n != contract.record));
         view_args.push(value.or_else(|| param_lookup(n)).unwrap_or_else(nil));
     }
     view_args.extend(contract.extras_args(
@@ -2053,7 +2087,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     let _span = crate::timings::begin("scope lowering: setup");
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
-    let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
+    let unique_keys = crate::lower::scope_chain::build_unique_keys(app);
     let regs = crate::lower::scope_chain::Registries {
         scopes: &scopes,
         models: &models,
@@ -2125,6 +2159,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &scopes,
                 &models,
                 &assocs,
+                &unique_keys,
             );
         }
         // User-written class methods the registry admitted as
@@ -2157,6 +2192,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &unique_keys,
                     );
                 }
             }
@@ -2204,6 +2240,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &unique_keys,
                     );
                 }
             }
@@ -4744,51 +4781,11 @@ fn view_helpers_path() -> Vec<Symbol> {
 ///      `ActionView::ViewHelpers.name(args)`.
 /// Only receiver-less Sends are rewritten in (3)/(4): a call with a receiver
 /// already resolves, and a bare identifier with no call shape is a local read.
-fn rewrite_helper_calls(
-    expr: &mut Expr,
-    index: &HashMap<Symbol, ClassId>,
-    route_helpers: &crate::det::HashSet<Symbol>,
-    url_helper_classes: &crate::det::HashSet<Symbol>,
-    rewrite_request: bool,
-    own_methods: &crate::det::HashSet<Symbol>,
-    own_params: &crate::det::HashSet<Symbol>,
-    view_visible: &std::collections::BTreeSet<Symbol>,
-) {
-    expr.node.for_each_child_mut(&mut |c| {
-        rewrite_helper_calls(
-            c,
-            index,
-            route_helpers,
-            url_helper_classes,
-            rewrite_request,
-            own_methods,
-            own_params,
-            view_visible,
-        )
-    });
-
-    // Not left on `self` in a view or helper module: a helper reached as `self.x` is the bare `x` below, and the module function has no such method. A same-named param keeps `self`, which a bare call would read instead.
-    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
-        if rewrite_request
-            && matches!(&*r.node, ExprNode::SelfRef)
-            && (index.contains_key(method) || view_visible.contains(method))
-            && !own_methods.contains(method)
-            && !own_params.contains(method)
-        {
-            let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
-            *recv = None;
-        }
-    }
-
-    // Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
-    // spinel (frozen literals) — lobsters' link_to_different_page does
-    // `path.sub!(/…/, "")` on a route-helper literal (`active_path` → a
-    // frozen "/active"). For the in-place string mutators whose bang form
-    // modifies self and returns self-or-nil, the non-destructive
-    // `<lvalue> = <lvalue>.<m>(args)` is equivalent when the bang return is
-    // unused (statement position) and is frozen-safe. Assignable receiver
-    // (Var/Ivar) only; `slice!` and friends (which return the removed part,
-    // not the modified string) are deliberately excluded.
+/// Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
+/// spinel (frozen literals). For the in-place string mutators whose bang
+/// form modifies self and returns self-or-nil, `<lvalue> = <lvalue>.<m>(args)`
+/// is equivalent when the bang's value is unused, and frozen-safe.
+fn bang_to_reassign(expr: &mut Expr) {
     let bang_rewrite: Option<Symbol> =
         if let ExprNode::Send { recv: Some(r), method, block: None, .. } = &*expr.node {
             // A reserved-word local (`class:`) or a numbered parameter
@@ -4833,7 +4830,52 @@ fn rewrite_helper_calls(
             ExprNode::Send { recv: Some(r), method: base, args, block: None, parenthesized },
         );
         *expr.node = ExprNode::Assign { target, value: call };
-        return;
+    }
+}
+
+fn rewrite_helper_calls(
+    expr: &mut Expr,
+    index: &HashMap<Symbol, ClassId>,
+    route_helpers: &crate::det::HashSet<Symbol>,
+    url_helper_classes: &crate::det::HashSet<Symbol>,
+    rewrite_request: bool,
+    own_methods: &crate::det::HashSet<Symbol>,
+    own_params: &crate::det::HashSet<Symbol>,
+    view_visible: &std::collections::BTreeSet<Symbol>,
+) {
+    expr.node.for_each_child_mut(&mut |c| {
+        rewrite_helper_calls(
+            c,
+            index,
+            route_helpers,
+            url_helper_classes,
+            rewrite_request,
+            own_methods,
+            own_params,
+            view_visible,
+        )
+    });
+
+    // Not left on `self` in a view or helper module: a helper reached as `self.x` is the bare `x` below, and the module function has no such method. A same-named param keeps `self`, which a bare call would read instead.
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+        if rewrite_request
+            && matches!(&*r.node, ExprNode::SelfRef)
+            && (index.contains_key(method) || view_visible.contains(method))
+            && !own_methods.contains(method)
+            && !own_params.contains(method)
+        {
+            let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
+            *recv = None;
+        }
+    }
+
+    // Only a statement whose value nothing reads: `mod ||= path.gsub!(…)` tests the bang call's nil (addressable's normalize_path).
+    if let ExprNode::Seq { exprs } = &mut *expr.node
+        && let Some((_, statements)) = exprs.split_last_mut()
+    {
+        for statement in statements {
+            bang_to_reassign(statement);
+        }
     }
 
     // ActiveSupport `String#pluralize(count)` — count-aware inflection of
@@ -5064,9 +5106,13 @@ fn rewrite_helper_calls(
     //
     // Self wins here too: a class that defines `widgets_url` itself
     // calls that method (Rails mixes url helpers in beneath a class's
-    // own methods, and a plain class has none mixed in at all).
+    // own methods, and a plain class has none mixed in at all). So does
+    // an app helper of the `_url` name (`index`): Rails mixes the app's
+    // helpers in above the url helpers, and the bare call takes case 3's
+    // qualification to that module below.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node
         && !own_methods.contains(method)
+        && !index.contains_key(method)
     {
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));
@@ -5083,15 +5129,16 @@ fn rewrite_helper_calls(
 
     // Cases 3/4: a bare call resolving to an app or framework helper module.
     let path: Option<Vec<Symbol>> = match &*expr.node {
-        ExprNode::Send { recv: None, method, args, block, .. } => {
+        ExprNode::Send { recv: None, method, args, block, parenthesized } => {
             // A method's own PARAM shadows the helper index only as a BARE
-            // reference (no args, no block) — that's a local read. `tag(x)`
-            // or `tag { }` is a method call that still needs helper
-            // qualification, so a same-named param must NOT capture it
-            // (that dropped the qualification → latent NameError). Real
-            // own-METHODS shadow at any arity (a self-dispatch).
+            // reference (no args, no block, no parens) — that's a local
+            // read. `tag(x)`, `tag()` or `tag { }` is a method call that
+            // still needs helper qualification, so a same-named param must
+            // NOT capture it (that dropped the qualification → latent
+            // NameError, or a partial local read in place of the helper's
+            // call). Real own-METHODS shadow at any arity (a self-dispatch).
             let param_shadow =
-                own_params.contains(method) && args.is_empty() && block.is_none();
+                own_params.contains(method) && args.is_empty() && block.is_none() && !parenthesized;
             if own_methods.contains(method) || param_shadow {
                 // Self wins: a bare call naming a method the enclosing
                 // class itself defines is a self-dispatch (Tag#to_param's
@@ -5376,58 +5423,56 @@ fn rewrite_helper_calls(
     }
 }
 
-/// Ruby-emit-path pass: wrap each action's html render in the layout
-/// call — `render(Views::X.y(...))` → `render(Views::Layouts.application(
-/// Views::X.y(...), @<ivar>…, @flash…))`. Lives here (not the shared
-/// controller lowering) because the wrap shape and the CRuby dispatch
-/// contract move together: the overlay main.rb ships `controller.body`
-/// verbatim, while other targets' dispatchers still wrap body-only.
-/// The controller render seam is where a layout's ivar reads (@user,
-/// @title) are statically in scope — the generic dispatch had no way to
-/// pass them. Skipped renders: jbuilder json (`*_json` view call or a
-/// `content_type:` kwarg), non-view renders (`render html:`/`plain:` —
-/// Rails skips the layout for those too), and an already-wrapped
-/// Layouts call (idempotence). No-op when the app has no
-/// layouts/application view.
+/// Ruby-emit-path pass: wrap each action's html render in its layout —
+/// `render(Views::X.y(...))` → `render(Views::Layouts.admin(
+/// Views::X.y(...), @<ivar>…, @flash…))`, the layout
+/// `controller_layout` picks for the controller and method the render
+/// is in. A render in a method that runs under controllers or actions
+/// with different layouts (a filter in `ApplicationController`, an
+/// action a subclass inherits) picks among them per request, as Rails
+/// does. Lives here (not the shared controller lowering) because the
+/// wrap shape and the CRuby dispatch contract move together: the
+/// overlay main.rb ships `controller.body` verbatim, while other
+/// targets' dispatchers still wrap body-only. The controller render
+/// seam is where a layout's ivar reads (@user, @title) are statically
+/// in scope — the generic dispatch had no way to pass them. Skipped
+/// renders: jbuilder json (`*_json` view call or a `content_type:`
+/// kwarg), non-view renders (`render html:`/`plain:` with no `layout:`
+/// — Rails skips the layout for those too), an already-wrapped Layouts
+/// call (idempotence), and a render whose layout `controller_layout`
+/// cannot pick, which ingest reported.
 pub(crate) fn apply_layout_lowering(lcs: &mut [LibraryClass], app: &App) {
-    // Cheap probe: no layouts/application view → nothing to wrap.
-    let probe = Expr::new(
-        crate::span::Span::synthetic(),
-        ExprNode::Lit { value: crate::expr::Literal::Nil },
-    );
+    let layouts = crate::controller_layout::Layouts::new(&app.controllers, &app.views);
     let closures = crate::lower::view_to_library::view_ivar_closures(&app.views, &app.controllers);
-    if crate::lower::view_to_library::layout_wrap_expr_with(app, &closures, probe).is_none() {
-        return;
-    }
     for lc in lcs.iter_mut() {
-        // `layout false` on the controller this class came from, scoped
-        // by the `only:`/`except:` the declaration carried. Resolved
-        // per METHOD because the scoping is per action: campfire's
-        // `MessagesController` writes `layout false, only: :index`, so
-        // `index` must render bare — it is a turbo-frame fragment
-        // loaded into a page that already has a layout, and wrapping it
-        // shipped a whole second `<html>` inside the first, 117 tags
-        // Rails does not send — while `show` and `edit` keep theirs.
-        let decl = app
-            .controllers
-            .iter()
-            .find(|c| c.name == lc.name)
-            .map(|c| c.layout.clone());
+        if !layouts.is_controller(lc.name.0.as_str()) {
+            continue;
+        }
+        // Resolved per METHOD: `layout false, only: :index` (campfire's
+        // `MessagesController`) leaves `index` bare — a turbo-frame
+        // fragment loaded into a page that already has a layout — while
+        // `show` and `edit` keep theirs.
         for m in &mut lc.methods {
-            if decl.as_ref().is_some_and(|d| d.suppresses(&m.name)) {
-                continue;
-            }
-            rewrite_layout_wrap(&mut m.body, app, &closures);
+            let site = LayoutSite { layouts: &layouts, class: lc.name.0.as_str(), method: m.name.as_str() };
+            rewrite_layout_wrap(&mut m.body, app, &closures, &site);
         }
     }
+}
+
+struct LayoutSite<'s, 'a> {
+    layouts: &'s crate::controller_layout::Layouts<'a>,
+    class: &'s str,
+    method: &'s str,
 }
 
 fn rewrite_layout_wrap(
     expr: &mut Expr,
     app: &App,
     closures: &crate::det::HashMap<crate::lower::view_to_library::ViewKey, Vec<crate::ident::Symbol>>,
+    site: &LayoutSite<'_, '_>,
 ) {
-    expr.node.for_each_child_mut(&mut |c| rewrite_layout_wrap(c, app, closures));
+    expr.node.for_each_child_mut(&mut |c| rewrite_layout_wrap(c, app, closures, site));
+    let span = expr.span;
     // Post-lowering action bodies carry `render` as a SelfRef-receiver
     // Send (`self.render(...)` shape); accept the bare form too.
     let ExprNode::Send { recv, method, args, .. } = &mut *expr.node else {
@@ -5465,27 +5510,6 @@ fn rewrite_layout_wrap(
     if args.is_empty() {
         return;
     }
-    // An explicit `layout: false` VETOES the wrap outright — the
-    // controller-side partial-render rewrite plants it (Rails renders
-    // partials without a layout), and a user's `render …, layout:
-    // false` means the same thing.
-    if layout_kwarg.as_ref().is_some_and(|v| {
-        matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } })
-    }) {
-        return;
-    }
-    // An explicit `layout: "application"` / `layout: true` wraps a body
-    // render (non-Views literal html) the way Rails does. Other layout
-    // names are left unwrapped — honest residue, only `application`
-    // exists as an emitted layout.
-    let layout_requested = layout_kwarg.as_ref().is_some_and(|v| match &*v.node {
-        ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value == "application",
-        ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
-            value.as_str() == "application"
-        }
-        ExprNode::Lit { value: crate::expr::Literal::Bool { value } } => *value,
-        _ => false,
-    });
     // Trailing kwargs are fine (`status: :unprocessable_entity` renders
     // WITH layout in Rails) — except the jbuilder branch's
     // `content_type:`, which marks a non-html response.
@@ -5499,30 +5523,112 @@ fn rewrite_layout_wrap(
     if has_content_type {
         return;
     }
-    // An explicit `layout: "application"`/`true` wraps WHATEVER the
-    // body is — `render html: content.html_safe, layout:
-    // "application"` (lobsters /u serves a cached tree string) has a
-    // Send body that isn't a Views call, and the Views-shape test
-    // alone wrongly skipped it. Without an explicit request, only a
-    // non-layout non-json Views call wraps (the implicit html render).
-    let wrappable = layout_requested
-        || match &*args[0].node {
-            ExprNode::Send { recv: Some(r), method: vm, .. } => {
-                !vm.as_str().ends_with("_json")
-                    && matches!(&*r.node, ExprNode::Const { path }
-                        if path.len() == 2
-                            && path[0].as_str() == "Views"
-                            && path[1].as_str() != "Layouts")
-            }
-            _ => false,
-        };
+    // An explicit `layout:` wraps WHATEVER the body is — `render html:
+    // content.html_safe, layout: "application"` (lobsters /u serves a
+    // cached tree string) has a Send body that isn't a Views call. An
+    // explicit `layout: false` vetoes the wrap: the controller-side
+    // partial-render rewrite plants it (Rails renders partials without a
+    // layout). Without `layout:`, only a non-layout non-json Views call
+    // wraps (the implicit html render).
+    let views_call = match &*args[0].node {
+        ExprNode::Send { recv: Some(r), method: vm, .. } => {
+            !vm.as_str().ends_with("_json")
+                && matches!(&*r.node, ExprNode::Const { path }
+                    if path.len() >= 2
+                        && path[0].as_str() == "Views"
+                        && path[1].as_str() != "Layouts"
+                        && !path[1].as_str().starts_with("Layouts::"))
+        }
+        _ => false,
+    };
+    let wrappable = match &layout_kwarg {
+        Some(_) => !matches!(&*args[0].node, ExprNode::Hash { .. } | ExprNode::Lit { value: crate::expr::Literal::Sym { .. } }),
+        None => views_call,
+    };
     if !wrappable {
         return;
     }
+    let Ok(cases) = site.layouts.render_cases(site.class, site.method, layout_kwarg.as_ref()) else {
+        return;
+    };
     let inner = args[0].clone();
-    if let Some(wrapped) = crate::lower::view_to_library::layout_wrap_expr_with(app, closures, inner) {
-        args[0] = wrapped;
+    let wrap = |layout: &crate::controller_layout::Layout| match layout {
+        crate::controller_layout::Layout::Template(name) => {
+            crate::lower::view_to_library::layout_wrap_expr_with(app, closures, name.as_str(), inner.clone())
+        }
+        _ => Some(inner.clone()),
+    };
+    // One layout for every controller and action running the render, or
+    // the per-request choice Rails makes: the most common layout, and the
+    // others where `controller_path` (and `action_name`, under an
+    // `only:`/`except:`) says so.
+    let Some(fallback) = (0..cases.len()).max_by_key(|&i| (cases[i].runs.len(), std::cmp::Reverse(i))) else { return };
+    let Some(mut wrapped) = wrap(&cases[fallback].layout) else { return };
+    for (i, case) in cases.iter().enumerate().rev() {
+        if i == fallback {
+            continue;
+        }
+        let Some(then_branch) = wrap(&case.layout) else { return };
+        let cond = layout_case_condition(case, &cases, span);
+        wrapped = typed_layout_expr(span, ExprNode::If { cond, then_branch, else_branch: wrapped }, crate::ty::Ty::Str);
     }
+    args[0] = wrapped;
+}
+
+/// Whether the request is one of `case`'s runs: its controller's
+/// `controller_path`, and its `action_name` where the controller's
+/// actions differ in layout (an `only:`/`except:`, under which the
+/// dispatcher assigns `action_name`).
+fn layout_case_condition(
+    case: &crate::controller_layout::Case,
+    cases: &[crate::controller_layout::Case],
+    span: crate::span::Span,
+) -> Expr {
+    let lit = |s: &str| typed_layout_expr(span, ExprNode::Lit { value: crate::expr::Literal::Str { value: s.to_string() } }, crate::ty::Ty::Str);
+    let reader = |name: &str| {
+        typed_layout_expr(
+            span,
+            ExprNode::Send { recv: None, method: Symbol::from(name), args: Vec::new(), block: None, parenthesized: false },
+            crate::ty::Ty::Str,
+        )
+    };
+    let equals = |name: &str, value: &str| {
+        typed_layout_expr(
+            span,
+            ExprNode::Send { recv: Some(reader(name)), method: Symbol::from("=="), args: vec![lit(value)], block: None, parenthesized: false },
+            crate::ty::Ty::Bool,
+        )
+    };
+    let join = |op: crate::expr::BoolOpKind, left: Expr, right: Expr| {
+        typed_layout_expr(span, ExprNode::BoolOp { op, surface: Default::default(), left, right }, crate::ty::Ty::Bool)
+    };
+    let mut terms: Vec<Expr> = Vec::new();
+    let mut classes: Vec<&str> = Vec::new();
+    for (class, _) in &case.runs {
+        if !classes.contains(&class.as_str()) {
+            classes.push(class);
+        }
+    }
+    for class in classes {
+        let path = crate::controller_layout::controller_path(class);
+        let whole = !cases.iter().any(|other| !std::ptr::eq(other, case) && other.runs.iter().any(|(c, _)| c == class));
+        if whole {
+            terms.push(equals("controller_path", &path));
+            continue;
+        }
+        for (_, action) in case.runs.iter().filter(|(c, _)| c == class) {
+            terms.push(join(crate::expr::BoolOpKind::And, equals("controller_path", &path), equals("action_name", action)));
+        }
+    }
+    let mut terms = terms.into_iter();
+    let first = terms.next().unwrap_or_else(|| typed_layout_expr(span, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }, crate::ty::Ty::Bool));
+    terms.fold(first, |acc, t| join(crate::expr::BoolOpKind::Or, acc, t))
+}
+
+fn typed_layout_expr(span: crate::span::Span, node: ExprNode, ty: crate::ty::Ty) -> Expr {
+    let mut e = Expr::new(span, node);
+    e.ty = Some(ty);
+    e
 }
 
 // `record.update!(k: v, ...)` kwargs inlining moved to the shared
@@ -8891,6 +8997,16 @@ fn emit_library_class_decl_inner(
     for &i in &deferred {
         body_requires.extend(resolve_all(&lc.constants[i].1, true));
     }
+    // Not only the interleaved ones, which the split plan places: an ordered body writes the rest after its methods, where they read their constants as the body loads (devise's `@@helpers << Devise::Controllers::Helpers`).
+    if ordered_body {
+        for init in lc.class_ivar_initializers.iter().filter(|init| {
+            init.span.is_synthetic() || !matches!(&*init.node, ExprNode::Assign { target: LValue::Ivar { .. }, .. } | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. })
+        }) {
+            let mut paths = BTreeSet::new();
+            walk_load_time_paths(init, lc, &mut BTreeSet::new(), &mut paths);
+            body_requires.extend(paths.iter().filter_map(|p| resolve(p, true)));
+        }
+    }
     let factory_methods: Vec<&MethodDef> = lc
         .constants
         .iter()
@@ -11186,6 +11302,7 @@ pub(crate) fn apply_boolean_lowering(lcs: &mut [LibraryClass], app: &App) {
 /// `super` casts too. An enum column's writer maps labels and is left
 /// alone, as is the primary key's.
 pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &App) {
+    apply_enum_raw_input_lowering(lcs, app);
     for model in &app.models {
         let table = app.schema.tables.get(&model.table.0);
         let mut casts: HashMap<Symbol, &'static str> = table
@@ -11299,6 +11416,175 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
             }
         }
     }
+}
+
+/// `<enum>_before_type_cast` answers what was assigned until the record
+/// saves or loads, and the stored value after (activerecord 8.1.4). Only
+/// for the enum columns the app reads it on.
+fn apply_enum_raw_input_lowering(lcs: &mut [LibraryClass], app: &App) {
+    let demanded = crate::analyze::raw_input_columns(app);
+    if demanded.is_empty() {
+        return;
+    }
+    for model in &app.models {
+        // By model: another model's generated reader doesn't replace this one's own.
+        let columns: Vec<Symbol> = model
+            .enums
+            .keys()
+            .filter(|c| demanded.contains(*c))
+            .filter(|c| !crate::analyze::source_instance_method(app, &model.name, &format!("{c}_before_type_cast")))
+            .cloned()
+            .collect();
+        if columns.is_empty() {
+            continue;
+        }
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        for m in lc.methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Instance) {
+            let defaults = (m.name.as_str() == "initialize").then_some(model);
+            remember_enum_input(&mut m.body, &columns, defaults);
+            // A loaded record's load writer, as well as saving and reloading.
+            let loaded = columns.iter().find(|c| m.name.as_str() == format!("_write_{}_raw", c.as_str()));
+            if let Some(column) = loaded {
+                let write = std::mem::replace(&mut m.body, sp_expr(ExprNode::Lit { value: Literal::Nil }));
+                m.body = sp_expr(ExprNode::Seq { exprs: vec![forget_enum_input(column), write] });
+            }
+            if matches!(m.name.as_str(), "_adapter_insert" | "_adapter_update" | "_adapter_reload") {
+                let mut exprs: Vec<Expr> = columns.iter().map(forget_enum_input).collect();
+                exprs.push(std::mem::replace(&mut m.body, sp_expr(ExprNode::Lit { value: Literal::Nil })));
+                m.body = sp_expr(ExprNode::Seq { exprs });
+            }
+        }
+        for column in &columns {
+            let Some(reader) = lc.methods.iter().find(|m| m.receiver == MethodReceiver::Instance && m.name == *column) else {
+                continue;
+            };
+            let mut raw_reader = reader.clone();
+            raw_reader.name = raw_ivar(column);
+            raw_reader.kind = crate::dialect::AccessorKind::Method;
+            raw_reader.signature = None;
+            let ivar = |name: Symbol| sp_expr(ExprNode::Ivar { name });
+            raw_reader.body = sp_expr(ExprNode::If {
+                cond: sp_expr(ExprNode::Send {
+                    recv: Some(ivar(raw_ivar(column))),
+                    method: Symbol::from("nil?"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                }),
+                then_branch: ivar(column.clone()),
+                else_branch: ivar(raw_ivar(column)),
+            });
+            lc.methods.push(raw_reader);
+        }
+    }
+}
+
+fn forget_enum_input(column: &Symbol) -> Expr {
+    sp_expr(ExprNode::Assign {
+        target: crate::expr::LValue::Ivar { name: raw_ivar(column) },
+        value: sp_expr(ExprNode::Lit { value: Literal::Nil }),
+    })
+}
+
+/// After each write that casts an input through the enum's mapping, keep
+/// that input. A call of the writer already holding a cast value is
+/// followed by the original, which replaces what the writer kept.
+fn remember_enum_input(e: &mut Expr, columns: &[Symbol], defaults: Option<&crate::dialect::Model>) {
+    e.node.for_each_child_mut(&mut |c| remember_enum_input(c, columns, defaults));
+    let (column, value) = match &*e.node {
+        ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } if columns.contains(name) => (name.clone(), value),
+        ExprNode::Assign { target: crate::expr::LValue::Attr { recv, name }, value }
+            if matches!(&*recv.node, ExprNode::SelfRef) && columns.contains(&writer_column(name)) =>
+        {
+            (writer_column(name), value)
+        }
+        ExprNode::Send { recv, method, args, .. }
+            if args.len() == 1
+                && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                && method.as_str().ends_with('=')
+                && columns.contains(&writer_column(method)) =>
+        {
+            (writer_column(method), &args[0])
+        }
+        _ => return,
+    };
+    let input = match defaults.and_then(|model| enum_default_input(model, &column, value)) {
+        Some(default) => sp_expr(ExprNode::Lit { value: default }),
+        None => {
+            let Some(input) = enum_cast_input(value) else {
+                return;
+            };
+            before_normalizer(input, &column)
+        }
+    };
+    let remember = sp_expr(ExprNode::Assign {
+        target: crate::expr::LValue::Ivar { name: raw_ivar(&column) },
+        value: input,
+    });
+    let write = std::mem::replace(e, sp_expr(ExprNode::Lit { value: Literal::Nil }));
+    *e = sp_expr(ExprNode::Seq { exprs: vec![write, remember] });
+}
+
+/// What the reader answers for the literal `initialize` seeds a column
+/// with: an enum's `default:` as its label, a schema default as its text
+/// (activerecord 8.1.4).
+fn enum_default_input(model: &crate::dialect::Model, column: &Symbol, seed: &Expr) -> Option<Literal> {
+    let ExprNode::Lit { value: seeded } = &*seed.node else {
+        return None;
+    };
+    let text = match seeded {
+        Literal::Int { value } => value.to_string(),
+        Literal::Str { value } => value.clone(),
+        _ => return None,
+    };
+    if model.enum_defaults.contains_key(column) {
+        let (label, _) = model.enums.get(column)?.iter().find(|(_, stored)| stored == seeded)?;
+        return Some(Literal::Sym { value: Symbol::from(label.as_str()) });
+    }
+    Some(Literal::Str { value: text })
+}
+
+/// The value handed to `Model._normalize_<col>(x)`. The reader answers
+/// what was assigned, not what `normalizes` made of it (activerecord
+/// 8.1.4), and the remembered input mustn't call the normalizer again.
+fn before_normalizer(input: Expr, column: &Symbol) -> Expr {
+    if let ExprNode::Send { method, args, .. } = &*input.node
+        && method.as_str() == format!("_normalize_{}", column.as_str())
+        && let [assigned] = args.as_slice()
+    {
+        return assigned.clone();
+    }
+    input
+}
+
+fn writer_column(name: &Symbol) -> Symbol {
+    Symbol::from(name.as_str().trim_end_matches('='))
+}
+
+/// `x` in the `ActiveRecord.enum_*(x.to_s, ...)` a write casts through.
+fn enum_cast_input(e: &Expr) -> Option<Expr> {
+    if let ExprNode::Send { method, args, .. } = &*e.node
+        && matches!(method.as_str(), "enum_int" | "enum_int_or_nil" | "enum_str" | "enum_str_or_nil")
+        && let Some(first) = args.first()
+    {
+        // The text is `x.to_s`, or a String cast of `x`.
+        match &*first.node {
+            ExprNode::Send { recv: Some(input), method: to_s, args: no_args, .. } if to_s.as_str() == "to_s" && no_args.is_empty() => {
+                return Some(input.clone());
+            }
+            ExprNode::Cast { value, .. } => return Some(value.clone()),
+            _ => {}
+        }
+    }
+    let mut found = None;
+    e.node.for_each_child(&mut |c| {
+        if found.is_none() {
+            found = enum_cast_input(c);
+        }
+    });
+    found
 }
 
 /// `@<col>_before_type_cast`: what the user assigned to `col`, nil when

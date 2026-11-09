@@ -50,6 +50,36 @@ pub(super) fn param_ty(name: &str) -> Option<crate::ty::Ty> {
     current_emit_ctx().and_then(|ctx| ctx.param_types.borrow().get(name).cloned())
 }
 
+/// A block with no parameter of any kind. `|*args|`, `|a = 1|`, `|k:|`
+/// and `|&b|` leave `params` empty too, and their body reads a name the
+/// `_` closure wouldn't bind.
+fn no_params_at_all(
+    params: &[crate::ident::Symbol],
+    rest_param: &Option<crate::ident::Symbol>,
+    extra_params: &[crate::dialect::Param],
+    block_param: &Option<crate::ident::Symbol>,
+) -> bool {
+    params.is_empty() && rest_param.is_none() && extra_params.is_empty() && block_param.is_none()
+}
+
+/// Run a method-body emit and return, alongside its result, the params
+/// it borrowed with `iter_mut()` (see `EmitCtx::iter_mut_params`).
+pub(super) fn with_iter_mut_params<F, R>(f: F) -> (R, crate::det::HashSet<String>)
+where
+    F: FnOnce() -> R,
+{
+    let ctx = current_emit_ctx().expect("with_iter_mut_params called outside with_emit_ctx");
+    let prev = std::mem::take(&mut *ctx.iter_mut_params.borrow_mut());
+    let r = f();
+    let used = std::mem::replace(&mut *ctx.iter_mut_params.borrow_mut(), prev);
+    (r, used)
+}
+
+fn mark_iter_mut_param(name: &str) {
+    let ctx = current_emit_ctx().expect("mark_iter_mut_param called outside with_emit_ctx");
+    ctx.iter_mut_params.borrow_mut().insert(name.to_string());
+}
+
 fn is_rebound_var(name: &str) -> bool {
     current_emit_ctx()
         .map(|ctx| ctx.rebound_vars.borrow().contains(name))
@@ -910,14 +940,14 @@ fn emit_expr_inner(e: &Expr) -> String {
             // separate work).
             if method.as_str() == "each" && args.is_empty() && recv.is_some() {
                 let r = recv.as_ref().unwrap();
-                let block_lambda: Option<(&[crate::ident::Symbol], &Expr)> =
+                let block_lambda: Option<(&[crate::ident::Symbol], &Expr, bool)> =
                     block.as_ref().and_then(|b| match &*b.node {
-                        ExprNode::Lambda { params, body, .. } => {
-                            Some((params.as_slice(), body))
+                        ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+                            Some((params.as_slice(), body, no_params_at_all(params, rest_param, extra_params, block_param)))
                         }
                         _ => None,
                     });
-                if let Some((params, body)) = block_lambda {
+                if let Some((params, body, no_params)) = block_lambda {
                     if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })) && params.len() == 2 {
                         let recv_s = emit_expr(r);
                         let k = params[0].as_str();
@@ -995,8 +1025,10 @@ fn emit_expr_inner(e: &Expr) -> String {
                         r.ty.as_ref().map(peel_nil),
                         Some(crate::ty::Ty::Array { .. })
                     );
-                    if is_array_after_peel && params.len() == 1 {
-                        let p = params[0].as_str();
+                    // A block with no parameter runs once per element
+                    // and binds none: the closure's parameter is `_`.
+                    if is_array_after_peel && (params.len() == 1 || no_params) {
+                        let p = params.first().map_or("_", |s| s.as_str());
                         // `Option<Vec<T>>` recv (`Union<Nil, Array>`)
                         // takes the read-only `.iter().flatten()` chain
                         // below; the mutating no-clone path applies only
@@ -1058,6 +1090,26 @@ fn emit_expr_inner(e: &Expr) -> String {
                             // borrowed mutably; the block only reads it.
                             ".iter()"
                         };
+                        // No clone to borrow from (a single read, or a
+                        // mutating block): the param binding itself is
+                        // borrowed mutably, so the signature must
+                        // declare it `mut`. A view reads a bare param
+                        // as a receiverless Send (`emit_send`).
+                        if iter_chain == ".iter_mut()" {
+                            let param = match &*r.node {
+                                ExprNode::Var { name, .. } => Some(name),
+                                ExprNode::Send { recv: None, method, args, block: None, .. }
+                                    if args.is_empty() => Some(method),
+                                _ => None,
+                            };
+                            if let Some(name) = param {
+                                if recv_s == util::escape_rust_keyword(name.as_str())
+                                    && param_ty(name.as_str()).is_some()
+                                {
+                                    mark_iter_mut_param(name.as_str());
+                                }
+                            }
+                        }
                         return format!("{recv_s}{iter_chain}.for_each({closure})");
                     }
                 }
@@ -1096,17 +1148,19 @@ fn emit_expr_inner(e: &Expr) -> String {
             if method.as_str() == "map" && args.is_empty() && recv.is_some() {
                 let r = recv.as_ref().unwrap();
                 if matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Array { .. })) {
-                    let block_lambda: Option<(&[crate::ident::Symbol], &Expr)> =
+                    let block_lambda: Option<(&[crate::ident::Symbol], &Expr, bool)> =
                         block.as_ref().and_then(|b| match &*b.node {
-                            ExprNode::Lambda { params, body, .. } => {
-                                Some((params.as_slice(), body))
+                            ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+                                Some((params.as_slice(), body, no_params_at_all(params, rest_param, extra_params, block_param)))
                             }
                             _ => None,
                         });
-                    if let Some((params, body)) = block_lambda {
-                        if params.len() == 1 {
+                    if let Some((params, body, no_params)) = block_lambda {
+                        // A block with no parameter maps each element
+                        // to its value and binds none: `_`, as `each`.
+                        if params.len() == 1 || no_params {
                             let recv_s = emit_expr(r);
-                            let p = params[0].as_str();
+                            let p = params.first().map_or("_", |s| s.as_str());
                             let body_s = emit_expr(body);
                             let closure = if body_s.contains('\n') {
                                 format!("|{p}| {{\n{}\n}}", indent(&body_s, 1))

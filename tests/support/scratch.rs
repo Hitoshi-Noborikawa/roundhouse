@@ -35,6 +35,13 @@ pub fn dir(prefix: &str) -> PathBuf {
 
 /// As [`dir`], under `base` instead of the system temp directory.
 pub fn dir_in(base: &std::path::Path, prefix: &str) -> PathBuf {
+    // The base is shared, not ours (the system temp directory or
+    // `CARGO_TARGET_TMPDIR`), so making it if it is missing adopts nothing:
+    // only the `{prefix}-…` root below is created exclusively. A test
+    // binary run from an archived build can start before anything has made
+    // `CARGO_TARGET_TMPDIR`.
+    std::fs::create_dir_all(base)
+        .unwrap_or_else(|error| panic!("create scratch base {}: {error}", base.display()));
     // Several test binaries, and several copies of this module inside one
     // binary, share a PID: the counter only spreads names, exclusivity
     // comes from `create`.

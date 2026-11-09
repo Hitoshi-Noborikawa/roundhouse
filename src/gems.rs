@@ -261,24 +261,62 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     &RUNTIME_GEMS
 }
 
+/// One `PATH` source in a `Gemfile.lock`: the recorded directory and the
+/// gem names listed under it. A single `path:` gem has one spec. A path
+/// block (`path "engines" do`) records the parent once and lists each gem.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathSource {
+    pub remote: String,
+    pub specs: Vec<String>,
+}
+
+/// Every `PATH` source in a `Gemfile.lock`, lock order. Remotes are as
+/// written: relative to the lockfile unless the Gemfile gave an absolute
+/// path. Spec names are the indent-4 lines, not the indent-6 dependencies.
+pub fn lock_path_sources(text: &str) -> Vec<PathSource> {
+    let mut sources = Vec::new();
+    let mut in_path = false;
+    let mut current: Option<PathSource> = None;
+    for line in text.lines() {
+        if !line.starts_with(' ') {
+            if let Some(source) = current.take() {
+                sources.push(source);
+            }
+            in_path = line.trim() == "PATH";
+            continue;
+        }
+        if !in_path {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let body = line.trim();
+        if indent == 2 {
+            if let Some(remote) = body.strip_prefix("remote: ") {
+                if let Some(source) = current.take() {
+                    sources.push(source);
+                }
+                current = Some(PathSource { remote: remote.trim().to_string(), specs: Vec::new() });
+            }
+        } else if indent == 4 && current.is_some() && body != "specs:" {
+            let name = body.split(' ').next().unwrap_or(body);
+            if !name.is_empty() {
+                current.as_mut().expect("just checked").specs.push(name.to_string());
+            }
+        }
+    }
+    if let Some(source) = current {
+        sources.push(source);
+    }
+    sources
+}
+
 /// The `remote:` of every `PATH` section in a `Gemfile.lock`, lock
 /// order — the directories of the app's path-sourced gems
 /// (`gem "billing", path: "lib/billing"` locks as `remote: lib/billing`),
 /// as written: relative to the lockfile unless the Gemfile gave an
 /// absolute path.
 pub fn lock_path_remotes(text: &str) -> Vec<String> {
-    let mut remotes = Vec::new();
-    let mut in_path = false;
-    for line in text.lines() {
-        if !line.starts_with(' ') {
-            in_path = line.trim() == "PATH";
-        } else if in_path {
-            if let Some(remote) = line.strip_prefix("  remote: ") {
-                remotes.push(remote.trim().to_string());
-            }
-        }
-    }
-    remotes
+    lock_path_sources(text).into_iter().map(|source| source.remote).collect()
 }
 
 /// A parsed `Gemfile.lock`: every resolved spec and the direct
@@ -711,10 +749,12 @@ const FATES: &[(&str, GemFate)] = &[
     // ── Modeled (each row names where) ───────────────────────────
     ("acts_as_tenant", GemFate::Modeled), // ingest/acts_as_tenant: acts_as_tenant -> belongs_to + dynamic default_scope + create stamp; validates_uniqueness_to_tenant; ActsAsTenant as CurrentAttributes (current_tenant, with_tenant, without_tenant); set_current_tenant_through_filter (not has_global_records/through/polymorphic/require_tenant/subdomain/immutability)
     ("acts_as_votable", GemFate::Modeled), // ingest/acts_as_votable: ActsAsVotable::Vote on `votes`; acts_as_votable/acts_as_voter macros -> votes_for/votes + vote_by/liked_by/unvote_by/update_cached_votes (not vote_up_for/get_voted/association extensions)
-    ("addressable", GemFate::Modeled), // catalog/gems: Addressable::URI
+    // Not Modeled: the catalog types Addressable::URI, but no tree has a body for it, so it runs as the gem itself.
+    ("addressable", GemFate::Unknown),
+    // Not Modeled: its routes depend on the modules every model and gem registers, which only its own source draws.
+    ("devise", GemFate::Unknown),
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
     ("commonmarker", GemFate::Modeled), // catalog/gems: Commonmarker, Commonmarker::Node
-    ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
     ("discard", GemFate::Modeled),
     ("elastic-apm", GemFate::Modeled), // catalog/gems: ElasticAPM, SpanHelpers; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
     ("faye-websocket", GemFate::Modeled), // Spinel faye_websocket: text/open/message/close; no protocols/error events
@@ -920,6 +960,42 @@ pub(crate) fn is_stdlib_namespace(root: &str) -> bool {
         || FATES.iter().any(|(gem, fate)| matches!(fate, GemFate::Stdlib) && namespace_of(gem).eq_ignore_ascii_case(root))
 }
 
+/// Ruby's core classes and modules. The modules `is_stdlib_namespace`'s
+/// RUBY_OWN already holds (Kernel, Comparable, Math, Marshal, GC,
+/// ObjectSpace, Process, Signal, IO, Encoding, Fiber, Mutex, Warning) are
+/// not repeated here.
+const RUBY_CORE: &[&str] = &[
+    "ArgumentError", "Array", "BasicObject", "Binding", "Class", "ClosedQueueError", "ConditionVariable", "Complex",
+    "Data", "Dir", "EncodingError", "EOFError", "Enumerable", "Enumerator", "Exception", "FalseClass", "File",
+    "FileTest", "FiberError", "Float", "FloatDomainError", "FrozenError", "Hash", "IndexError", "Integer",
+    "Interrupt", "IOError", "KeyError", "LoadError", "LocalJumpError", "Method", "Module", "NameError", "NilClass",
+    "NoMatchingPatternError", "NoMatchingPatternKeyError", "NoMemoryError", "NoMethodError", "NotImplementedError",
+    "Numeric", "Object", "Proc", "Queue", "Random", "Range", "RangeError", "Rational", "Refinement", "Regexp",
+    "RegexpError", "RuntimeError", "ScriptError", "SecurityError", "SignalException", "SizedQueue", "StandardError",
+    "StopIteration", "String", "Struct", "Symbol", "SyntaxError", "SystemCallError", "SystemExit", "SystemStackError",
+    "ThreadError", "ThreadGroup", "TrueClass", "TypeError", "UnboundMethod", "UncaughtThrowError", "ZeroDivisionError",
+];
+
+/// A constant Ruby's core always defines: a core class or module itself, or
+/// a class or value constant Ruby declares inside one (`Enumerator::Lazy`,
+/// `Float::INFINITY`). Not any name under a core root: `String::Nope` is
+/// Ruby's NameError. A leading `Object::` is the top level.
+pub(crate) fn is_core_constant(written: &[&str]) -> bool {
+    let mut path = written;
+    while path.len() > 1 && path[0] == "Object" {
+        path = &path[1..];
+    }
+    match path {
+        [root] => RUBY_CORE.contains(root),
+        [root, ..] if RUBY_CORE.contains(root) => {
+            let full = path.join("::");
+            crate::emit::audit::CORE_CONSTANTS.binary_search(&full.as_str()).is_ok()
+                || crate::analyze::is_core_value_constant(&full)
+        }
+        _ => false,
+    }
+}
+
 pub fn fate_of(name: &str) -> GemFate {
     if PRELOADED.iter().any(|(feature, _, _)| *feature == name) {
         return GemFate::Stdlib;
@@ -1076,7 +1152,7 @@ pub fn loads_by_gem_name(gem: &str) -> bool {
 /// hand-written version of the rule, and every private gem that follows
 /// the same convention needed its own entry to be attributable at all —
 /// which, by definition, it cannot have here.
-fn namespace_candidates(gem: &str) -> Vec<String> {
+pub(crate) fn namespace_candidates(gem: &str) -> Vec<String> {
     let mut candidates = vec![namespace_of(gem)];
     if let Some((head, _)) = gem.split_once('-') {
         let first = camelize(head);
@@ -1797,6 +1873,18 @@ pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path
 mod tests {
     use super::*;
 
+    /// A core class and what Ruby declares in it are defined; any other name
+    /// under a core root is not (`String::Nope` is Ruby's NameError).
+    #[test]
+    fn only_what_ruby_declares_under_a_core_class_is_a_core_constant() {
+        for defined in [&["Object"][..], &["String"], &["Object", "String"], &["Enumerator", "Lazy"], &["Float", "INFINITY"]] {
+            assert!(is_core_constant(defined), "{defined:?}");
+        }
+        for missing in [&["Object", "Missing"][..], &["String", "Nope"], &["Missing"], &["Float", "Nope"]] {
+            assert!(!is_core_constant(missing), "{missing:?}");
+        }
+    }
+
     /// rotp's façade only raises, so the gem is compiled from source; WebPush's
     /// also raises in gem_facades.rb, but the Spinel tree ports it, and a
     /// sourced gem would drop the port's stub slots with the façade.
@@ -2178,6 +2266,13 @@ GEM
     rails (8.0.2)
 ";
         assert_eq!(lock_path_remotes(lock), vec!["lib/billing", "../shared"]);
+        assert_eq!(
+            lock_path_sources(lock),
+            vec![
+                PathSource { remote: "lib/billing".into(), specs: vec!["billing".into()] },
+                PathSource { remote: "../shared".into(), specs: vec!["shared".into()] },
+            ]
+        );
         assert!(lock_path_remotes(LOCK).is_empty());
         let parsed = Lockfile::parse(lock);
         assert!(parsed.is_from_git("widgets"));

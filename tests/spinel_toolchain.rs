@@ -46,6 +46,10 @@ mod rack_mounts;
 mod time_change_usec_contract;
 #[path = "spinel_toolchain/time_change_usec.rs"]
 mod time_change_usec;
+#[path = "support/option_dsl.rs"]
+mod option_dsl;
+#[path = "spinel_toolchain/option_dsl.rs"]
+mod option_dsl_native;
 #[path = "support/string_truncate.rs"]
 mod string_truncate;
 #[path = "spinel_toolchain/string_truncate.rs"]
@@ -54,8 +58,16 @@ mod string_truncate_native;
 mod array_excluding;
 #[path = "spinel_toolchain/array_excluding.rs"]
 mod array_excluding_native;
+#[path = "support/haml_class_shortcut_merge.rs"]
+mod haml_class_shortcut_merge;
+#[path = "spinel_toolchain/haml_class_shortcut_merge.rs"]
+mod haml_class_shortcut_merge_native;
 #[path = "spinel_toolchain/lobsters_zero.rs"]
 mod lobsters_zero;
+#[path = "support/addressable_gem.rs"]
+mod addressable_gem;
+#[path = "spinel_toolchain/addressable.rs"]
+mod addressable;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
@@ -74,6 +86,10 @@ fn ordinary_class_body_calls_run_natively() {
 mod dry_initializer;
 #[path = "support/data_factory.rs"]
 mod data_factory;
+#[path = "support/data_record_siblings.rs"]
+mod data_record_siblings_contract;
+#[path = "spinel_toolchain/data_record_siblings.rs"]
+mod data_record_siblings;
 #[path = "support/relation_fork.rs"]
 mod relation_fork_contract;
 #[path = "spinel_toolchain/relation_fork.rs"]
@@ -94,6 +110,8 @@ mod cable_allowed_origins;
 mod public_file_server_headers_contract;
 #[path = "spinel_toolchain/public_file_server_headers.rs"]
 mod public_file_server_headers;
+#[path = "support/puma_boot.rs"]
+mod puma_boot_contract;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "spinel_toolchain/cable_actions.rs"]
@@ -142,6 +160,10 @@ mod action_controller_head;
 mod conditional_get_contract;
 #[path = "spinel_toolchain/conditional_get.rs"]
 mod conditional_get;
+#[path = "support/controller_layouts.rs"]
+mod controller_layouts_contract;
+#[path = "spinel_toolchain/controller_layouts.rs"]
+mod controller_layouts;
 #[path = "spinel_toolchain/response_headers.rs"]
 mod response_headers;
 #[path = "spinel_toolchain/action_dispatch_request_put.rs"]
@@ -152,6 +174,8 @@ mod strong_params;
 mod params_wrapper;
 #[path = "spinel_toolchain/json_request_values.rs"]
 mod json_request_values;
+#[path = "spinel_toolchain/chunked_body.rs"]
+mod chunked_body;
 #[path = "spinel_toolchain/multipart_file_parts.rs"]
 mod multipart_file_parts;
 #[path = "support/default_format_dispatch.rs"]

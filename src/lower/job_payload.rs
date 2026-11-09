@@ -426,7 +426,8 @@ fn plan_params(
                 None => {}
             }
         }
-        if let Some(ty) = p.default.as_ref().and_then(|d| d.ty.as_ref()) {
+        // Not a `nil` default's type: a value equal to the default is never written (`keywords_expr`), so `note: nil` needs no codec for nil.
+        if let Some(ty) = p.default.as_ref().and_then(|d| d.ty.as_ref()).filter(|t| !matches!(t, Ty::Nil)) {
             codec = join_codec(p, codec, ty)?;
         }
         let Some(codec) = codec else {
@@ -1262,7 +1263,6 @@ pub fn push_model_to_gid_uri(methods: &mut Vec<crate::dialect::MethodDef>, model
 /// one writer per fixed parameter, and a rest parameter's elements
 /// appended, as Rails flattens a splat.
 fn arguments_list(plan: &JobPlan) -> String {
-    let a = "ActiveJob::Arguments";
     let mut fixed: Vec<String> = plan
         .params
         .iter()
@@ -1271,9 +1271,7 @@ fn arguments_list(plan: &JobPlan) -> String {
         .collect();
     let keywords: Vec<&JobParam> = plan.params.iter().filter(|p| p.keyword).collect();
     if !keywords.is_empty() {
-        let names: Vec<String> = keywords.iter().map(|p| ruby_str(p.name.as_str())).collect();
-        let parts: Vec<String> = keywords.iter().map(|p| write_expr(&p.codec, p.name.as_str())).collect();
-        fixed.push(format!("{a}.keywords([{}], [{}])", names.join(", "), parts.join(", ")));
+        fixed.push(keywords_expr(&keywords));
     }
     let mut list = format!("[{}]", fixed.join(", "));
     if let Some(rest) = plan.params.iter().find(|p| p.rest) {
@@ -1281,6 +1279,33 @@ fn arguments_list(plan: &JobPlan) -> String {
         list = if fixed.is_empty() { elems } else { format!("{list} + {elems}") };
     }
     list
+}
+
+/// The keywords as the one trailing Hash ActiveJob writes for them,
+/// `{"count":2,"_aj_ruby2_keywords":["count"]}`: the names and the
+/// values' JSON, each name "" (left out) for an optional keyword whose
+/// value is its default. With every one left out there is no Hash, as
+/// Rails writes none for a call without keywords; the reader's
+/// `keyword_given?` then answers false and `perform` binds the default.
+fn keywords_expr(keywords: &[&JobParam]) -> String {
+    let mut names = Vec::new();
+    let mut values = Vec::new();
+    for p in keywords {
+        let name = ruby_str(p.name.as_str());
+        let value = write_expr(&p.codec, p.name.as_str());
+        match &p.default {
+            Some(d) => {
+                let at_default = format!("{} == {d}", p.name.as_str());
+                names.push(format!("({at_default} ? \"\" : {name})"));
+                values.push(format!("({at_default} ? \"\" : {value})"));
+            }
+            None => {
+                names.push(name);
+                values.push(value);
+            }
+        }
+    }
+    format!("ActiveJob::Arguments.keywords([{}], [{}])", names.join(", "), values.join(", "))
 }
 
 /// The text between the `job-registry` markers in

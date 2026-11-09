@@ -441,7 +441,7 @@ pub(super) fn push_schema_methods(
     // only when some target has a predicate; the runtime's default
     // answers "" for everyone else. The predicate is the one the DDL of
     // the emit's dialect renders (`Dialect::current`).
-    let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique).collect();
+    let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique && i.expression.is_none()).collect();
     unique.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
     let mut targets: Vec<(String, Option<String>)> = Vec::new();
     for i in unique {
@@ -508,19 +508,22 @@ pub(super) fn push_schema_methods(
     // "index_x_on_a_and_b")`) means its columns, as in Rails'
     // `InsertAll`. Emitted only for a table with a unique index; the
     // runtime's default answers "" for everyone else.
-    let named: Vec<(String, String)> = {
+    let named: Vec<(String, Option<String>)> = {
         let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique).collect();
         unique.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
         unique
             .into_iter()
             .filter(|i| !i.name.as_str().is_empty())
-            .map(|i| (i.name.as_str().to_string(), i.columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")))
+            .map(|i| (i.name.as_str().to_string(), i.expression.is_none().then(|| i.columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", "))))
             .collect()
     };
     if !named.is_empty() {
         let name = Symbol::from("name");
         let mut body = lit_str(String::new());
         for (index, cols) in named.into_iter().rev() {
+            let target = cols.map(lit_str).unwrap_or_else(|| with_ty(Expr::new(
+                Span::synthetic(), ExprNode::Raise { value: lit_str(format!("unique_by expression index `{index}` is not supported")) },
+            ), Ty::Bottom));
             let cond = with_ty(
                 Expr::new(
                     Span::synthetic(),
@@ -535,7 +538,7 @@ pub(super) fn push_schema_methods(
                 Ty::Bool,
             );
             body = with_ty(
-                Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: lit_str(cols), else_branch: body }),
+                Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: target, else_branch: body }),
                 Ty::Str,
             );
         }
@@ -2967,6 +2970,11 @@ fn synth_initialize(
             // seam, over the `|| <default>` a NOT NULL column keeps.
             let given = lookup.clone();
             // Not through the app's own `<col>=` for an absent key: Rails' constructor calls only the writers of the attributes it is given, and lobsters' `Domain#selector=` strips its argument.
+            if column.is_json() && col.default_expression.is_some() && col.computed_default().is_none() {
+                stmts.push(Expr::new(Span::synthetic(), ExprNode::Send { recv: Some(self_ref()), method: json_storage_writer(col), args: vec![default], block: None, parenthesized: false }));
+                stmts.push(given_value_assign(col, &attrs, given));
+                continue;
+            }
             if !column.is_json() && app_defines_writer(model, &col.name) {
                 let slot_ty = super::ty_of_column_slot(col);
                 let raw_default = if nullable { nil_lit() } else { default };
@@ -4361,6 +4369,12 @@ fn column_default_literal(model: &Model, col: &Column) -> Option<Expr> {
 
 fn schema_default_literal(col: &Column) -> Option<Expr> {
     use crate::schema::ColumnType;
+    // Rails extracts quoted SQL literals before classifying default functions.
+    if let Some(sql) = col.default_expression.as_deref().filter(|_| col.computed_default().is_none()) {
+        if let Some(inner) = sql.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')) {
+            return Some(lit_str(inner.replace("''", "'")));
+        }
+    }
     let raw = col.stored_default()?;
     if col.array_stored {
         // `default: []`, the only array default ingest keeps: a fresh

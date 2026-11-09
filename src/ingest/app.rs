@@ -279,7 +279,7 @@ fn keep_initializer_defined(
     let referenced = |name: &str| {
         sources.iter().any(|f| {
             let rel = f.path.strip_prefix(root).unwrap_or(&f.path).trim_start_matches('/');
-            if !(rel.starts_with("app/") || rel.starts_with("lib/")) {
+            if !(rel.starts_with("app/") || rel.starts_with("lib/") || rel == "config/puma.rb") {
                 return false;
             }
             // In Ruby, a comment or a string naming it is not a reference.
@@ -604,7 +604,26 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let mut auto: Vec<String> = Vec::new();
     loop {
         let marks = (super::survey::mark(), super::prism::mark());
-        let mut app = ingest_rails_app(vfs, dir, &auto)?;
+        let mut app = match ingest_rails_app(vfs, dir, &auto) {
+            Ok(app) => app,
+            Err(err) => {
+                let strict = super::prism::mark();
+                // Not the strict pass's first refusal as the answer: it can be a gem's DSL (`devise_for`) that only the gem's source, which this pass has not read yet, defines.
+                let more: Vec<String> = super::concern_accessors::not_deferring(|| super::survey::surveying(|| {
+                    ingest_rails_app(vfs, dir, &auto).map(|app| super::auto_source_gems::candidates(&app, vfs, dir)).unwrap_or_default()
+                }))
+                .into_iter()
+                .filter(|g| !auto.contains(g))
+                .collect();
+                if more.is_empty() || auto.len() >= 32 {
+                    super::prism::rewind(strict);
+                    return Err(err);
+                }
+                super::prism::rewind(marks.1);
+                auto.extend(more);
+                continue;
+            }
+        };
         let more: Vec<String> = super::auto_source_gems::candidates(&app, vfs, dir)
             .into_iter()
             .filter(|g| !auto.contains(g))
@@ -612,6 +631,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         if more.is_empty() || auto.len() >= 32 {
             app.auto_source_gems = auto.into_iter().filter(|g| app.gem_lock.as_ref().is_some_and(|l| l.source.contains(g))).collect();
             super::recurring_commands::apply(&mut app, vfs, dir)?;
+            add_route_guards(&mut app);
             return Ok(app);
         }
         // Not the superseded pass's parse errors and survey gaps as well: the next pass reports them again.
@@ -621,7 +641,20 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
 }
 
+/// The request constraints the Ruby-family router asks, as `RoundhouseRouteGuards` methods typed against the request.
+fn add_route_guards(app: &mut App) {
+    let Some((class, rbs)) = crate::lower::route_guards::guard_class(&app.routes.entries) else { return };
+    let Ok(signatures) = crate::rbs::parse_app_signatures(&rbs) else { return };
+    for (owner, methods) in signatures {
+        app.rbs_signatures.entry(owner).or_default().extend(methods);
+    }
+    app.library_classes.push(class);
+}
+
 fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {
+    // Not left from an earlier ingest in this process: the hoists are checked against this app's modules.
+    super::library_class::included_hoist_conflicts(&[]);
+    super::configured_superclass::reset();
     super::sources::reset();
     super::each_validator::reset();
     let _source_root = super::sources::set_root(dir);
@@ -707,6 +740,9 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let mut app = App::new();
     app.extensions = extensions;
     app.spinel_int_overflow = spinel_int_overflow;
+    // Not a framework gem's models (solid_queue's): only a gem compiled for the app runs its Railtie here.
+    let gem_libs: Vec<PathBuf> = source_gems.iter().map(|gem| gem.mount.join("lib")).collect();
+    (app.gem_middlewares, app.gem_middleware_refusals) = super::railtie_middleware::read(vfs, &gem_libs);
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
     // until the splice folds them into each including model's own
@@ -1002,11 +1038,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                         // carry `included do` declarations that belong
                         // to every includer: filters (controller-side)
                         // and model DSL (associations/scopes).
-                        if let Some(concern_filters) =
-                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
-                        {
-                            app.concern_filters.extend(concern_filters);
-                        }
+                        record_concern_filters(&mut app, ingest_concern_filters(&source, &path_str), |_| true);
                         let (concern_items, concern_enum_decls, concern_guarded) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
@@ -1318,8 +1350,10 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             spans: aliases,
                         });
                     }
-                    // A Concern here runs its `included do` in a model that
-                    // includes it, as one under app/models/concerns does.
+                    // A Concern here runs its `included do` in whatever
+                    // includes it, as one under app/*/concerns does: a
+                    // controller gets its filters, a model its DSL.
+                    record_concern_filters(&mut app, ingest_concern_filters(&source, &path_str), |_| true);
                     let (concern_items, concern_enum_decls, concern_guarded) =
                         ingest_concern_model_items_with_constants(&source, &path_str, &enum_constants);
                     for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
@@ -1963,19 +1997,9 @@ end
         }
         if !methods.is_empty() {
             app.rails_application = Some(crate::dialect::LibraryClass {
-                name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-                is_module: false,
-                parent: None,
-                parent_span: Default::default(),
-                includes: Vec::new(),
-                include_spans: Vec::new(),
                 methods,
-                nullable_columns: Vec::new(),
-                origin: None,
                 constants,
-                conditional_definitions: Vec::new(),
-                unknown_calls: Vec::new(),
-                class_ivar_initializers: Vec::new(),
+                ..crate::ingest::rails_application_class()
             });
         }
     } else {
@@ -1993,19 +2017,8 @@ end
                 }
             })?;
             app.rails_application = Some(crate::dialect::LibraryClass {
-                name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-                is_module: false,
-                parent: None,
-                parent_span: Default::default(),
-                includes: Vec::new(),
-                include_spans: Vec::new(),
                 methods,
-                nullable_columns: Vec::new(),
-                origin: None,
-                constants: Vec::new(),
-                conditional_definitions: Vec::new(),
-                unknown_calls: Vec::new(),
-                class_ivar_initializers: Vec::new(),
+                ..crate::ingest::rails_application_class()
             });
         }
     }
@@ -2148,14 +2161,10 @@ end
                     // `cache_controller/versioning.rb` opening, declares
                     // its `included do` filters as one in the concerns
                     // folder does (the branch below).
-                    if let Some(concern_filters) =
-                        unwrap_or_record(ingest_concern_filters(&source, &path_str))?
-                    {
-                        let prefix = format!("{}::", outer.0.as_str());
-                        app.concern_filters.extend(
-                            concern_filters.into_iter().filter(|(id, _)| id.0.as_str().starts_with(&prefix)),
-                        );
-                    }
+                    let prefix = format!("{}::", outer.0.as_str());
+                    record_concern_filters(&mut app, ingest_concern_filters(&source, &path_str), |id| {
+                        id.0.as_str().starts_with(&prefix)
+                    });
                 } else {
                     // Not a controller file: a module-only concern under
                     // app/controllers/concerns/, a mixin like
@@ -2169,11 +2178,7 @@ end
                         unwrap_or_record(ingest_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
-                        if let Some(concern_filters) =
-                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
-                        {
-                            app.concern_filters.extend(concern_filters);
-                        }
+                        record_concern_filters(&mut app, ingest_concern_filters(&source, &path_str), |_| true);
                         let (concern_items, concern_enum_decls, concern_guarded) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
@@ -2233,6 +2238,7 @@ end
     );
     if !route_roots.is_empty() {
         let block_wrappers = mapper_extension_block_methods(&app, vfs, dir, &engine_dirs);
+        super::routes::set_gem_dsl(super::gem_routes::mapper_methods(&app));
         // The constants the route files read, folded from their owners
         // as a model body's are, for `constraints:` values. A route
         // names a controller's constant as often as a model's, so its
@@ -2668,6 +2674,7 @@ end
             app.engine_importmaps.push((engine.module.clone(), importmap));
         }
     }
+    super::puma_boot::install(&mut app, vfs, dir)?;
 
     app.vite_manifest = super::vite::read_manifest(vfs, dir);
     let vite_digest = app.vite_manifest.as_ref().map(|m| m.digest.clone());
@@ -2976,6 +2983,7 @@ end
         concern_class_method_spans.extend(carriers);
         framework_shadow_scopes.extend(shadows);
     }
+    app.plain_mixins = plain_mixins(&app, &concern_class_method_spans);
     // Not a module's own `class << self` defs: Ruby defines those on the module, whatever ingest also copies onto includers.
     app.concern_class_side_spans = concern_class_method_spans
         .iter()
@@ -3105,6 +3113,7 @@ end
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
+    super::forwardable::lower_forwardable(&mut app);
     super::delegate::lower_delegates(&mut app);
     // `Other.include(M)` written in another body: `Other`'s include,
     // before the concern splices read the includes.
@@ -3120,11 +3129,26 @@ end
     super::on_load_reopen::apply_pending(&mut app);
     splice_concerns_into_models(&mut app, &concern_class_method_spans);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
+    // After both splices: a concern's `included do self.table_name = compute_…` and the class method it calls are the model's now.
+    super::configured_superclass::fold_table_names(vfs, dir, &mut app);
+    let owned_validate_calls = decline_owned_validate_calls(&mut app, &sources, &concern_class_method_spans, &const_resolver.for_sources(&sources));
     // After the splice, so a concern's DSL on a tableless parent reaches
     // its subclasses too; before the macros, which read the result.
     super::tableless_inheritance::inherit_tableless_parents(&mut app);
     super::tableless_inheritance::inherit_abstract_parent_validations(&mut app);
-    super::sti_validations::apply(&mut app, sti_validations);
+    for model in &mut app.models {
+        crate::dialect::replace_validation_callbacks(&mut model.body);
+    }
+    super::sti_validations::apply(&mut app, sti_validations, &owned_validate_calls);
+    // An app-owned macro, or a call with other unsupported options, did not
+    // keep a validation. Report its scheduling fallback only if a callback
+    // with that source span remains (including another concern includer).
+    super::prism::retain(|diagnostic| {
+        !matches!(&diagnostic.kind, crate::diagnostic::DiagnosticKind::IgnoredValidatorOption { validator, option, .. }
+            if validator.as_str() == "validate" && option.as_str() == "prepend")
+            || app.models.iter().any(|model| model.body.iter().any(|item|
+                matches!(item, crate::dialect::ModelBodyItem::Validation { span, .. } if *span == diagnostic.span)))
+    });
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
@@ -3151,12 +3175,18 @@ end
     // The sources do not change between the two: one word index serves both.
     let mentions = super::class_macros::Mentions::new(&sources);
     super::class_macros::expand_class_macros(&mut app, &sources, &mentions);
+    // After the macros: a configured object's readers and its builder's writers are methods by now.
+    super::configured_superclass::fold(vfs, dir, &mut app);
+    super::configured_superclass::fold_class_names(vfs, dir, &mut app);
+    super::gem_routes::expand(vfs, dir, &path_gems, &mut app);
     super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
     super::extend_splice::splice_sole_extended_modules(&mut app);
     super::included_extend::splice_included_extends(&mut app);
     super::absence_guards::raise_undefined_capitalized_calls(&mut app);
+    // Not asked at `absence_guards::mark`: by then a source gem's methods no longer resolve their file.
+    let source_gem_classes = super::absence_guards::source_gem_classes(&app);
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
@@ -3191,6 +3221,8 @@ end
     app.source_index_required = !app.sources.is_empty();
     drop(sources);
     carry_included_block_includes_into_controllers(&mut app);
+    refuse_unread_concern_filters(&app)?;
+    drop_modelled_included_hooks(&mut app);
     splice_concerns_into_controllers(&mut app);
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
@@ -3281,6 +3313,8 @@ end
     crate::lower::known_super_forwarding::restate(&mut app);
     // After the controllers and views are in: their bodies read framework settings too.
     lift_read_framework_settings(vfs, dir, &mut app);
+    // After every body is in: a `config_for` call anywhere names a file.
+    super::config_for::lift(vfs, dir, &mut app);
     collect_binary_assets(vfs, dir, &mut app);
     let mut require_roots: Vec<PathBuf> = roots.iter().map(|root| dir.join(root)).collect();
     require_roots.extend(
@@ -3314,10 +3348,17 @@ end
     super::queue_adapter_reader::synthesize(&mut app);
     super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
+    for d in crate::controller_layout::diagnostics(&app.controllers, &app.views) {
+        super::prism::push(d);
+    }
     super::settled_conditionals::settle(&mut app);
+    // Not beside the hoists: later passes give an included module methods and ancestors (forwardable, carried includes, props bases, the queue adapter reader) or take an inactive branch's away.
+    app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
+    // Here, once later passes stop giving modules methods: a concern's `to_param` before analysis types it on the model.
+    splice_concern_to_param_into_includers(&mut app);
     super::job_class_lookup::rewrite(&mut app);
     super::uncalled_definers::mark(&mut app);
-    super::absence_guards::mark(&mut app);
+    super::absence_guards::mark(&mut app, &source_gem_classes);
     // After every pass that changes a controller's methods, the concern
     // splice and the class-body macros above all: the lowering clones
     // from the controller they leave.
@@ -3782,6 +3823,96 @@ fn gap_uniqueness_on_polymorphic_attribute(app: &mut App) {
         super::prism::push(diagnostic);
         survey::record(&IngestError::Unsupported { file, message });
     }
+}
+
+/// A class-body `validate` is the Rails DSL only while the app has not
+/// replaced that class method. Leave app-owned calls to the ordinary
+/// class-body handling, before inherited validations are copied down.
+fn decline_owned_validate_calls(
+    app: &mut App,
+    sources: &[crate::span::SourceFile],
+    carriers: &[ConcernClassMethodSpans],
+    resolver: &crate::analyze::ConstResolver,
+) -> crate::det::HashSet<(crate::ClassId, crate::span::Span)> {
+    use crate::dialect::{MethodReceiver, ModelBodyItem, ValidationRule};
+    use crate::expr::ExprNode;
+    let classes = crate::analyze::source_finder_classes(app, resolver);
+    let class_side = concern_class_method_catalog(&app.library_classes, carriers);
+    let dependencies = concern_dependencies(app, carriers);
+    let name = Symbol::from("validate");
+    let modules: crate::det::HashMap<_, _> = app.library_classes.iter().filter(|c| c.is_module)
+        .map(|c| (c.name.clone(), c.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && m.name == name))).collect();
+    let inherited = |parent: Option<&crate::ClassId>| parent.is_some_and(|parent|
+        crate::analyze::ClassInfo::source_class_method(&classes, parent, &name)
+            || crate::analyze::ClassInfo::class_method_ownership_unknown(&classes, parent, &name));
+    let concern_owns = |id: &crate::ClassId| with_dependencies(id, &dependencies, &mut Vec::new()).iter().any(|id|
+        class_side.get(id).is_some_and(|(methods, _)| methods.iter().any(|m| m.name == name)));
+    let mixin_owns = |owner: &str, expr: &crate::expr::Expr| {
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return false };
+        args.iter().any(|arg| {
+            let ExprNode::Const { path } = &*arg.node else { return false };
+            match method.as_str() {
+                "include" => concern_owns(&concern_named(owner, path, &class_side)),
+                "extend" => modules.get(&concern_named(owner, path, &modules)).copied().unwrap_or(false),
+                _ => false,
+            }
+        })
+    };
+    // STI subclasses remain library classes. Their methods, includes and
+    // unclaimed calls retain source spans, so ownership can be read in order
+    // before the harvested callbacks are moved onto their concrete model.
+    let mut declined = crate::det::HashSet::default();
+    for class in app.library_classes.iter().filter(|c| !c.is_module && c.origin.is_none()) {
+        let mut owned = inherited(class.parent.as_ref());
+        let mut events: Vec<(crate::span::Span, Option<&crate::expr::Expr>)> = class.methods.iter()
+            .filter(|m| m.receiver == MethodReceiver::Class && m.name == name)
+            .filter(|m| !class_side.values().any(|(methods, _)| methods.iter().any(|cm| cm.name_span == m.name_span)))
+            .map(|m| (m.name_span, None)).collect();
+        events.extend(class.includes.iter().zip(&class.include_spans).filter(|(id, _)| concern_owns(id)).map(|(_, span)| (*span, None)));
+        events.extend(class.unknown_calls.iter().map(|expr| (expr.span, Some(expr))));
+        events.sort_by_key(|(span, _)| (span.file.0, span.start));
+        for (span, expr) in events {
+            let Some(expr) = expr else { owned = true; continue };
+            owned |= mixin_owns(class.name.0.as_str(), expr);
+            if owned && matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method == &name) {
+                declined.insert((class.name.clone(), span));
+            }
+        }
+    }
+    for model in &mut app.models {
+        let mut owned = inherited(model.parent.as_ref());
+        let mut restored = crate::det::HashSet::default();
+        model.body.retain_mut(|item| {
+            match item {
+                ModelBodyItem::Method { method, .. }
+                    if method.receiver == MethodReceiver::Class && method.name == name => {
+                        owned = true;
+                    }
+                ModelBodyItem::Unknown { expr, .. } => {
+                    owned |= mixin_owns(model.name.0.as_str(), expr);
+                }
+                ModelBodyItem::Validation { validation, span, leading_comments, leading_blank_line }
+                    if owned && validation.rules.iter().any(|r| matches!(r, ValidationRule::Custom { .. })) => {
+                        // A symbol batch was split for callback scheduling. An
+                        // app-owned call must be restored only once, in place.
+                        if restored.contains(span) { return false; }
+                        let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| sources.get(i)) else { return true };
+                        let Some(text) = source.text.get(span.start as usize..span.end as usize) else { return true };
+                        let padded = format!("{}{}", " ".repeat(span.start as usize), text);
+                        let parsed = super::prism::parse_silent(padded.as_bytes());
+                        let root = parsed.node();
+                        let Some(stmt) = root.as_program_node().and_then(|p| p.statements().body().iter().next()) else { return true };
+                        if let Ok(expr) = super::expr::ingest_expr(&stmt, &source.path) {
+                            restored.insert(*span);
+                            *item = ModelBodyItem::Unknown { expr, leading_comments: leading_comments.clone(), leading_blank_line: *leading_blank_line };
+                        }
+                    }
+                _ => {}
+            }
+            true
+        });
+    }
+    declined
 }
 
 /// Splice each concern's `included do` DSL items (already parsed into
@@ -4344,7 +4475,7 @@ fn synthesize_template_only_actions(app: &mut App) {
     };
 
     let mut missing: BTreeSet<(crate::ident::ClassId, Symbol)> = BTreeSet::new();
-    for route in crate::lower::routes::flatten_routes(app) {
+    for route in crate::lower::routes::flatten_routes_reachable(app) {
         let Some(controller) = app.controllers.iter().find(|c| c.name == route.controller) else {
             continue;
         };
@@ -4557,6 +4688,77 @@ fn carry_included_block_includes_into_controllers(app: &mut App) {
     }
 }
 
+/// A concern's `to_param`, copied onto each model that includes it and
+/// writes none of its own (#1897).
+///
+/// Rails fills a route helper's segment from the record's `to_param`, and
+/// an app often writes it in a concern (`include Sluggable`). A def in the
+/// concern's `included do` already reaches the model's body, with the
+/// block's other items (`splice_concerns_into_models`); a method of the
+/// module itself never did. Every model also gets a synthesized
+/// `to_param` (`lower::model_to_library::markers::push_to_param_method`),
+/// skipped only for a model whose body defines one. On the ruby target
+/// that default sat in the class, ahead of the module in Ruby's lookup,
+/// and answered `id.to_s`. The strict targets carry no module instance
+/// methods, so it was the only `to_param` they had. The view and route
+/// lowerings read the same model body to decide that a record fills its
+/// segment with `to_param` rather than its id.
+///
+/// The copy lands once in the IR for every target, like
+/// `splice_concern_class_methods_into_includers`, and takes its include
+/// order: the first module of the includer's include closure that defines
+/// `to_param` wins.
+fn splice_concern_to_param_into_includers(app: &mut App) {
+    use crate::det::{HashMap, HashSet};
+    use crate::dialect::{MethodReceiver, ModelBodyItem};
+    use crate::ident::{ClassId, Symbol};
+
+    let name = Symbol::from("to_param");
+    let mut defs: HashMap<ClassId, (crate::dialect::MethodDef, HashSet<Symbol>)> = HashMap::default();
+    let mut module_includes: HashMap<ClassId, Vec<ClassId>> = HashMap::default();
+    for lc in &app.library_classes {
+        module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.iter().cloned());
+        if !lc.is_module || defs.contains_key(&lc.name) {
+            continue;
+        }
+        // The last def of the name is the one Ruby keeps.
+        if let Some(m) = lc.methods.iter().rev().find(|m| m.name == name && m.receiver == MethodReceiver::Instance) {
+            defs.insert(lc.name.clone(), (m.clone(), lc.constants.iter().map(|(n, _)| n.clone()).collect()));
+        }
+    }
+    if defs.is_empty() {
+        return;
+    }
+    for model in &mut app.models {
+        if model.methods().any(|m| m.name == name && m.receiver == MethodReceiver::Instance) {
+            continue;
+        }
+        let mut queue = crate::analyze::model_includes(model);
+        let mut seen: HashSet<ClassId> = HashSet::default();
+        let mut found = None;
+        while !queue.is_empty() {
+            let id = queue.remove(0);
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(def) = defs.get(&id) {
+                found = Some((id, def));
+                break;
+            }
+            if let Some(nested) = module_includes.get(&id) {
+                queue.extend(nested.iter().cloned());
+            }
+        }
+        let Some((concern, (method, consts))) = found else { continue };
+        let mut method = method.clone();
+        method.enclosing_class = Some(model.name.0.clone());
+        if !consts.is_empty() {
+            qualify_lexical_consts(&mut method.body, &concern, consts);
+        }
+        model.body.push(ModelBodyItem::Method { method, leading_comments: Vec::new(), leading_blank_line: true });
+    }
+}
+
 fn splice_concerns_into_controllers(app: &mut App) {
     use crate::dialect::{Action, ControllerBodyItem, MethodReceiver, RenderTarget};
     use crate::ty::{Row, Ty};
@@ -4604,8 +4806,9 @@ fn splice_concerns_into_controllers(app: &mut App) {
         );
         module_constants
             .insert(lc.name.clone(), lc.constants.iter().map(|(n, _)| n.clone()).collect());
-        module_includes.insert(lc.name.clone(), lc.includes.clone());
+        module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.iter().cloned());
     }
+    let filter_edges = filter_dependency_edges(app, &module_includes);
 
     // controller -> (spliced method -> the module it came from). Built
     // alongside the splice and stored on the App: the copy is typed
@@ -4650,7 +4853,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
         // registers it.
         let filter_order: Vec<(usize, crate::ident::ClassId)> = statements
             .iter()
-            .zip(filter_registration_by_statement(&include_groups, &module_includes))
+            .zip(filter_registration_by_statement(&include_groups, &filter_edges))
             .flat_map(|((at, _), modules)| modules.into_iter().map(move |module| (*at, module)))
             .collect();
         // Transitive closure, in include order.
@@ -4899,7 +5102,7 @@ fn routed_actions_with_descendants(
         .collect();
     let mut out: HashMap<crate::ident::ClassId, crate::det::HashSet<crate::ident::Symbol>> =
         HashMap::default();
-    for route in crate::lower::routes::flatten_routes(app) {
+    for route in crate::lower::routes::flatten_routes_reachable(app) {
         let mut cur = Some(&route.controller);
         let mut depth = 0;
         while let Some(c) = cur {
@@ -4912,6 +5115,236 @@ fn routed_actions_with_descendants(
         }
     }
     out
+}
+
+/// One file's `included do` scan onto the app, for the modules `keep` takes.
+fn record_concern_filters(
+    app: &mut App,
+    scan: super::library_class::ConcernFilterScan,
+    keep: impl Fn(&crate::ident::ClassId) -> bool,
+) {
+    app.concern_filters.extend(scan.filters.into_iter().filter(|(id, _)| keep(id)));
+    for (module, file, message) in scan.refusals {
+        if keep(&module) {
+            app.concern_filter_refusals.entry(module).or_default().push((file, message));
+        }
+    }
+    app.concern_hook_modules.extend(scan.hook_modules.into_iter().filter(|id| keep(id)));
+    app.modelled_included_hooks.extend(scan.modelled_hooks);
+    app.unguarded_included_hooks.extend(scan.unguarded_hooks);
+}
+
+/// Library modules no declaration of which makes them a Concern: no
+/// `extend ActiveSupport::Concern`, no other `extend` that might, and no
+/// `included do` block, which only a Concern can run. The scan behind
+/// `carriers` reads every source file, so a module absent from it has none.
+fn plain_mixins(
+    app: &App,
+    carriers: &[ConcernClassMethodSpans],
+) -> crate::det::HashSet<crate::ident::ClassId> {
+    let concerns: crate::det::HashSet<&crate::ident::ClassId> = carriers
+        .iter()
+        .filter(|c| !c.concern_extensions.is_empty() || c.has_other_extensions)
+        .map(|c| &c.owner)
+        .collect();
+    app.library_classes
+        .iter()
+        .filter(|lc| lc.is_module)
+        .map(|lc| &lc.name)
+        .filter(|name| {
+            // A hook runs on plain modules too, so only an `included do`
+            // block proves a Concern.
+            let hook = app.concern_hook_modules.contains(*name);
+            !concerns.contains(*name)
+                && (hook || !app.concern_filters.contains_key(*name))
+                && (hook || !app.concern_filter_refusals.contains_key(*name))
+        })
+        .cloned()
+        .collect()
+}
+
+/// A concern filter ingest could not read refuses the compile once a
+/// controller registers that concern. Dropping it would leave the
+/// controller's actions running without the filter, with no error at
+/// run time. Survey mode lists the gap instead.
+fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
+    if app.concern_filter_refusals.is_empty() && app.concern_hook_modules.is_empty() {
+        return Ok(());
+    }
+    let surfaces = controller_concern_surfaces(app);
+    refuse_modelled_hooks_off_controllers(app, &surfaces)?;
+    let mut reported = crate::det::HashSet::default();
+    for controller in &app.controllers {
+        let Some(surface) = surfaces.controllers.get(&controller.name) else { continue };
+        for module in &surface.filter_includes {
+            if !reported.insert(module.clone()) {
+                continue;
+            }
+            for (file, message) in app.concern_filter_refusals.get(module).into_iter().flatten() {
+                super::survey::continue_or_fail(super::IngestError::Unsupported {
+                    file: file.clone(),
+                    message: message.clone(),
+                })?;
+            }
+        }
+        // Ruby calls `included` on every `include`, so Rails registers the
+        // hook's filter again, which moves it to the end of the chain.
+        for module in &surface.repeated_includes {
+            if app.concern_hook_modules.contains(module) && app.concern_filters.contains_key(module) {
+                super::survey::continue_or_fail(super::IngestError::Unsupported {
+                    file: controller.name.0.as_str().to_string(),
+                    message: format!(
+                        "controller concern `{}` with a `self.included` filter is included more than once, which moves the filter in Rails and is not modelled",
+                        module.0.as_str()
+                    ),
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A modelled hook leaves the emitted module and only a controller's
+/// filter chain replays it, while Ruby runs it on every includer. A
+/// guarded hook stays out of the way of a class that does not answer the
+/// macro, which is what the guard is for; an unguarded one raises or
+/// calls that class's own macro, whichever it has.
+fn refuse_modelled_hooks_off_controllers(
+    app: &App,
+    surfaces: &ControllerConcernSurfaces,
+) -> super::IngestResult<()> {
+    let modelled_hook = |hooks: &crate::det::HashSet<crate::span::Span>| -> crate::det::HashSet<crate::ident::ClassId> {
+        app.library_classes
+            .iter()
+            .filter(|lc| lc.methods.iter().any(|m| hooks.contains(&m.name_span)))
+            .map(|lc| lc.name.clone())
+            .collect()
+    };
+    let modelled = modelled_hook(&app.modelled_included_hooks);
+    if modelled.is_empty() {
+        return Ok(());
+    }
+    let unguarded = modelled_hook(&app.unguarded_included_hooks);
+    let edges = filter_dependency_edges(app, &surfaces.module_includes);
+    let classes = app.library_classes.iter().map(|lc| (&lc.name, lc.is_module, lc.includes.clone()));
+    let models = app.models.iter().map(|m| (&m.name, false, crate::analyze::model_includes(m)));
+    for (name, is_module, includes) in classes.chain(models) {
+        if surfaces.controllers.contains_key(name) {
+            continue;
+        }
+        for module in filter_registration_order(&[includes], &edges) {
+            if !modelled.contains(&module) {
+                continue;
+            }
+            if (!is_module && unguarded.contains(&module)) || answers_callback_macro(app, name) {
+                super::survey::continue_or_fail(super::IngestError::Unsupported {
+                    file: name.0.as_str().to_string(),
+                    message: format!(
+                        "`{}` registers a filter from its `self.included` hook, and `{}` includes it but is not a controller, so the hook's effect there is not modelled",
+                        module.0.as_str(),
+                        name.0.as_str()
+                    ),
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether a class, its parents included, answers a controller callback
+/// macro: a controller, a mailer, or a class-side definition of its own
+/// (`class_methods` blocks are copied there by ingest). A macro that only
+/// arrives through `extend` is not seen; a guarded hook answers false for it.
+fn answers_callback_macro(app: &App, name: &crate::ident::ClassId) -> bool {
+    let macro_on = |methods: &[&crate::dialect::MethodDef]| {
+        methods.iter().any(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Class
+                && super::library_class::is_controller_callback_macro(m.name.as_str())
+        })
+    };
+    let mut cur = Some(name.clone());
+    let mut seen = crate::det::HashSet::default();
+    while let Some(class) = cur {
+        if !seen.insert(class.clone()) {
+            break;
+        }
+        if matches!(
+            class.0.as_str(),
+            "ActionMailer::Base" | "ActionController::Base" | "ActionController::API" | "ActionController::Metal" | "AbstractController::Base"
+        ) || app.controllers.iter().any(|c| c.name == class)
+        {
+            return true;
+        }
+        let parts: Vec<_> = app.library_classes.iter().filter(|lc| lc.name == class).collect();
+        let methods: Vec<_> = parts.iter().flat_map(|lc| lc.methods.iter()).collect();
+        let model = app.models.iter().find(|m| m.name == class);
+        let model_methods: Vec<_> = model.into_iter().flat_map(|m| m.methods()).collect();
+        if macro_on(&methods) || macro_on(&model_methods) {
+            return true;
+        }
+        cur = parts.iter().find_map(|lc| lc.parent.clone()).or_else(|| model.and_then(|m| m.parent.clone()));
+    }
+    false
+}
+
+/// A modelled hook has nothing left to do at load, and the emitted
+/// controller has no class-level `before_action` for it to call.
+fn drop_modelled_included_hooks(app: &mut App) {
+    let hooks = std::mem::take(&mut app.modelled_included_hooks);
+    for lc in &mut app.library_classes {
+        lc.methods.retain(|m| !hooks.contains(&m.name_span));
+    }
+}
+
+/// Modules Ruby's `include` runs on one controller more than once. A
+/// dependency of a concern that is already included is not revisited:
+/// `Concern#append_features` returns early for it.
+fn repeated_includes(
+    include_groups: &[Vec<crate::ident::ClassId>],
+    edges: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+) -> Vec<crate::ident::ClassId> {
+    fn visit(
+        module: &crate::ident::ClassId,
+        edges: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+        seen: &mut std::collections::BTreeSet<crate::ident::ClassId>,
+        repeated: &mut Vec<crate::ident::ClassId>,
+    ) {
+        if !seen.insert(module.clone()) {
+            if !repeated.contains(module) {
+                repeated.push(module.clone());
+            }
+            return;
+        }
+        for dependency in edges.get(module).into_iter().flatten() {
+            visit(dependency, edges, seen, repeated);
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut repeated = Vec::new();
+    for module in include_groups.iter().flatten() {
+        visit(module, edges, &mut seen, &mut repeated);
+    }
+    repeated
+}
+
+/// The include edges filter registration follows. A plain module's are
+/// not among them: `include` on it already ran the `included` hooks of
+/// what it includes, on the module itself, and including the module
+/// later does not run them again.
+fn filter_dependency_edges(
+    app: &App,
+    module_includes: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+) -> HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> {
+    let is_plain = |m: &crate::ident::ClassId| app.plain_mixins.contains(m);
+    module_includes
+        .iter()
+        .filter(|(m, _)| !is_plain(m))
+        .map(|(m, includes)| {
+            // A concern defers only other concerns to its includer. A plain
+            // module it includes ran its hook then, with the concern as `base`.
+            (m.clone(), includes.iter().filter(|inc| !is_plain(inc)).cloned().collect())
+        })
+        .collect()
 }
 
 /// The order a controller's concern filters REGISTER in — the order
@@ -4976,6 +5409,11 @@ pub(super) struct ControllerConcernSurface {
     pub direct_includes: Vec<crate::ident::ClassId>,
     pub includes: Vec<crate::ident::ClassId>,
     pub inherited_includes: Vec<crate::ident::ClassId>,
+    /// The modules whose `included` blocks run on this controller: `includes`
+    /// without what is reached only through a plain module.
+    pub filter_includes: Vec<crate::ident::ClassId>,
+    /// The modules Ruby's `include` runs more than once on this controller.
+    pub repeated_includes: Vec<crate::ident::ClassId>,
 }
 
 pub(super) struct ControllerConcernSurfaces {
@@ -4995,6 +5433,7 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
     for controller in &app.controllers {
         parts.entry(&controller.name).or_default().push(controller);
     }
+    let filter_edges = filter_dependency_edges(app, &module_includes);
     let mut controllers = HashMap::default();
     for name in parts.keys() {
         let mut direct_includes = Vec::new();
@@ -5027,6 +5466,8 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
             cur = declarations.iter().find_map(|part| part.parent.as_ref());
         }
         controllers.insert((*name).clone(), ControllerConcernSurface {
+            filter_includes: filter_registration_order(&include_groups, &filter_edges),
+            repeated_includes: repeated_includes(&include_groups, &filter_edges),
             includes: filter_registration_order(&include_groups, &module_includes),
             inherited_includes: filter_registration_order(&inherited_groups, &module_includes),
             direct_includes,
@@ -7780,23 +8221,53 @@ fn fold_concern_enums_into_models(
 /// holds. A label with no matching enum entry also stays put — the
 /// mapping only fires on an exact label match, so a same-named column
 /// on another model can't be caught by rule one.
+///
+/// A writer call keeps the label of a column the app reads through
+/// `<column>_before_type_cast`: Rails answers the value as assigned
+/// until the record is saved or loaded.
 fn map_enum_labels(app: &mut App) {
     use crate::dialect::ModelBodyItem;
     use crate::expr::{Expr, ExprNode, Literal};
     use crate::ident::{ClassId, Symbol};
+    use std::collections::BTreeSet;
 
     type EnumTable = indexmap::IndexMap<Symbol, Vec<(String, Literal)>>;
 
+    fn is_writer(expr: &Expr) -> bool {
+        matches!(&*expr.node, ExprNode::Send { method, .. }
+            if crate::lower::ENUM_WRITER_METHODS.contains(&method.as_str()))
+    }
+
     /// Rewrite every hash entry in this subtree whose key names a column
     /// in `table` and whose value is a label of that column.
-    fn map_in_subtree(expr: &mut Expr, table: &EnumTable) {
-        expr.node.for_each_child_mut(&mut |child| map_in_subtree(child, table));
+    fn map_in_subtree(expr: &mut Expr, table: &EnumTable, kept: &BTreeSet<Symbol>, in_writer: bool) {
+        if let ExprNode::Send { recv, method, args, block, .. } = &mut *expr.node {
+            // Only a writer's own arguments, through the `merge` a double
+            // splat desugars to, are assigned. A query in its receiver or
+            // inside an argument compares against the column.
+            let writer = crate::lower::ENUM_WRITER_METHODS.contains(&method.as_str());
+            let merged = in_writer && matches!(method.as_str(), "merge" | "merge!" | "reverse_merge" | "reverse_merge!");
+            if let Some(recv) = recv {
+                map_in_subtree(recv, table, kept, merged);
+            }
+            for arg in args.iter_mut() {
+                map_in_subtree(arg, table, kept, writer || merged);
+            }
+            if let Some(block) = block {
+                map_in_subtree(block, table, kept, false);
+            }
+            return;
+        }
+        expr.node.for_each_child_mut(&mut |child| map_in_subtree(child, table, kept, in_writer));
         let ExprNode::Hash { entries, .. } = &mut *expr.node else { return };
         for (key, value) in entries.iter_mut() {
             let ExprNode::Lit { value: Literal::Sym { value: column } } = &*key.node else {
                 continue;
             };
             let Some(mapping) = table.get(column) else { continue };
+            if in_writer && kept.contains(column) {
+                continue;
+            }
             let label = match &*value.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
                 ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
@@ -7808,8 +8279,13 @@ fn map_enum_labels(app: &mut App) {
     }
 
     /// Rule two: `Model.method(…)` anywhere in the app.
-    fn map_const_receiver_sites(expr: &mut Expr, tables: &HashMap<ClassId, EnumTable>) {
-        expr.node.for_each_child_mut(&mut |child| map_const_receiver_sites(child, tables));
+    fn map_const_receiver_sites(
+        expr: &mut Expr,
+        tables: &HashMap<ClassId, EnumTable>,
+        kept: &BTreeSet<Symbol>,
+    ) {
+        expr.node.for_each_child_mut(&mut |child| map_const_receiver_sites(child, tables, kept));
+        let in_writer = is_writer(expr);
         let ExprNode::Send { recv: Some(recv), args, .. } = &mut *expr.node else { return };
         let ExprNode::Const { path } = &*recv.node else { return };
         let id = ClassId(Symbol::from(
@@ -7817,7 +8293,7 @@ fn map_enum_labels(app: &mut App) {
         ));
         let Some(table) = tables.get(&id) else { return };
         for arg in args.iter_mut() {
-            map_in_subtree(arg, table);
+            map_in_subtree(arg, table, kept, in_writer);
         }
     }
 
@@ -7830,19 +8306,20 @@ fn map_enum_labels(app: &mut App) {
     if tables.is_empty() {
         return;
     }
+    let kept = crate::analyze::raw_input_columns(app);
 
     for model in &mut app.models {
         let Some(table) = tables.get(&model.name).cloned() else { continue };
         for item in &mut model.body {
             match item {
-                ModelBodyItem::Method { method, .. } => map_in_subtree(&mut method.body, &table),
-                ModelBodyItem::Scope { scope, .. } => map_in_subtree(&mut scope.body, &table),
-                ModelBodyItem::Unknown { expr, .. } => map_in_subtree(expr, &table),
+                ModelBodyItem::Method { method, .. } => map_in_subtree(&mut method.body, &table, &kept, false),
+                ModelBodyItem::Scope { scope, .. } => map_in_subtree(&mut scope.body, &table, &kept, false),
+                ModelBodyItem::Unknown { expr, .. } => map_in_subtree(expr, &table, &kept, false),
                 _ => {}
             }
         }
     }
-    crate::lower::for_each_hook_body(app, &mut |expr| map_const_receiver_sites(expr, &tables));
+    crate::lower::for_each_hook_body(app, &mut |expr| map_const_receiver_sites(expr, &tables, &kept));
 }
 
 /// Fill each `belongs_to …, polymorphic: true` association's target
@@ -9126,32 +9603,84 @@ pub(super) fn app_roots<V: Vfs + ?Sized>(
 }
 
 /// In-repository `PATH` sources, normalized once for app and library discovery.
+///
+/// A remote that is itself a gem (`gem "billing", path: "lib/billing"`,
+/// a `.gemspec` in that directory) is one directory. A Bundler path block
+/// (`path "engines" do gem "accounts" … end`) locks the parent as the
+/// remote and each gem as a spec; those gems are the child directories
+/// whose `.gemspec` names a spec of that source. The parent is not a gem.
+/// A remote with no gemspec and no matching child stays the one directory
+/// it was, so a path source that is not a block is unchanged.
 fn path_gem_dirs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
     let Ok(lock) = vfs.read_to_string(&dir.join("Gemfile.lock")) else { return Vec::new() };
     let mut dirs = Vec::new();
-    for remote in crate::gems::lock_path_remotes(&lock) {
-        let remote = Path::new(&remote);
-        let remote = remote.strip_prefix(dir).unwrap_or(remote);
-        let mut relative = PathBuf::new();
-        let mut inside = true;
-        for component in remote.components() {
-            match component {
-                Component::CurDir => {}
-                Component::Normal(part) => relative.push(part),
-                _ => inside = false,
-            }
-        }
-        // The app itself already contributes its app/ and lib/ trees.
-        if !inside || relative.as_os_str().is_empty() {
+    for source in crate::gems::lock_path_sources(&lock) {
+        let Some(gem) = path_remote_inside_app(dir, &source.remote) else { continue };
+        if path_has_symlink_component(vfs, dir, &gem) || !vfs.is_dir(&gem) {
             continue;
         }
-        let gem = dir.join(relative);
-        if !path_has_symlink_component(vfs, dir, &gem) && vfs.is_dir(&gem) {
-            dirs.push(gem);
+        if gemspec_names(vfs, &gem).is_empty() {
+            let children = child_gem_dirs(vfs, dir, &gem, &source.specs);
+            if !children.is_empty() {
+                dirs.extend(children);
+                continue;
+            }
         }
+        dirs.push(gem);
     }
     dirs.sort();
     dirs.dedup();
+    dirs
+}
+
+/// `remote` as a directory inside `dir`. Absolute remotes, parent-directory
+/// components, and the app root itself are not path gems.
+fn path_remote_inside_app(dir: &Path, remote: &str) -> Option<PathBuf> {
+    let remote = Path::new(remote);
+    let remote = remote.strip_prefix(dir).unwrap_or(remote);
+    let mut relative = PathBuf::new();
+    for component in remote.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => relative.push(part),
+            _ => return None,
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return None;
+    }
+    Some(dir.join(relative))
+}
+
+/// Gem names declared by `*.gemspec` files directly in `dir`.
+fn gemspec_names<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<String> {
+    let Ok(entries) = vfs.read_dir(dir) else { return Vec::new() };
+    let mut names = Vec::new();
+    for entry in entries {
+        if vfs.is_dir(&entry) {
+            continue;
+        }
+        let Some(name) = entry.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(stem) = name.strip_suffix(".gemspec") else { continue };
+        if !stem.is_empty() {
+            names.push(stem.to_string());
+        }
+    }
+    names
+}
+
+/// Child directories of a path-block remote that are gems of that source.
+fn child_gem_dirs<V: Vfs + ?Sized>(vfs: &V, dir: &Path, parent: &Path, specs: &[String]) -> Vec<PathBuf> {
+    let Ok(entries) = vfs.read_dir(parent) else { return Vec::new() };
+    let mut dirs = Vec::new();
+    for entry in entries {
+        if !vfs.is_dir(&entry) || path_has_symlink_component(vfs, dir, &entry) {
+            continue;
+        }
+        if gemspec_names(vfs, &entry).iter().any(|name| specs.iter().any(|spec| spec == name)) {
+            dirs.push(entry);
+        }
+    }
     dirs
 }
 
@@ -10589,7 +11118,7 @@ fn app_relative_path(value: &str) -> Option<&str> {
 /// (`project::target_files` drops it, with a warning, for the rest).
 fn synthesize_rails_health_controller(app: &mut crate::App) {
     use super::routes::RAILS_HEALTH_CONTROLLER;
-    let routed = crate::lower::routes::flatten_routes(app)
+    let routed = crate::lower::routes::flatten_routes_reachable(app)
         .iter()
         .any(|r| r.controller.0.as_str() == RAILS_HEALTH_CONTROLLER);
     if !routed || app.controllers.iter().any(|c| c.name.0.as_str() == RAILS_HEALTH_CONTROLLER) {
@@ -11665,21 +12194,7 @@ fn lift_read_framework_settings<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut 
     if assignments.is_empty() {
         return;
     }
-    let rails_application = app.rails_application.get_or_insert_with(|| crate::dialect::LibraryClass {
-        name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-        is_module: false,
-        parent: None,
-        parent_span: Default::default(),
-        includes: Vec::new(),
-        include_spans: Vec::new(),
-        methods: Vec::new(),
-        nullable_columns: Vec::new(),
-        origin: None,
-        constants: Vec::new(),
-        conditional_definitions: Vec::new(),
-        unknown_calls: Vec::new(),
-        class_ivar_initializers: Vec::new(),
-    });
+    let rails_application = app.rails_application.get_or_insert_with(crate::ingest::rails_application_class);
     let mut constants = String::new();
     if !rails_application.constants.iter().any(|(name, _)| name.as_str() == "CONFIG_LOCK") {
         constants.push_str("CONFIG_LOCK = Mutex.new\n");
@@ -14073,3 +14588,5 @@ mod path_gem_vfs_tests {
         }
     }
 }
+
+

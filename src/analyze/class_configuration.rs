@@ -20,6 +20,9 @@ impl Analyzer {
                 let ControllerBodyItem::ClassIvarInit { expr, carrier, .. } = item else {
                     continue;
                 };
+                // Typed whatever the frontier: a slot is shared with the
+                // carrier's other includers, and these bodies read it.
+                self.note_retyped(&controller.name);
                 if let ExprNode::Assign { value, .. } = &mut *expr.node {
                     seed_empty_hashes(value, &empty_hash());
                 }
@@ -113,6 +116,7 @@ impl Analyzer {
                 else {
                     continue;
                 };
+                self.note_retyped(&controller.name);
                 let ty = types
                     .get(configuration_slot)
                     .cloned()
