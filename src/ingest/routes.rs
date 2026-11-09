@@ -194,7 +194,30 @@ pub(super) fn merge_route_files(files: Vec<FileRoutes>) -> RouteTable {
 /// `Rails.application.routes.draw` / `prepend` / `append` blocks, since a
 /// `Engine.routes.draw` is the engine's own route set (composed at its
 /// mount).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn ingest_route_file(
+    app_file: bool,
+    source: &[u8],
+    file: &str,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+    block_wrappers: &HashSet<String>,
+    engine_routes: &HashMap<String, EngineRouteSource>,
+    engine_refusals: &HashMap<String, String>,
+    rack_apps: &RackAppTargets,
+    helper_sources: &OnceCell<Vec<RouteHelperSource>>,
+    load_helper_sources: &dyn Fn() -> Vec<RouteHelperSource>,
+) -> IngestResult<FileRoutes> {
+    // The file's own locals (`pages_actions = %w[…].freeze`): with no frame, `eval::bind` kept nothing a later loop could read.
+    eval::push_frame();
+    let out = ingest_route_file_in_frame(
+        app_file, source, file, draws, block_wrappers, engine_routes, engine_refusals, rack_apps, helper_sources, load_helper_sources,
+    );
+    eval::pop_frame();
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_route_file_in_frame(
     app_file: bool,
     source: &[u8],
     file: &str,
@@ -1330,6 +1353,9 @@ fn ingest_route_stmts<'pr>(
             continue;
         }
 
+        if call.receiver().is_some_and(|recv| recv.as_local_variable_read_node().is_some()) {
+            eval::forget_lists();
+        }
         if call.receiver().is_some_and(|recv| cx.strict || recv.as_self_node().is_none()) {
             // Any other receiver-bearing call with a block (`PAGES.each`,
             // `3.times`, `.each_with_index`) holds routes the walker
@@ -2051,7 +2077,6 @@ fn literal_each_elements(call: &ruby_prism::CallNode<'_>) -> Option<Vec<eval::RV
     if constant_id_str(&call.name()) != "each" || call.arguments().is_some() {
         return None;
     }
-    let array = call.receiver()?.as_array_node()?;
     let block = call.block()?.as_block_node()?;
     let params = block.parameters()?.as_block_parameters_node()?.parameters()?;
     if params.requireds().iter().count() != 1
@@ -2065,16 +2090,11 @@ fn literal_each_elements(call: &ruby_prism::CallNode<'_>) -> Option<Vec<eval::RV
         return None;
     }
     params.requireds().iter().next()?.as_required_parameter_node()?;
-    array
-        .elements()
-        .iter()
-        .map(|el| {
-            if el.as_string_node().is_none() && el.as_symbol_node().is_none() {
-                return None;
-            }
-            eval::value(&el)
-        })
-        .collect()
+    // A literal, a `.freeze` of one, or a local holding either (forem's `pages_actions = %w[…].freeze`).
+    match eval::value(&call.receiver()?)? {
+        eval::RVal::List(elements) => Some(elements),
+        _ => None,
+    }
 }
 
 /// Walk the block of a `literal_each_elements` loop once per element.
@@ -2113,6 +2133,8 @@ fn ingest_literal_each(
     // silently half-worked instead of being a located gap on every
     // iteration (rubys/roundhouse#1027 review).
     let mut entries = Vec::new();
+    // The block parameter shadows a local of the same name; popping the body's frame must not write it back.
+    let shadowed = eval::get(&param);
     for element in elements {
         let Some(body) = block.body() else { break };
         eval::push_inherited_frame();
@@ -2121,6 +2143,9 @@ fn ingest_literal_each(
             ingest_route_body(body, file, parent, cx)
         });
         eval::pop_frame();
+        if let Some(outer) = &shadowed {
+            eval::bind(&param, outer.clone());
+        }
         entries.extend(walked?);
     }
     Ok(entries)
@@ -3237,15 +3262,20 @@ mod eval {
         Sym(String),
         Nil,
         Hash(Vec<(String, RVal)>),
+        /// `%w[welcome editor_guide]`, and a local or `.freeze` of one: what a route loop walks.
+        List(Vec<RVal>),
         Unknown,
     }
 
     thread_local! {
         static FRAMES: RefCell<Vec<HashMap<String, RVal>>> = const { RefCell::new(Vec::new()) };
+        /// Per frame, whether it is a loop body's copy of the one below it (`push_inherited_frame`).
+        static INHERITED: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
     }
 
     pub(super) fn push_frame() {
         FRAMES.with(|f| f.borrow_mut().push(HashMap::default()));
+        INHERITED.with(|i| i.borrow_mut().push(false));
     }
 
     /// A frame that starts as a copy of the enclosing one: a block body
@@ -3256,11 +3286,23 @@ mod eval {
             let top = frames.last().cloned().unwrap_or_default();
             frames.push(top);
         });
+        INHERITED.with(|i| i.borrow_mut().push(true));
     }
 
     pub(super) fn pop_frame() {
+        let copy = INHERITED.with(|i| i.borrow_mut().pop()).unwrap_or(false);
         FRAMES.with(|f| {
-            f.borrow_mut().pop();
+            let mut frames = f.borrow_mut();
+            let Some(popped) = frames.pop() else { return };
+            // A loop body's assignment to a local its scope already has is the scope's, as in Ruby;
+            // one of its own (a new name) ends with the body.
+            if copy && let Some(outer) = frames.last_mut() {
+                for (name, value) in popped {
+                    if let Some(slot) = outer.get_mut(&name) {
+                        *slot = value;
+                    }
+                }
+            }
         });
     }
 
@@ -3270,6 +3312,30 @@ mod eval {
                 top.insert(name.to_string(), value);
             }
         });
+    }
+
+    /// A call on a local was passed over (`pages << "x"`, `pages.concat(…)`, through an alias too):
+    /// no list the frame holds is known any more, so a later loop over one is a gap, not the old list.
+    pub(super) fn forget_lists() {
+        // Down through the loop bodies' copies to the file's own frame, not the top one alone (a copy is
+        // popped after its loop), and no further: an included file's frame is not its caller's.
+        let inherited = INHERITED.with(|i| i.borrow().clone());
+        FRAMES.with(|f| {
+            for (frame, copy) in f.borrow_mut().iter_mut().rev().zip(inherited.iter().rev()) {
+                for value in frame.values_mut() {
+                    if matches!(value, RVal::List(_)) {
+                        *value = RVal::Unknown;
+                    }
+                }
+                if !copy {
+                    break;
+                }
+            }
+        });
+    }
+
+    pub(super) fn get(name: &str) -> Option<RVal> {
+        lookup(name)
     }
 
     fn lookup(name: &str) -> Option<RVal> {
@@ -3295,6 +3361,22 @@ mod eval {
         }
         if node.as_nil_node().is_some() {
             return Some(RVal::Nil);
+        }
+        if let Some(array) = node.as_array_node() {
+            return array
+                .elements()
+                .iter()
+                .map(|el| (el.as_string_node().is_some() || el.as_symbol_node().is_some()).then(|| value(&el)).flatten())
+                .collect::<Option<Vec<_>>>()
+                .map(RVal::List);
+        }
+        if let Some(call) = node.as_call_node()
+            && constant_id_str(&call.name()) == "freeze"
+            && call.arguments().is_none()
+            && call.block().is_none()
+            && let Some(recv) = call.receiver()
+        {
+            return value(&recv);
         }
         if let Some(read) = node.as_local_variable_read_node() {
             return lookup(constant_id_str(&read.name()));

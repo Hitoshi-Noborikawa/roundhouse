@@ -2241,14 +2241,28 @@ module ActiveRecord
     # `group(:col).count` — Rails hands back a Hash of group-key =>
     # COUNT. The group_count lowering renames the grouped chain's
     # terminal to this method, so the scalar `count` keeps its
-    # Integer return (no polymorphic count). Single group expression
-    # (the corpus shape); Rails' multi-group array keys would need a
-    # composite key here first. HAVING and DISTINCT ride the same SQL
+    # Integer return (no polymorphic count). Multiple group expressions
+    # use Array keys; a single expression keeps scalar keys.
+    # HAVING and DISTINCT ride the same SQL
     # as `to_sql` so the Hash only contains surviving groups, and a
     # distinct projection counts distinct values per group (#343).
     def group_count
       return {} if @null
       key = @groups.join(", ")
+      names = []
+      selects = []
+      survivors_selects = []
+      survivor_names = []
+      @groups.each_with_index do |group, index|
+        name = "__rh_group_#{index}"
+        survivor_name = "__rh_survivor_#{index}"
+        names << name
+        selects << "#{group} AS #{name}"
+        survivor_names << survivor_name
+        survivors_selects << "#{group} AS #{survivor_name}"
+      end
+      projection = selects.join(", ")
+      group_names = names.join(", ")
       # DISTINCT uses a subquery so a multi-column / aliased `select`
       # never lands inside SQLite's one-expression COUNT(DISTINCT …).
       # HAVING filters groups on the original grouped relation first
@@ -2257,25 +2271,26 @@ module ActiveRecord
       # can name selected aliases, matching `count_sql`.
       sql = if @distinct
         inner = append_join_where(
-          "#{cte_prefix}SELECT DISTINCT #{distinct_count_columns}, #{key} AS k FROM #{from_source}"
+          "#{cte_prefix}SELECT DISTINCT #{distinct_count_columns}, #{projection} FROM #{from_source}"
         )
         if @havings.length > 0
           survivors = append_group_having(
-            append_join_where("#{cte_prefix}SELECT #{key} AS __rh_k FROM #{from_source}")
+            append_join_where("#{cte_prefix}SELECT #{survivors_selects.join(", ")} FROM #{from_source}")
           )
-          clause = "#{key} IN (SELECT __rh_k FROM (#{survivors}) AS __rh_surv)"
+          key_tuple = names.length == 1 ? key : "(#{key})"
+          clause = "#{key_tuple} IN (SELECT #{survivor_names.join(", ")} FROM (#{survivors}) AS __rh_surv)"
           inner = if @wheres.length > 0
             "#{inner} AND #{clause}"
           else
             "#{inner} WHERE #{clause}"
           end
         end
-        "SELECT k, COUNT(*) AS n FROM (#{inner}) AS __rh_gc GROUP BY k"
+        "SELECT #{group_names}, COUNT(*) AS n FROM (#{inner}) AS __rh_gc GROUP BY #{group_names}"
       else
         proj = if @select_sql.nil?
-          "#{key} AS k, COUNT(*) AS n"
+          "#{projection}, COUNT(*) AS n"
         else
-          "#{@select_sql}, #{key} AS k, COUNT(*) AS n"
+          "#{@select_sql}, #{projection}, COUNT(*) AS n"
         end
         append_group_having(
           append_join_where("#{cte_prefix}SELECT #{proj} FROM #{from_source}")
@@ -2283,7 +2298,16 @@ module ActiveRecord
       end
       h = {}
       rows = ActiveRecord.adapter.select_rows(sql)
-      rows.each { |row| h[row["k"]] = row["n"].to_i }
+      rows.each do |row|
+        key_values = []
+        names.each_with_index do |name, index|
+          value = row[name]
+          group_column = schema_group_column(@groups[index])
+          key_values << (group_column.nil? ? value : cast_schema_value(value, group_column))
+        end
+        group_key = names.length == 1 ? key_values[0] : key_values
+        h[group_key] = row["n"].to_i
+      end
       h
     end
 

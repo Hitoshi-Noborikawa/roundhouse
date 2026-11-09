@@ -69,6 +69,13 @@ end
     render plain: assigned + "|" + widget.role_before_type_cast.to_s
   end
 
+  def normalized_stage
+    Widget.create!(name: "stage", stage: "draft")
+    widget = Widget.new(name: "n")
+    widget.stage = "draft"
+    render plain: widget.stage.to_s + "|" + Widget.where(stage: "draft").count.to_s
+  end
+
   def permit_rows
     render json: { rows: params.require(:list).map { |item| item.permit(:name, :price) } }
   end
@@ -111,6 +118,8 @@ end
 "##)
         .write("app/models/widget.rb", r##"class Widget < ApplicationRecord
   enum :role, %i[member admin owner]
+  enum :stage, { draft: 0, live: 1 }
+  normalizes :stage, with: ->(v) { v == "draft" ? "live" : v }
 end
 "##)
         .write("app/views/gizmos/index.json.jbuilder", "json.ok true\n")
@@ -123,6 +132,7 @@ end
   get "/widgets/admins", to: "widgets#admins"
   get "/widgets/names", to: "widgets#names"
   get "/widgets/raw_role", to: "widgets#raw_role"
+  get "/widgets/normalized_stage", to: "widgets#normalized_stage"
   get "/widgets/extra", to: "widgets#extra"
   post "/widgets/permit_rows", to: "widgets#permit_rows"
   post "/widgets/expect_rows", to: "widgets#expect_rows"
@@ -137,6 +147,7 @@ end
   create_table "widgets", force: :cascade do |t|
     t.string "name"
     t.integer "role", default: 0, null: false
+    t.integer "stage"
     t.integer "price", default: 0
   end
 end
@@ -216,4 +227,7 @@ fn api_parity_round3_fixes_run_on_spinel() {
     // #1986: what was assigned, then the stored value (Rails 8.1.4). Last: it saves a row.
     let raw_role = server.get("/widgets/raw_role");
     assert_eq!(raw_role.body, "admin|1", "raw role:\n{}", server.log());
+    // #1993: the lambda gets the label, on a write and in a condition (Rails 8.1.4).
+    let stage = server.get("/widgets/normalized_stage");
+    assert_eq!(stage.body, "live|1", "normalized enum:\n{}", server.log());
 }

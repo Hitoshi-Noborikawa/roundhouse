@@ -2532,8 +2532,115 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
             entries: entries.iter().map(|(k, v)| Ok((to_expr(k, span)?, to_expr(v, span)?))).collect::<Res<_>>()?,
             kwargs: false,
         }),
-        _ => return Err("a routing argument it cannot write".into()),
+        // `constraints(lambda { |request| … })` (devise's `authenticate`): the lambda, with each local it
+        // closes over written in as its value; one it cannot write, or `self`, is no routing argument.
+        // The block it closed over is the one a `yield` inside would run; a body with none does not need it.
+        Val::Proc { params, rest: None, body, locals, block, .. } if block.is_none() || !yields(body) => {
+            // A nested block that binds a name the outer one closes over: its reads are its own, which
+            // a substitution by name would replace.
+            if let Some(name) = rebound(body).into_iter().find(|n| locals.contains_key(n) && !params.contains(n)) {
+                return Err(format!("a block that rebinds `{}`, a local it closes over", name.as_str()));
+            }
+            let unwritable = std::cell::RefCell::new(None::<String>);
+            let body = crate::lower::controller_to_library::util::map_expr(body, &|e| match &*e.node {
+                ExprNode::Var { name, .. } if !params.contains(name) => {
+                    let value = locals.get(name)?;
+                    match to_expr(value, e.span) {
+                        Ok(written) => Some(written),
+                        Err(why) => {
+                            unwritable.borrow_mut().get_or_insert(format!("{why} (`{}` in a block)", name.as_str()));
+                            None
+                        }
+                    }
+                }
+                ExprNode::SelfRef => {
+                    unwritable.borrow_mut().get_or_insert_with(|| "a block that reads `self`".into());
+                    None
+                }
+                _ => None,
+            });
+            if let Some(why) = unwritable.into_inner() {
+                return Err(why);
+            }
+            // Checked on the result, not trusted to the walk: a read the substitution did not reach
+            // (a `when` pattern) would run unbound, and a pattern match can bind a name of its own.
+            if let Some(name) = reads(&body).into_iter().find(|n| locals.contains_key(n) && !params.contains(n)) {
+                return Err(format!("a block that reads `{}`, a local it closes over, where it cannot be written in", name.as_str()));
+            }
+            if matches_patterns(&body) {
+                return Err("a block with a pattern match, whose patterns may bind a local it closes over".into());
+            }
+            Expr::new(span, ExprNode::Lambda {
+                params: params.clone(),
+                rest_param: None,
+                extra_params: Vec::new(),
+                block_param: None,
+                body,
+                block_style: Default::default(),
+            })
+        }
+        other => return Err(format!("a routing argument it cannot write ({})", val_kind(other))),
     })
+}
+
+fn reads(e: &Expr) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    if let ExprNode::Var { name, .. } = &*e.node {
+        out.push(name.clone());
+    }
+    e.node.for_each_child(&mut |c| out.extend(reads(c)));
+    out
+}
+
+fn matches_patterns(e: &Expr) -> bool {
+    let mut found = matches!(&*e.node, ExprNode::CaseMatch { .. } | ExprNode::MatchPredicate { .. } | ExprNode::MatchRequired { .. });
+    e.node.for_each_child(&mut |c| found |= matches_patterns(c));
+    found
+}
+
+/// The names `e` binds: nested blocks' parameters and the locals it assigns, either of which makes a
+/// read of that name something other than the value the outer block closed over.
+fn rebound(e: &Expr) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    if let ExprNode::Lambda { params, rest_param, block_param, .. } = &*e.node {
+        out.extend(params.iter().cloned());
+        out.extend(rest_param.iter().cloned());
+        out.extend(block_param.iter().cloned());
+    }
+    if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, .. }
+    | ExprNode::OpAssign { target: crate::expr::LValue::Var { name, .. }, .. } = &*e.node
+    {
+        out.push(name.clone());
+    }
+    if let ExprNode::MultiAssign { targets, .. } = &*e.node {
+        out.extend(targets.iter().filter_map(|t| match t {
+            crate::expr::LValue::Var { name, .. } => Some(name.clone()),
+            _ => None,
+        }));
+    }
+    e.node.for_each_child(&mut |c| out.extend(rebound(c)));
+    out
+}
+
+fn yields(e: &Expr) -> bool {
+    let mut found = matches!(&*e.node, ExprNode::Yield { .. });
+    e.node.for_each_child(&mut |c| found |= yields(c));
+    found
+}
+
+fn val_kind(v: &Val) -> &'static str {
+    match v {
+        Val::Proc { rest: Some(_), .. } => "a block with a rest parameter",
+        Val::Proc { block: Some(_), .. } => "a block that takes a block",
+        Val::Proc { .. } => "a block",
+        Val::Obj(_) => "an object",
+        Val::Regex(_) => "a regexp",
+        Val::Unknown => "a value it does not model",
+        Val::Router => "the mapper",
+        Val::Merger { .. } => "a with_options target",
+        Val::Defaulted { .. } => "a Hash with a default",
+        _ => "a value",
+    }
 }
 
 /// The routes a gem's routing method draws (`use_doorkeeper do … end`), run with the mapper as the

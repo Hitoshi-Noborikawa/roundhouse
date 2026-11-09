@@ -21947,3 +21947,5 @@ fn join_nil_renders_as_rails() {
         .run_test("test/controllers/probes_controller_test.rb")
         .assert_passes();
 }
+#[path = "emit_and_run/cable_connection_request.rs"]
+mod cable_connection_request;

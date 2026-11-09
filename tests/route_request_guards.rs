@@ -165,3 +165,60 @@ fn a_constraint_before_a_mount_elsewhere_is_still_asked() {
     assert_eq!(flatten_routes_asking_guards(&app).len(), 1, "the guarded route is asked");
     assert!(route_guard_gaps_for_target(&app, BuildTarget::Ruby).is_empty());
 }
+
+/// `lambda { |req| ... }` and `proc { |req| ... }` are callables like
+/// `->(req) { ... }`. Neither answers `matches?`.
+#[test]
+fn a_kernel_lambda_or_proc_constraint_is_asked_as_a_callable() {
+    for form in ["lambda", "proc"] {
+        let app = app(&format!(r#"get "/invite/:code", to: "widgets#show", constraints: {form} {{ |req| req.format == :json }}"#));
+        let (class, _) = guard_class(&app.routes.entries).expect("a guard method");
+        assert_eq!(class.methods[0].params[0].name.as_str(), "req", "{form}");
+        let body = format!("{:?}", class.methods[0].body);
+        assert!(!body.contains("matches?"), "{form}: {body}");
+    }
+}
+
+/// A constraint that reads a local of the routes file can't move into the
+/// generated guard method, where that local isn't bound. It is refused
+/// where it is written, like any other constraint the router can't ask.
+#[test]
+fn a_constraint_reading_a_local_of_the_routes_file_is_refused_in_place() {
+    for constraint in ["->(req) { req.path == name }", "lambda { |req| req.path == name }", "proc { |req| [name].include?(req.path) }",
+        // Bound only if the branch runs.
+        r#"->(req) { name = "/other" if req.path == "/other"; req.path == name }"#,
+        r#"->(req) { req.path == "/other" && (name = "/other"); req.path == name }"#,
+        // A compound assignment reads its target first.
+        r#"->(req) { name += "/x"; req.path == name }"#,
+        r#"->(req) { name ||= "/x"; req.path == name }"#,
+        // A nested default runs inside the generated method.
+        r#"->(req) { (->(x = name) { x }).call == req.path }"#,
+    ] {
+        let app = app(&format!(
+            r#"name = "/admin"
+get "/x", to: "a#b", as: :x, constraints: {constraint}
+get "/ping", to: "pings#show""#
+        ));
+        let flat = flatten_routes(&app);
+        let dispatched: Vec<&str> = flat.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(dispatched, ["/ping"], "{constraint}: {dispatched:?}");
+        assert!(flatten_routes_for_helpers(&app).iter().any(|r| r.as_name == "x"), "{constraint}");
+        let error = app.routes.diagnostics.iter().find(|d| d.message.contains("request constraint")).expect("located refusal");
+        assert!(!error.span.is_synthetic(), "{error:?}");
+    }
+}
+
+/// What the constraint binds itself stays askable: its parameter, its
+/// own assignment, and a nested block's parameter.
+#[test]
+fn a_constraint_reading_only_what_it_binds_is_asked() {
+    for constraint in [
+        r#"->(req) { prefix = "/a"; [prefix].any? { |p| req.path.start_with?(p) } }"#,
+        r#"->(req) { n = 0; n += 1; n == req.path.size }"#,
+        r#"->(req) { (->(a, b = a) { b }).call(req.path) == "/x" }"#,
+    ] {
+        let app = app(&format!(r#"get "/x", to: "a#b", constraints: {constraint}"#));
+        assert!(guard_class(&app.routes.entries).is_some(), "{constraint}");
+        assert!(!app.routes.diagnostics.iter().any(|d| d.message.contains("request constraint")), "{constraint}: {:#?}", app.routes.diagnostics);
+    }
+}

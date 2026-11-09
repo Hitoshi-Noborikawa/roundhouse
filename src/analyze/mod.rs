@@ -5433,6 +5433,9 @@ impl Analyzer {
 
     fn harvest_one_model(&mut self, model: &Model) {
         let class_id = &model.name;
+        for (name, ty) in crate::lower::model_to_library::markers::readonly_attr_types(model) {
+            self.classes.entry(class_id.clone()).or_default().instance_methods.insert(name, ty);
+        }
         let scope_names: crate::det::HashSet<Symbol> =
             model.scopes().map(|s| s.name.clone()).collect();
         for method in model.methods() {

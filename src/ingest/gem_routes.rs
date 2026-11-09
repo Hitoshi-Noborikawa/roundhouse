@@ -91,6 +91,24 @@ pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path
     }
 }
 
+fn place_guards(entries: &mut [RouteSpec], span: crate::span::Span) {
+    fn place(e: &mut Expr, span: crate::span::Span) {
+        e.span = span;
+        e.node.for_each_child_mut(&mut |child| place(child, span));
+    }
+    for entry in entries {
+        match entry {
+            RouteSpec::Guarded { guard, entries } => {
+                place(guard, span);
+                place_guards(entries, span);
+            }
+            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => place_guards(entries, span),
+            RouteSpec::Resources { nested, .. } => place_guards(nested, span),
+            _ => {}
+        }
+    }
+}
+
 /// `ActionDispatch::Routing::Mapper.include Helper`: its one effect, the mapper's new methods, is the
 /// routes this pass drew, so the emitted program does not run it (it has no mapper to extend).
 fn consume_installs(app: &mut App) {
@@ -199,6 +217,9 @@ fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], enclo
                             gaps.push(crate::diagnostic::Diagnostic::unsupported(*span, None, method.as_str(), why));
                         }
                         super::routes::apply_outer_constraints(&mut inner, constraints);
+                        // Not at `<gem routes>`, which the drawn routes were read back from: a constraint the
+                        // method drew (`authenticate`) is reported where the app calls it.
+                        place_guards(&mut inner, *span);
                         RouteSpec::Scope {
                             path: None,
                             module: None,

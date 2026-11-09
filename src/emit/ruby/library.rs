@@ -6796,14 +6796,7 @@ fn to_s_keeping_nil(value: Expr, sig: &RecordSignals<'_>) -> Expr {
     let span = value.span;
     // A name the method doesn't already bind: the `Let` assigns in
     // the method's own scope.
-    let name = loop {
-        let n = sig.next_local.get();
-        sig.next_local.set(n + 1);
-        let candidate = Symbol::from(format!("route_segment_{n}"));
-        if sig.taken_locals.borrow_mut().insert(candidate.clone()) {
-            break candidate;
-        }
-    };
+    let name = fresh_route_segment_local(sig);
     let value_ty = value.ty.clone().unwrap_or(crate::ty::Ty::Untyped);
     let typed = |node: ExprNode, ty: crate::ty::Ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
     let read = || typed(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() }, value_ty.clone());
@@ -6823,6 +6816,17 @@ fn to_s_keeping_nil(value: Expr, sig: &RecordSignals<'_>) -> Expr {
         opt_str.clone(),
     );
     typed(ExprNode::Let { id: crate::ident::VarId(0), name, value, body: check }, opt_str)
+}
+
+fn fresh_route_segment_local(sig: &RecordSignals<'_>) -> Symbol {
+    loop {
+        let n = sig.next_local.get();
+        sig.next_local.set(n + 1);
+        let candidate = Symbol::from(format!("route_segment_{n}"));
+        if sig.taken_locals.borrow_mut().insert(candidate.clone()) {
+            return candidate;
+        }
+    }
 }
 
 /// The instance method names `lc` and its ancestors (parents and
@@ -6862,6 +6866,33 @@ fn ancestry_methods(
 /// model's own `to_param` (a slug model), else its id — as text when
 /// the slot is declared `String`.
 fn project_record_arg(arg: &mut Expr, model: &str, sig: &RecordSignals<'_>, wants_str: bool) {
+    if let Some(Ty::Union { variants }) = &arg.ty {
+        if variants.contains(&Ty::Nil) {
+            let span = arg.span;
+            let value = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+            let value_ty = value.ty.clone().unwrap();
+            let name = fresh_route_segment_local(sig);
+            let typed = |node, ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
+            let read = |ty| typed(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() }, ty);
+            let mut projected = read(value_ty.clone().strip_nil());
+            project_record_arg(&mut projected, model, sig, wants_str);
+            let result_ty = crate::analyze::union_of(projected.ty.clone().unwrap(), Ty::Nil);
+            let cond = typed(
+                ExprNode::Send { recv: Some(read(value_ty)), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false },
+                Ty::Bool,
+            );
+            let check = typed(
+                ExprNode::If {
+                    cond,
+                    then_branch: typed(ExprNode::Lit { value: crate::expr::Literal::Nil }, Ty::Nil),
+                    else_branch: projected,
+                },
+                result_ty.clone(),
+            );
+            *arg = typed(ExprNode::Let { id: crate::ident::VarId(0), name, value, body: check }, result_ty);
+            return;
+        }
+    }
     {
         let slug = sig.slug_models.contains(model);
         let span = arg.span;
@@ -9958,6 +9989,7 @@ struct NameIndex {
     library_classes: HashMap<String, Vec<usize>>,
     first_modules_bare: std::cell::OnceCell<HashMap<String, usize>>,
     constant_paths: std::cell::OnceCell<std::rc::Rc<crate::det::HashSet<String>>>,
+    file_constant_owners: std::cell::OnceCell<HashMap<String, String>>,
     source_ptr: usize,
     source_len: usize,
 }
@@ -10000,6 +10032,7 @@ impl NameIndex {
             library_classes,
             first_modules_bare: std::cell::OnceCell::new(),
             constant_paths: std::cell::OnceCell::new(),
+            file_constant_owners: std::cell::OnceCell::new(),
             source_ptr: classes.as_ptr() as usize,
             source_len: classes.len(),
         };
@@ -10560,6 +10593,30 @@ fn owns_a_file(name: &str, app: &App, classes: &[LibraryClass]) -> bool {
     library_classes_named(name, app, classes).iter().any(|c| !c.is_module)
 }
 
+/// The first file of constants alone, among `classes` and then the app's
+/// library classes, that defines the constant `name`.
+fn file_constant_owner(name: &str, app: &App, classes: &[LibraryClass]) -> Option<String> {
+    let files = || classes.iter().chain(&app.library_classes).filter(|class| class.is_file_constants());
+    match NameIndex::current(app).filter(|index| index.covers(classes)) {
+        Some(index) => index
+            .file_constant_owners
+            .get_or_init(|| {
+                let mut owners: HashMap<String, String> = HashMap::default();
+                for class in files() {
+                    for (constant, _) in &class.constants {
+                        owners.entry(constant.as_str().to_string()).or_insert_with(|| class.name.0.as_str().to_string());
+                    }
+                }
+                owners
+            })
+            .get(name)
+            .cloned(),
+        None => files()
+            .find(|class| class.constants.iter().any(|(constant, _)| constant.as_str() == name))
+            .map(|class| class.name.0.as_str().to_string()),
+    }
+}
+
 /// Every constant path the app declares (models, controllers, library
 /// classes and modules, test modules) and each namespace enclosing one.
 fn app_constant_paths(app: &App, classes: &[LibraryClass]) -> std::rc::Rc<crate::det::HashSet<String>> {
@@ -10862,11 +10919,8 @@ fn require_path_for_body_const(
     }
     // Any constant of a file of constants alone is that file's, not only
     // the one it is named for: `Labels = DEFAULT` beside `DEFAULT = […]`.
-    if let Some(file) = classes.iter().chain(&app.library_classes).find(|class| {
-        class.is_file_constants() && class.constants.iter().any(|(name, _)| name.as_str() == first)
-    }) {
-        let owner = file.name.0.as_str();
-        return (owner != self_name).then(|| format!("app/models/{}", crate::naming::underscore(owner)));
+    if let Some(owner) = file_constant_owner(first, app, classes) {
+        return (owner != self_name).then(|| format!("app/models/{}", crate::naming::underscore(&owner)));
     }
     if first == self_name {
         return None;
@@ -11550,6 +11604,9 @@ fn enum_default_input(model: &crate::dialect::Model, column: &Symbol, seed: &Exp
 /// what was assigned, not what `normalizes` made of it (activerecord
 /// 8.1.4), and the remembered input mustn't call the normalizer again.
 fn before_normalizer(input: Expr, column: &Symbol) -> Expr {
+    if matches!(&*input.node, ExprNode::Var { name, .. } if name.as_str() == crate::lower::normalizes::NORMALIZED_LOCAL) {
+        return sp_expr(ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("value") });
+    }
     if let ExprNode::Send { method, args, .. } = &*input.node
         && method.as_str() == format!("_normalize_{}", column.as_str())
         && let [assigned] = args.as_slice()

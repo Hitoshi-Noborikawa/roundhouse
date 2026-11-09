@@ -362,3 +362,24 @@ fn a_routing_method_reaching_a_gem_through_another_draws_with_its_settings() {
     assert!(!routes.contains(":provider"), "{routes}");
     assert!(errors.iter().any(|e| e.contains("the OmniAuth routes are not drawn")), "{errors:#?}");
 }
+
+/// A routing method's block constraint is written with the locals it closes over as their values,
+/// unless the block could read one other than that value: then the routes are refused, with why.
+#[test]
+fn a_block_constraint_that_could_read_a_captured_local_otherwise_is_refused() {
+    for (body, why) in [
+        ("allowed, unused = false, 0\n          allowed", "rebinds `allowed`"),
+        ("case req.path\n          when allowed then true\n          end", "reads `allowed`"),
+        ("allowed = false\n          allowed", "rebinds `allowed`"),
+    ] {
+        let gate = format!(
+            "module Gates\n  module Helper\n    def gated\n      allowed = true\n      constraints(lambda do |req|\n          {body}\n        end) do\n        get \"/gated\", to: \"articles#index\"\n      end\n    end\n  end\n\n  def self.install!\n    ActionDispatch::Routing::Mapper.include Gates::Helper\n  end\nend\n"
+        );
+        let (_, errors) = emit_and_run::real_blog()
+            .write("lib/gates.rb", &gate)
+            .write("config/initializers/gates.rb", "Gates.install!\n")
+            .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  gated\n")
+            .emit(roundhouse::project::BuildTarget::Ruby);
+        assert!(errors.iter().any(|e| e.contains("not drawn") && e.contains(why)), "{why}: {errors:#?}");
+    }
+}
