@@ -2336,8 +2336,13 @@ fn conditional_definitions(
             methods: Vec::new(),
             nested: Vec::new(),
             declarations: Vec::new(),
+            statements: Vec::new(),
         };
         for stmt in stmts {
+            if visibility::self_write(&stmt).is_some() {
+                arm.statements.push(ingest_expr(&stmt, file)?);
+                continue;
+            }
             // Its library class is ingested by `conditional_declaration_classes`.
             let declared = stmt
                 .as_class_node()
@@ -6093,9 +6098,9 @@ fn block_form_concern_filter(stmt: &ruby_prism::Node<'_>, file: &str) -> Option<
         return None;
     }
     let kind = match constant_id_str(&call.name()) {
-        "before_action" => FilterKind::Before,
-        "around_action" => FilterKind::Around,
-        "after_action" => FilterKind::After,
+        "before_action" | "append_before_action" => FilterKind::Before,
+        "around_action" | "append_around_action" => FilterKind::Around,
+        "after_action" | "append_after_action" => FilterKind::After,
         _ => return None,
     };
     let expr = ingest_expr(stmt, file).ok()?;

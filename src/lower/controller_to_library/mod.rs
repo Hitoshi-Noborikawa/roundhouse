@@ -32,6 +32,7 @@ mod params_values;
 mod params_sources;
 mod permit_splat;
 mod typed_update;
+mod respond_with;
 pub mod params_wrapper;
 pub mod rewrites;
 pub mod util;
@@ -339,6 +340,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // `permit(*helper)` with a helper answering a literal Symbol list is
     // the same permit written inline; inline it before anything reads
     // the permit lists (`permit_splat`).
+    let responders_with_behavior = respond_with::responders_with_behavior(library_classes);
     let inlined = self::permit_splat::inline_permit_splats(controllers);
     let controllers: &[Controller] = inlined.as_deref().unwrap_or(controllers);
     // Scan source-shape action bodies for `permit(...)` declarations.
@@ -394,7 +396,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 library_classes,
                 concern_spliced_actions,
             );
-            let methods = build_methods(controller, controllers, &params_specs, &assoc_registry, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref(), action_check.as_ref());
+            let methods = build_methods(controller, controllers, &params_specs, &assoc_registry, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref(), action_check.as_ref(), &responders_with_behavior);
             all_methods.push((methods, controller));
         }
         subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
@@ -707,6 +709,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         None,
         None,
         None,
+        &crate::det::HashSet::default(),
     );
     methods.extend(collect_attr_accessor_methods(controller));
     apply_alias_methods(controller, &mut methods);
@@ -1159,6 +1162,7 @@ fn build_methods(
     // Rails' ParamsWrapper for this controller, when its requests get one.
     wrapper: Option<&self::params_wrapper::WrapperSpec>,
     action_check: Option<&crate::det::HashSet<Symbol>>,
+    responders_with_behavior: &crate::det::HashSet<String>,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = controller.class_methods().cloned().collect();
 
@@ -1438,7 +1442,7 @@ fn build_methods(
             params_specs, assocs, json_actions,
             text_format_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, inferred_params,
-            &deferred_renders, &mut deferred_tails,
+            &deferred_renders, &mut deferred_tails, responders_with_behavior,
         ));
     }
     if let Some((mut preamble, mut wraps)) = pending_dispatcher {
@@ -1487,7 +1491,7 @@ fn build_methods(
             params_specs, assocs, json_actions,
             text_format_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, inferred_params,
-            &no_deferred, &mut crate::det::HashMap::default(),
+            &no_deferred, &mut crate::det::HashMap::default(), responders_with_behavior,
         ));
     }
     // Public methods no route reaches are helpers/filters, not actions:
@@ -1500,7 +1504,7 @@ fn build_methods(
             params_specs, assocs, json_actions,
             text_format_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, inferred_params,
-            &no_deferred, &mut crate::det::HashMap::default(),
+            &no_deferred, &mut crate::det::HashMap::default(), responders_with_behavior,
         ));
     }
 
@@ -3202,6 +3206,7 @@ fn action_to_method(
     inferred_params: Option<&crate::det::HashMap<(ClassId, Symbol), Vec<Ty>>>,
     deferred_renders: &crate::det::HashSet<Symbol>,
     deferred_out: &mut crate::det::HashMap<Symbol, Expr>,
+    responders_with_behavior: &crate::det::HashSet<String>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals, optionals (so `def get_from_cache(opts = {})`
@@ -3261,8 +3266,27 @@ fn action_to_method(
         can_respond_within(&a.body, &resolve, &mut std::collections::BTreeSet::new())
     };
     let inheritor_modules = inheritor_view_modules(controller, all_controllers_for_params);
+    let chain: Vec<&Controller> = std::iter::once(controller).chain(ancestor_chain(controller, all_controllers_for_params).into_iter().rev()).collect();
+    let responder_expr = chain.iter().find_map(|c| {
+        c.body.iter().find_map(|item| {
+            let crate::dialect::ControllerBodyItem::Unknown { expr, .. } = item else { return None };
+            match &*expr.node {
+                ExprNode::Assign { target: crate::expr::LValue::Attr { recv, name }, value } if matches!(&*recv.node, ExprNode::SelfRef) && name.as_str() == "responder" => Some(value),
+                // The setter call a class body writes as `self.responder = v`.
+                ExprNode::Send { recv: Some(recv), method, args, .. } if method.as_str() == "responder=" && matches!(&*recv.node, ExprNode::SelfRef) && args.len() == 1 => args.first(),
+                _ => None,
+            }
+        })
+    });
+    // Past `ancestor_chain`'s depth a further ancestor may declare other formats.
+    let chain_complete = !chain.last().and_then(|c| c.parent.as_ref()).is_some_and(|p| all_controllers_for_params.iter().any(|c| &c.name == p));
+    let responder_keeps_defaults = !responder_expr.is_some_and(|r| respond_with::names_responder_with_behavior(r, responders_with_behavior));
+    let respond_with_body = (chain_complete && responder_keeps_defaults && respond_with::html_only_declared(&chain) == Some(true)).then(|| {
+        let has_template = chain.iter().any(|c| views_module_name(c).is_some_and(|m| view_ivars.contains_key(&(m, a.name.as_str().to_string()))));
+        respond_with::lower(&a.body, &respond_with::Facts { action: is_public.then_some(a.name.as_str()), has_template, responder: responder_expr })
+    });
     let (body, deferred_tail) = lower_action_body(
-        &a.body,
+        respond_with_body.as_ref().unwrap_or(&a.body),
         controller,
         a.name.as_str(),
         privs,

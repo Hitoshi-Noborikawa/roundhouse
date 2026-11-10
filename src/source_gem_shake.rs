@@ -65,10 +65,85 @@ type MethodKey = (String, bool, String);
 type Call = (Target, String);
 type Const = (Option<String>, String);
 
+/// `.name` and `.name =` in Ruby source.
+fn called_names(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'.' && bytes.get(i + 1).is_some_and(|b| b.is_ascii_lowercase() || *b == b'_') {
+            let start = i + 1;
+            let mut end = start;
+            while bytes.get(end).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                end += 1;
+            }
+            if bytes.get(end).is_some_and(|b| *b == b'?' || *b == b'!') {
+                end += 1;
+            }
+            let name = &source[start..end];
+            let rest = source[end..].trim_start();
+            if rest.starts_with('=') && !rest.starts_with("==") && !rest.starts_with("=~") && !rest.starts_with("=>") {
+                out.push(format!("{name}="));
+            }
+            out.push(name.to_string());
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 pub(crate) fn shake(app: &App) -> Option<App> {
     let gems = Gems::of(app)?;
     let reached = gems.reach(app);
-    gems.trim(app, &reached)
+    let mut trimmed = gems.trim(app, &reached);
+    // Nor a gem's controller no route dispatches to (`unreachable_views::unrouted_gem_controllers`).
+    let unrouted = crate::ingest::unreachable_views::unrouted_gem_controllers(app);
+    if app.controllers.iter().any(|c| unrouted.contains(c.name.0.as_str())) {
+        trimmed.get_or_insert_with(|| app.clone()).controllers.retain(|c| !unrouted.contains(c.name.0.as_str()));
+    }
+    trimmed
+}
+
+/// An error in a gem's code the program does not reach becomes a note: the Spinel tree leaves that
+/// code out (`shake`), and the ruby family runs the installed gem, so no emitted program holds it.
+pub fn demote_unreached_gem_errors(app: &App, diags: &mut [crate::diagnostic::Diagnostic]) {
+    use crate::diagnostic::Severity;
+    if !diags.iter().any(|d| d.severity == Severity::Error) {
+        return;
+    }
+    let Some(gems) = Gems::of(app) else { return };
+    let reached = gems.reach(app);
+    let mut unreached: Vec<crate::span::Span> = Vec::new();
+    for c in app.library_classes.iter().filter(|c| gems.is_gem(c)) {
+        let owner = c.name.0.as_str();
+        let class_reached = reached.classes.contains(owner);
+        for m in &c.methods {
+            let kept = class_reached
+                && m.body.decisions & crate::expr::UNCALLED_DEFINER == 0
+                && (matches!(m.kind, AccessorKind::AttributeReader | AccessorKind::AttributeWriter)
+                    || IMPLICIT.contains(&m.name.as_str())
+                    || reached.methods.contains(&(owner.to_string(), m.receiver == MethodReceiver::Class, m.name.to_string())));
+            if !kept && !m.body.span.is_synthetic() {
+                unreached.push(m.body.span);
+            }
+        }
+        if !class_reached {
+            unreached.extend(c.include_spans.iter().copied().filter(|s| !s.is_synthetic()));
+            unreached.extend(c.constants.iter().map(|(_, v)| v.span).filter(|s| !s.is_synthetic()));
+        }
+    }
+    // Not only library classes: a gem's controller no route dispatches to runs no action either.
+    let unrouted = crate::ingest::unreachable_views::unrouted_gem_controllers(app);
+    for c in app.controllers.iter().filter(|c| unrouted.contains(c.name.0.as_str())) {
+        unreached.extend(c.actions().map(|a| a.body.span).chain(c.class_methods().map(|m| m.body.span)).filter(|s| !s.is_synthetic()));
+    }
+    let within = |span: &crate::span::Span| unreached.iter().any(|u| u.file == span.file && u.start <= span.start && span.end <= u.end);
+    for d in diags.iter_mut().filter(|d| d.severity == Severity::Error && !d.span.is_synthetic() && within(&d.span)) {
+        d.severity = Severity::Info;
+        d.message.push_str(" (in a gem's code the app does not reach: the Spinel tree leaves it out)");
+    }
 }
 
 /// What the program reaches: classes by name, methods by owner, side and name.
@@ -233,8 +308,31 @@ impl<'a> Gems<'a> {
     /// The bodies outside the gems, and the app's own classes, `self` known in their methods.
     fn roots(&self, app: &App) -> (Vec<Call>, Vec<Const>, Vec<String>) {
         let mut s = Scan { context: None, calls: Vec::new(), consts: Vec::new() };
+        // Not from a gem controller no route dispatches to: what it calls is never run.
+        let unrouted = crate::ingest::unreachable_views::unrouted_gem_controllers(app);
+        // The controllers' bodies, not their files: a library class beside one in the file is still reached.
+        let dead: Vec<crate::span::Span> = app
+            .controllers
+            .iter()
+            .filter(|c| unrouted.contains(c.name.0.as_str()))
+            .flat_map(|c| c.actions().map(|a| a.body.span).chain(c.class_methods().map(|m| m.body.span)).collect::<Vec<_>>())
+            .filter(|s| !s.is_synthetic())
+            .collect();
+        let in_dead = |span: &crate::span::Span| dead.iter().any(|d| d.file == span.file && d.start <= span.start && span.end <= d.end);
+        // Not every body in a gem's files: what a file runs as it loads (`ingest::gem_load_program`) and its `app/` controllers are no library class's, so the walk never reads them.
+        let mut walked: HashMap<FileId, Vec<(u32, u32)>> = HashMap::default();
+        for c in app.library_classes.iter().filter(|c| self.is_gem(c)) {
+            let spans = c.methods.iter().map(|m| m.body.span)
+                .chain(c.constants.iter().map(|(_, v)| v.span))
+                .chain(c.unknown_calls.iter().map(|e| e.span))
+                .chain(c.class_ivar_initializers.iter().map(|e| e.span));
+            for span in spans.filter(|s| !s.is_synthetic()) {
+                walked.entry(span.file).or_default().push((span.start, span.end));
+            }
+        }
+        let in_walked = |span: &crate::span::Span| walked.get(&span.file).is_some_and(|w| w.iter().any(|(start, end)| *start <= span.start && span.end <= *end));
         crate::lower::for_each_emit_body_ref(app, &mut |e| {
-            if e.span.file.0 == 0 || !mounted(app, e.span.file) {
+            if (e.span.file.0 == 0 || !mounted(app, e.span.file) || !in_walked(&e.span)) && !in_dead(&e.span) {
                 scan(e, &mut s);
             }
         });
@@ -254,6 +352,14 @@ impl<'a> Gems<'a> {
             if let Some(p) = &m.parent {
                 consts.push((None, p.0.to_string()));
             }
+        }
+        // Not only the app's code: the stack builds each middleware (`Warden::Manager.new(app) { … }`) and calls it.
+        for class in &app.gem_middlewares {
+            consts.push((None, class.clone()));
+        }
+        // Not parsed: the block is Ruby source, so every name called on something in it is reached on any receiver.
+        for block in app.gem_middleware_blocks.values() {
+            calls.extend(called_names(block).into_iter().map(|name| (Target::Any, name)));
         }
         (calls, consts, live)
     }
@@ -325,6 +431,7 @@ impl<'a> Gems<'a> {
             dynamic: Vec::new(),
         };
         let (calls, consts, live) = self.roots(app);
+
         for c in live {
             walk.class(c);
         }
@@ -604,6 +711,12 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
                             _ => Target::Any,
                         },
                         Some(Ty::Class { id, .. }) => Target::Virtual(id.0.to_string(), false),
+                        // Not any receiver: a builtin's methods are its own, and only a gem reopening that class could answer.
+                        Some(Ty::Array { .. } | Ty::Tuple { .. }) => Target::Virtual("Array".to_string(), false),
+                        Some(Ty::Hash { .. } | Ty::Record { .. }) => Target::Virtual("Hash".to_string(), false),
+                        Some(Ty::Str) => Target::Virtual("String".to_string(), false),
+                        Some(Ty::Sym) => Target::Virtual("Symbol".to_string(), false),
+                        Some(Ty::Int) => Target::Virtual("Integer".to_string(), false),
                         _ => Target::Any,
                     },
                 },
@@ -942,7 +1055,7 @@ mod tests {
             &[(
                 "app/models/article.rb",
                 "class Article < ApplicationRecord\n",
-                "class Article < ApplicationRecord\n  def tally\n    Tally::Meter.build(title)\n  end\n\n  def counted\n    Tally::Meter.new.count_up(2)\n  end\n\n  def readings(items)\n    Tally::Meter.new.readings(items)\n  end\n\n  def kinds\n    Tally::Meter.new.kinds\n  end\n\n  def first_reading(items)\n    items.first.reading\n  end\n\n  def tune(name)\n    Tally::Dial.new.send(name.to_s + \"=\", 1)\n  end\n\n",
+                "class Article < ApplicationRecord\n  def tally\n    Tally::Meter.build(title)\n  end\n\n  def counted\n    Tally::Meter.new.count_up(2)\n  end\n\n  def readings(items)\n    Tally::Meter.new.readings(items)\n  end\n\n  def kinds\n    Tally::Meter.new.kinds\n  end\n\n  def first_reading(items)\n    items.first.reading\n  end\n\n  def built(kind)\n    kind.build(1)\n  end\n\n  def down\n    [1, 2].count_down(1)\n  end\n\n  def tune(name)\n    Tally::Dial.new.send(name.to_s + \"=\", 1)\n  end\n\n",
             )],
         );
         let reached = reached(&app);
@@ -961,6 +1074,7 @@ mod tests {
         ] {
             assert!(reached.methods.contains(&method(owner, class_side, name)), "{owner} {name}: {reached:#?}");
         }
+        // Not reached from `[1, 2].count_down(1)`: an Array's methods are its own.
         assert!(!reached.methods.contains(&method("Tally::Counting", false, "count_down")), "{reached:#?}");
         assert!(!reached.classes.contains("Tally::Spare"), "{reached:#?}");
     }

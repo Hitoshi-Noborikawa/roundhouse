@@ -3605,6 +3605,10 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         // and renders every element as a Story; left at the union, each
         // read off it (`ms.comments.build`) was gradual.
         "flatten" => Ty::Array { elem: std::sync::Arc::new(flatten_elem(elem)) },
+        // Ruby's `grep`/`grep_v`: the matching elements, or what the block answers for each.
+        "grep" | "grep_v" => Ty::Array { elem: std::sync::Arc::new(block_ret.cloned().unwrap_or_else(|| elem.clone())) },
+        // ActiveSupport's `extract_options!` (`lower::enumerable_ext`): the trailing Hash it removes, or a new one.
+        "extract_options!" => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
         "each" | "reverse_each" | "select" | "filter" | "reject"
         | "sort" | "sort_by" | "reverse" | "compact" | "uniq"
         // `drop`/`take` (and their block forms) return a same-element

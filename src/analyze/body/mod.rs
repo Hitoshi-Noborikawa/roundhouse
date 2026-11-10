@@ -138,6 +138,10 @@ pub struct Ctx {
     pub class_objects: crate::det::HashSet<Symbol>,
     /// Locals an `is_a?(Class)` / `is_a?(Module)` guard proved class objects of unknown identity: Module queries only (`answers_module_queries`).
     pub query_class_objects: crate::det::HashSet<Symbol>,
+    /// The method's parameters no write in its body rebinds but `||=`: their type is what the call
+    /// sites pass, so a `p ||= v` over one typed never nil nor false never assigns (`expr::DEAD_OR_ASSIGN`).
+    /// Not any local's: a destructured `before, after = row` types an element it may not hold.
+    pub call_site_params: crate::det::HashSet<Symbol>,
     /// Module/class-level typed constants such as
     /// `STATUS_CODES = { ok: 200, ... }.freeze`. Rubydex IDs resolve
     /// source-backed reads; this scope types generated expressions.
@@ -204,6 +208,8 @@ pub struct Ctx {
 /// Rails schema + conventions; the body-typer reads it.
 #[derive(Default, Clone)]
 pub struct ClassInfo {
+    /// `request.env[KEY]` a middleware on the stack writes (`ActionDispatch::Request` only).
+    pub env_keys: HashMap<String, Ty>,
     pub upload_array_fields: std::collections::BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), std::collections::BTreeSet<Symbol>>,
     /// Kind of the indexed source declaration; never inferred from its name.
     pub is_module: bool,
@@ -898,6 +904,11 @@ impl<'a> BodyTyper<'a> {
         if root {
             *self.scope_bindings.borrow_mut() = Some(active_storage::ScopeBindings::of(expr));
         }
+        if let ExprNode::If { cond, else_branch, .. } = &*expr.node
+            && self.superclass_never_responds(cond, ctx)
+        {
+            *expr = else_branch.clone();
+        }
         // A direct self receiver keeps main's lookup type and identity evidence.
         let ty = if receiver && matches!(&*expr.node, ExprNode::SelfRef) {
             ctx.self_ty.clone().unwrap_or_else(unknown)
@@ -1216,6 +1227,48 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Send { recv: Some(r), method, .. } => self.class_factory_receiver(r, method, ctx),
             _ => false,
         }
+    }
+
+    /// `superclass.respond_to?(:m)` on the class side of a class nothing
+    /// subclasses, whose parent's class side answers no `m`: Devise's
+    /// `Models.config` readers ask it of each model before falling back
+    /// to `Devise.m`. Only so, as the receiver is then that one parent.
+    fn superclass_never_responds(&self, cond: &Expr, ctx: &Ctx) -> bool {
+        let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*cond.node else { return false };
+        let [asked] = args.as_slice() else { return false };
+        let ExprNode::Lit { value: Literal::Sym { value: asked } } = &*asked.node else { return false };
+        let ExprNode::Send { recv: inner, method: sup, args: sup_args, block: None, .. } = &*r.node else { return false };
+        if method.as_str() != "respond_to?" || sup.as_str() != "superclass" || !sup_args.is_empty()
+            || !inner.as_ref().is_none_or(|i| matches!(&*i.node, ExprNode::SelfRef)) || !ctx.class_side
+        {
+            return false;
+        }
+        let Some(Ty::Class { id, .. }) = ctx.self_ty.as_ref() else { return false };
+        let classes = self.classes();
+        let Some(parent) = classes.get(id).and_then(|c| c.parent.clone()) else { return false };
+        if classes.values().any(|c| c.parent.as_ref() == Some(id)) {
+            return false;
+        }
+        self.class_side_lacks(&parent, asked)
+    }
+
+    /// Whether `of`'s class side, its parents' and what they extend define no `method` nor a fallback for it.
+    fn class_side_lacks(&self, of: &ClassId, method: &Symbol) -> bool {
+        let fallbacks = [method.clone(), Symbol::from("method_missing"), Symbol::from("respond_to_missing?")];
+        let mut current = Some(of.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return !crate::emit::audit::OBJECT_METHODS.contains(&method.as_str()) };
+            let Some(cls) = self.classes().get(&id) else { return false };
+            if fallbacks.iter().any(|m| cls.class_methods.contains_key(m) || cls.source_class_methods.contains(m))
+                || cls.unknown_class_side_hook
+                || cls.class_side_hook_methods.contains(method)
+                || cls.class_method_extensions.iter().any(|m| self.classes().get(m).is_none() || self.lookup_in_module(m, method).is_some())
+            {
+                return false;
+            }
+            current = cls.parent.clone();
+        }
+        false
     }
 
     fn each_branch_is_class_object(&self, expr: &Expr, ctx: &Ctx) -> bool {
@@ -2716,6 +2769,18 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Untyped;
                 }
+                // Not the env's untyped value: a middleware on the stack writes this key on every request (`env["warden"] = Proxy.new`).
+                if method.as_str() == "[]"
+                    && let (Some(receiver), [key]) = (recv.as_ref(), args.as_slice())
+                    && let ExprNode::Lit { value: crate::expr::Literal::Str { value: key } } = &*key.node
+                    && let ExprNode::Send { recv: Some(request), method: env, args: env_args, .. } = &*receiver.node
+                    && env.as_str() == "env"
+                    && env_args.is_empty()
+                    && let Some(Ty::Class { id, .. }) = request.ty.as_ref()
+                    && let Some(ty) = self.classes().get(id).and_then(|c| c.env_keys.get(key.as_str()))
+                {
+                    return ty.clone();
+                }
                 let receiver_is_instance = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx));
                 let instance_receiver = receiver_is_instance
                     && recv_ty.as_ref().is_some_and(instance_shaped);
@@ -3398,7 +3463,16 @@ impl<'a> BodyTyper<'a> {
                         if !matches!(&*e.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
                             forget_class_object_writes(e, &mut local_ctx);
                         }
+                        let dead_or_assign = matches!(&*e.node, ExprNode::OpAssign { target: LValue::Var { name, .. }, op: crate::expr::OpAssignOp::OrOr, .. }
+                            if local_ctx.call_site_params.contains(name) && local_ctx.local_bindings.get(name).is_some_and(never_falsy));
+                        if dead_or_assign { e.decisions |= crate::expr::DEAD_OR_ASSIGN } else { e.decisions &= !crate::expr::DEAD_OR_ASSIGN }
                         last = self.analyze_expr(e, &local_ctx);
+                        if let (true, ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }) = (dead_or_assign, &*e.node)
+                            && let Some(kept) = local_ctx.local_bindings.get(name)
+                        {
+                            e.ty = Some(kept.clone());
+                            last = kept.clone();
+                        }
                         // A self binding gives `self` its declared type from
                         // the next statement to the end of this body, blocks
                         // inside included. It changes only how `self` types:
@@ -3431,6 +3505,15 @@ impl<'a> BodyTyper<'a> {
                             // Before the binding insert below: the lambda body
                             // was typed in this `local_ctx`, without its own name.
                             lambda_local::remember(&mut lambda_locals, i, e, &local_ctx);
+                        }
+                        // Warden's `strategy ||= Class.new(Base)` over a `strategy = nil` parameter: a class either way, of no one identity.
+                        if let ExprNode::OpAssign { target: LValue::Var { name, .. }, op: crate::expr::OpAssignOp::OrOr, value } = &*e.node
+                            && !local_ctx.class_objects.contains(name)
+                            && !local_ctx.query_class_objects.contains(name)
+                            && matches!(local_ctx.local_bindings.get(name).map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "Class" | "Module"))
+                            && self.each_branch_is_class_object(value, &local_ctx)
+                        {
+                            local_ctx.query_class_objects.insert(name.clone());
                         }
                     }
                     // Before the binding insert and the seed/narrowing
@@ -3576,7 +3659,9 @@ impl<'a> BodyTyper<'a> {
                     {
                         local_ctx.ivar_bindings.insert(name, ty);
                     }
-                    if let ExprNode::OpAssign { target, .. } = &*e.node {
+                    if let ExprNode::OpAssign { target, .. } = &*e.node
+                        && e.decisions & crate::expr::DEAD_OR_ASSIGN == 0
+                    {
                         if let Some(ty) = e.ty.clone() {
                             if !matches!(ty, Ty::Var { .. }) {
                                 match target {
@@ -7442,6 +7527,36 @@ fn falsy_part(ty: &Ty) -> Option<Ty> {
         t if never_falsy(t) => None,
         t => Some(t.clone()),
     }
+}
+
+/// The locals `body` binds other than by `x ||= v`: an assignment, a destructuring, another compound assignment, a block parameter.
+pub(crate) fn rebound_locals(body: &Expr) -> crate::det::HashSet<Symbol> {
+    fn walk(e: &Expr, out: &mut crate::det::HashSet<Symbol>) {
+        match &*e.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
+                out.insert(name.clone());
+            }
+            ExprNode::OpAssign { target: LValue::Var { name, .. }, op, .. } if !matches!(op, crate::expr::OpAssignOp::OrOr) => {
+                out.insert(name.clone());
+            }
+            ExprNode::MultiAssign { targets, .. } => {
+                for t in targets {
+                    if let LValue::Var { name, .. } = t {
+                        out.insert(name.clone());
+                    }
+                }
+            }
+            ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } => {
+                out.extend(params.iter().chain(rest_param.iter()).chain(block_param.iter()).cloned());
+                out.extend(extra_params.iter().map(|p| p.name.clone()));
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, out));
+    }
+    let mut out = crate::det::HashSet::default();
+    walk(body, &mut out);
+    out
 }
 
 /// Can this type NEVER be Ruby-falsy?
